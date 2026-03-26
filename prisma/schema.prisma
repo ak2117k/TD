@@ -1,0 +1,274 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// Market Data
+// ============================================
+
+model Instrument {
+  id        String   @id @default(cuid())
+  symbol    String
+  token     String
+  name      String
+  exchange  String
+  segment   String
+  lotSize   Int      @default(1)
+  tickSize  Float    @default(0.05)
+  expiry    DateTime?
+  strike    Float?
+  optionType String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  candles   Candle[]
+  oiData    OISnapshot[]
+  signals   Signal[]
+  trades    Trade[]
+  alerts    Alert[]
+
+  @@unique([symbol, exchange, token])
+  @@index([exchange, segment])
+  @@index([symbol])
+  @@map("instruments")
+}
+
+model Candle {
+  id           String   @id @default(cuid())
+  instrumentId String
+  instrument   Instrument @relation(fields: [instrumentId], references: [id])
+  timeframe    String   // 1m, 5m, 15m, 1h, 1d
+  timestamp    DateTime
+  open         Float
+  high         Float
+  low          Float
+  close        Float
+  volume       BigInt
+
+  @@unique([instrumentId, timeframe, timestamp])
+  @@index([instrumentId, timeframe, timestamp])
+  @@map("candles")
+}
+
+model OISnapshot {
+  id           String   @id @default(cuid())
+  instrumentId String
+  instrument   Instrument @relation(fields: [instrumentId], references: [id])
+  oi           BigInt
+  oiChange     BigInt   @default(0)
+  volume       BigInt   @default(0)
+  timestamp    DateTime
+
+  @@index([instrumentId, timestamp])
+  @@map("oi_snapshots")
+}
+
+// ============================================
+// Signals & Trades
+// ============================================
+
+model Signal {
+  id              String   @id @default(cuid())
+  instrumentId    String
+  instrument      Instrument @relation(fields: [instrumentId], references: [id])
+  side            String   // BUY, SELL
+  entryPrice      Float
+  targetPrice     Float
+  stoplossPrice   Float
+  expectedProfit  Float
+  expectedLoss    Float
+  riskRewardRatio Float
+  confidence      String   // LOW, MEDIUM, HIGH, VERY_HIGH
+  confidenceScore Int      // 0-100
+  strategy        String
+  timeframe       String
+  reason          String
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  expiresAt       DateTime?
+
+  trades Trade[]
+
+  @@index([isActive, confidenceScore])
+  @@index([strategy])
+  @@index([createdAt])
+  @@map("signals")
+}
+
+model Trade {
+  id              String   @id @default(cuid())
+  instrumentId    String
+  instrument      Instrument @relation(fields: [instrumentId], references: [id])
+  signalId        String?
+  signal          Signal?  @relation(fields: [signalId], references: [id])
+  orderId         String?  // Broker order ID
+  side            String
+  orderType       String
+  positionType    String
+  quantity        Int
+  entryPrice      Float?
+  exitPrice       Float?
+  stoploss        Float?
+  target          Float?
+  pnl             Float?
+  pnlPercent      Float?
+  fees            Float    @default(0)
+  status          String   @default("PENDING")
+  strategy        String?
+  isPaperTrade    Boolean  @default(true)
+  entryTime       DateTime?
+  exitTime        DateTime?
+  notes           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([strategy])
+  @@index([isPaperTrade])
+  @@map("trades")
+}
+
+// ============================================
+// Portfolio & Performance
+// ============================================
+
+model DailyPerformance {
+  id                  String   @id @default(cuid())
+  date                DateTime @unique
+  totalPnl            Float    @default(0)
+  realizedPnl         Float    @default(0)
+  unrealizedPnl       Float    @default(0)
+  totalTrades         Int      @default(0)
+  winningTrades       Int      @default(0)
+  losingTrades        Int      @default(0)
+  maxDrawdown         Float    @default(0)
+  capitalDeployed     Float    @default(0)
+
+  @@index([date])
+  @@map("daily_performance")
+}
+
+// ============================================
+// News
+// ============================================
+
+model NewsArticle {
+  id              String   @id @default(cuid())
+  title           String
+  summary         String?
+  source          String
+  url             String   @unique
+  category        String   // indian, global, sector, company
+  sentiment       String?  // bullish, bearish, neutral
+  sentimentScore  Float?   // -1.0 to 1.0
+  relatedSymbols  String[] @default([])
+  publishedAt     DateTime
+  fetchedAt       DateTime @default(now())
+
+  @@index([category, publishedAt])
+  @@index([sentiment])
+  @@map("news_articles")
+}
+
+// ============================================
+// AI & Learning
+// ============================================
+
+model AITradeAnalysis {
+  id            String   @id @default(cuid())
+  tradeId       String
+  analysis      String   // JSON: what went right/wrong
+  suggestions   String   // JSON: improvement recommendations
+  patterns      String   // JSON: detected patterns
+  score         Float    // AI performance score for this trade
+  createdAt     DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("ai_trade_analyses")
+}
+
+model AIWeeklyReport {
+  id              String   @id @default(cuid())
+  weekStart       DateTime
+  weekEnd         DateTime
+  summary         String
+  strengths       String   // JSON array
+  weaknesses      String   // JSON array
+  recommendations String   // JSON array
+  overallScore    Float
+  createdAt       DateTime @default(now())
+
+  @@index([weekStart])
+  @@map("ai_weekly_reports")
+}
+
+// ============================================
+// Settings & Configuration
+// ============================================
+
+model UserSettings {
+  id                     String   @id @default(cuid())
+  autoTradeMode          String   @default("OFF")
+  paperTrading           Boolean  @default(true)
+  maxDailyLoss           Float    @default(5000)
+  maxCapitalPerTrade     Float    @default(50000)
+  maxConcurrentPositions Int      @default(5)
+  defaultRiskReward      Float    @default(2.0)
+  activeStrategies       String[] @default(["gamma-blast"])
+  preferredSegments      String[] @default(["OPTIONS", "EQUITY"])
+  tradingHoursOnly       Boolean  @default(true)
+  notificationsEnabled   Boolean  @default(true)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@map("user_settings")
+}
+
+// ============================================
+// Alerts
+// ============================================
+
+model Alert {
+  id           String   @id @default(cuid())
+  instrumentId String?
+  instrument   Instrument? @relation(fields: [instrumentId], references: [id])
+  type         String   // price, oi_spike, news, pnl
+  condition    String   // above, below, spike, threshold
+  value        Float?
+  message      String?
+  isActive     Boolean  @default(true)
+  triggeredAt  DateTime?
+  createdAt    DateTime @default(now())
+
+  @@index([isActive, type])
+  @@map("alerts")
+}
+
+// ============================================
+// Backtest
+// ============================================
+
+model BacktestRun {
+  id             String   @id @default(cuid())
+  strategy       String
+  parameters     String   // JSON
+  startDate      DateTime
+  endDate        DateTime
+  totalTrades    Int
+  winRate        Float
+  totalReturn    Float
+  maxDrawdown    Float
+  sharpeRatio    Float
+  results        String   // JSON: detailed results
+  createdAt      DateTime @default(now())
+
+  @@index([strategy, createdAt])
+  @@map("backtest_runs")
+}
