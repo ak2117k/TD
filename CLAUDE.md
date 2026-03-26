@@ -66,22 +66,26 @@ TD Automation is an automated trading platform for the Indian market. It integra
 
 ## 4. Architecture
 
-### Monolith + Bull Queue Workers + Python AI Sidecar
+### Monolith + Persistent Feed Service + Bull Queue Workers + Python AI Sidecar
 
 ```
 Frontend (React) ←→ Backend (NestJS) ←→ AI Engine (Python)
                          ↕
+                   MarketFeedService (persistent WebSocket, max 50 tokens)
+                         ↕
                    Bull Queues (Redis)
-                   ┌─────────────────┐
-                   │ live-feed       │ → Market data streaming
-                   │ signal-scan     │ → Algorithm execution
-                   │ auto-trade      │ → Order execution
-                   │ oi-tracker      │ → OI change detection
-                   │ news-fetch      │ → News aggregation
-                   └─────────────────┘
+                   ┌─────────────────────┐
+                   │ signal-scan         │ → Algorithm execution
+                   │ auto-trade          │ → Order execution
+                   │ oi-tracker          │ → OI change detection
+                   │ news-fetch          │ → News aggregation
+                   │ daily-housekeeping  │ → Data cleanup & refresh
+                   └─────────────────────┘
                          ↕
               PostgreSQL + TimescaleDB
 ```
+
+**Note**: MarketFeedService is a persistent long-lived WebSocket connection, NOT a Bull queue worker. Angel One limits WebSocket to ~50 tokens simultaneously — we use subscription rotation for scanning.
 
 ### Module Pattern (NestJS)
 Every module follows:
