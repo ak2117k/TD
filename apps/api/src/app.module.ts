@@ -12,6 +12,8 @@ import { BROKER_ADAPTER_TOKEN } from './modules/market-data/services/market-feed
 import { SettingsModule } from './modules/settings/settings.module';
 import { AlertsModule } from './modules/alerts/alerts.module';
 import { SignalGeneratorModule } from './modules/signal-generator/signal-generator.module';
+import { PortfolioModule } from './modules/portfolio/portfolio.module';
+import { TradeEngineModule } from './modules/trade-engine/trade-engine.module';
 
 @Module({
   imports: [
@@ -49,10 +51,14 @@ import { SignalGeneratorModule } from './modules/signal-generator/signal-generat
     // Signal generation — strategy scanning, scoring, WebSocket broadcast
     SignalGeneratorModule,
 
+    // Portfolio tracking & performance analytics
+    PortfolioModule,
+
+    // Trade engine — order execution, position tracking, risk management
+    TradeEngineModule,
+
     // Feature modules (upcoming stages)
-    // TradeEngineModule,
     // AutoTradeModule,
-    // PortfolioModule,
     // NewsModule,
     // AIAdvisorModule,
     // BacktestModule,

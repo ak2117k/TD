@@ -12,6 +12,10 @@ export type {
   TradingSettings,
   AIInsight,
   NewsItem,
+  Trade,
+  TradeEvent,
+  TradeEventType,
+  RiskStatus,
 } from '@td/shared';
 
 export {

@@ -170,6 +170,57 @@ export interface Position {
   pnlPercent: number;
 }
 
+export interface Trade {
+  id: string;
+  symbol: string;
+  exchange: Exchange;
+  side: OrderSide;
+  orderType: OrderType;
+  quantity: number;
+  entryPrice: number;
+  exitPrice?: number;
+  ltp: number;
+  pnl: number;
+  pnlPercent: number;
+  status: TradeStatus;
+  strategy: string;
+  positionType: PositionType;
+  stoploss?: number;
+  target?: number;
+  isPaper: boolean;
+  createdAt: Date;
+  closedAt?: Date;
+}
+
+export type TradeEventType =
+  | 'OPENED'
+  | 'CLOSED'
+  | 'MODIFIED'
+  | 'REJECTED'
+  | 'SL_HIT'
+  | 'TARGET_HIT';
+
+export interface TradeEvent {
+  id: string;
+  timestamp: Date;
+  eventType: TradeEventType;
+  symbol: string;
+  side: OrderSide;
+  price: number;
+  quantity: number;
+  pnl?: number;
+  message?: string;
+}
+
+export interface RiskStatus {
+  dailyLossUsed: number;
+  dailyLossLimit: number;
+  positionsUsed: number;
+  positionsLimit: number;
+  capitalDeployed: number;
+  capitalLimit: number;
+}
+
 // ---- Portfolio ----
 
 export interface PortfolioSummary {

@@ -6,3 +6,7 @@ export { default as TimeframeSelector } from './TimeframeSelector';
 export { default as SymbolSearch } from './SymbolSearch';
 export { default as ChartToolbar } from './ChartToolbar';
 export { default as IndicatorPanel } from './IndicatorPanel';
+export { default as EquityCurve } from './EquityCurve';
+export { default as PnLChart } from './PnLChart';
+export { default as WinRateDonut } from './WinRateDonut';
+export { default as SegmentBreakdown } from './SegmentBreakdown';
