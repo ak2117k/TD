@@ -9,6 +9,8 @@ import { AngelOneAdapterService } from './modules/market-data/services/angel-one
 import { AngelOneAuthService } from './modules/market-data/services/angel-one-auth.service';
 import { AngelOneWebSocketService } from './modules/market-data/services/angel-one-websocket.service';
 import { BROKER_ADAPTER_TOKEN } from './modules/market-data/services/market-feed.service';
+import { SettingsModule } from './modules/settings/settings.module';
+import { AlertsModule } from './modules/alerts/alerts.module';
 
 @Module({
   imports: [
@@ -39,6 +41,10 @@ import { BROKER_ADAPTER_TOKEN } from './modules/market-data/services/market-feed
     // Market data — live feeds, candles, OI, instruments
     MarketDataModule,
 
+    // Settings & Alerts
+    SettingsModule,
+    AlertsModule,
+
     // Feature modules (upcoming stages)
     // TradeEngineModule,
     // SignalGeneratorModule,
@@ -46,10 +52,8 @@ import { BROKER_ADAPTER_TOKEN } from './modules/market-data/services/market-feed
     // PortfolioModule,
     // NewsModule,
     // AIAdvisorModule,
-    // AlertsModule,
     // BacktestModule,
     // OptionsChainModule,
-    // SettingsModule,
   ],
   providers: [
     // Angel One broker services

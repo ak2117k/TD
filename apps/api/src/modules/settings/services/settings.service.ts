@@ -1,0 +1,99 @@
+import {
+  Injectable,
+  Logger,
+  HttpException,
+  HttpStatus,
+} from '@nestjs/common';
+import { PrismaService } from '../../../common/prisma/prisma.service';
+import { UpdateSettingsDto } from '../dto/settings.dto';
+import { UserSettings } from '@prisma/client';
+
+const DEFAULT_SETTINGS = {
+  paperTrading: true,
+  maxDailyLoss: 5000,
+  maxCapitalPerTrade: 50000,
+  maxConcurrentPositions: 5,
+  defaultRiskReward: 2.0,
+  autoTradeMode: 'OFF',
+  activeStrategies: ['gamma-blast'],
+  preferredSegments: ['OPTIONS', 'EQUITY'],
+  tradingHoursOnly: true,
+  notificationsEnabled: true,
+};
+
+@Injectable()
+export class SettingsService {
+  private readonly logger = new Logger(SettingsService.name);
+
+  constructor(private readonly prisma: PrismaService) {}
+
+  async getSettings(): Promise<UserSettings> {
+    let settings = await this.prisma.userSettings.findFirst();
+
+    if (!settings) {
+      this.logger.log('No settings found, creating defaults');
+      settings = await this.prisma.userSettings.create({
+        data: DEFAULT_SETTINGS,
+      });
+    }
+
+    return settings;
+  }
+
+  async updateSettings(dto: UpdateSettingsDto): Promise<UserSettings> {
+    const existing = await this.getSettings();
+
+    // Build update data from non-undefined fields
+    const updateData: Record<string, any> = {};
+
+    if (dto.autoTradeMode !== undefined) updateData.autoTradeMode = dto.autoTradeMode;
+    if (dto.paperTrading !== undefined) updateData.paperTrading = dto.paperTrading;
+    if (dto.maxDailyLoss !== undefined) updateData.maxDailyLoss = dto.maxDailyLoss;
+    if (dto.maxCapitalPerTrade !== undefined) updateData.maxCapitalPerTrade = dto.maxCapitalPerTrade;
+    if (dto.maxConcurrentPositions !== undefined) updateData.maxConcurrentPositions = dto.maxConcurrentPositions;
+    if (dto.defaultRiskReward !== undefined) updateData.defaultRiskReward = dto.defaultRiskReward;
+    if (dto.activeStrategies !== undefined) updateData.activeStrategies = dto.activeStrategies;
+    if (dto.preferredSegments !== undefined) updateData.preferredSegments = dto.preferredSegments;
+    if (dto.tradingHoursOnly !== undefined) updateData.tradingHoursOnly = dto.tradingHoursOnly;
+    if (dto.notificationsEnabled !== undefined) updateData.notificationsEnabled = dto.notificationsEnabled;
+
+    if (Object.keys(updateData).length === 0) {
+      throw new HttpException('No fields to update', HttpStatus.BAD_REQUEST);
+    }
+
+    this.logger.log(`Updating settings: ${JSON.stringify(Object.keys(updateData))}`);
+
+    return this.prisma.userSettings.update({
+      where: { id: existing.id },
+      data: updateData,
+    });
+  }
+
+  async resetSettings(): Promise<UserSettings> {
+    // Delete all existing settings
+    await this.prisma.userSettings.deleteMany();
+
+    this.logger.log('Settings reset to defaults');
+
+    return this.prisma.userSettings.create({
+      data: DEFAULT_SETTINGS,
+    });
+  }
+
+  async activateKillSwitch(): Promise<UserSettings> {
+    const existing = await this.getSettings();
+
+    this.logger.warn('KILL SWITCH ACTIVATED — setting autoTradeMode to OFF');
+
+    const updated = await this.prisma.userSettings.update({
+      where: { id: existing.id },
+      data: { autoTradeMode: 'OFF' },
+    });
+
+    this.logger.warn(
+      `Kill switch executed at ${new Date().toISOString()}. All auto-trading disabled.`,
+    );
+
+    return updated;
+  }
+}
