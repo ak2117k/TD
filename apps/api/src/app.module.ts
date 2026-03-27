@@ -11,6 +11,7 @@ import { AngelOneWebSocketService } from './modules/market-data/services/angel-o
 import { BROKER_ADAPTER_TOKEN } from './modules/market-data/services/market-feed.service';
 import { SettingsModule } from './modules/settings/settings.module';
 import { AlertsModule } from './modules/alerts/alerts.module';
+import { SignalGeneratorModule } from './modules/signal-generator/signal-generator.module';
 
 @Module({
   imports: [
@@ -45,9 +46,11 @@ import { AlertsModule } from './modules/alerts/alerts.module';
     SettingsModule,
     AlertsModule,
 
+    // Signal generation — strategy scanning, scoring, WebSocket broadcast
+    SignalGeneratorModule,
+
     // Feature modules (upcoming stages)
     // TradeEngineModule,
-    // SignalGeneratorModule,
     // AutoTradeModule,
     // PortfolioModule,
     // NewsModule,

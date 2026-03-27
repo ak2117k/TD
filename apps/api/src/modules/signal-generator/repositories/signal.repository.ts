@@ -1,0 +1,214 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { PrismaService } from '../../../common/prisma/prisma.service';
+import { SignalFilterDto } from '../dto/signal.dto';
+
+export interface CreateSignalInput {
+  instrumentId: string;
+  side: string;
+  entryPrice: number;
+  targetPrice: number;
+  stoplossPrice: number;
+  expectedProfit: number;
+  expectedLoss: number;
+  riskRewardRatio: number;
+  confidence: string;
+  confidenceScore: number;
+  strategy: string;
+  timeframe: string;
+  reason: string;
+  expiresAt?: Date;
+}
+
+export interface StrategyPerformance {
+  totalSignals: number;
+  totalTrades: number;
+  winningTrades: number;
+  losingTrades: number;
+  winRate: number;
+  averagePnl: number;
+  totalPnl: number;
+}
+
+@Injectable()
+export class SignalRepository {
+  private readonly logger = new Logger(SignalRepository.name);
+
+  constructor(private readonly prisma: PrismaService) {}
+
+  async createSignal(data: CreateSignalInput) {
+    try {
+      return await this.prisma.signal.create({
+        data: {
+          instrumentId: data.instrumentId,
+          side: data.side,
+          entryPrice: data.entryPrice,
+          targetPrice: data.targetPrice,
+          stoplossPrice: data.stoplossPrice,
+          expectedProfit: data.expectedProfit,
+          expectedLoss: data.expectedLoss,
+          riskRewardRatio: data.riskRewardRatio,
+          confidence: data.confidence,
+          confidenceScore: data.confidenceScore,
+          strategy: data.strategy,
+          timeframe: data.timeframe,
+          reason: data.reason,
+          isActive: true,
+          expiresAt: data.expiresAt ?? null,
+        },
+        include: { instrument: true },
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to create signal: ${error instanceof Error ? error.message : error}`,
+      );
+      throw error;
+    }
+  }
+
+  async getActiveSignals() {
+    return this.prisma.signal.findMany({
+      where: { isActive: true },
+      include: { instrument: true },
+      orderBy: { confidenceScore: 'desc' },
+    });
+  }
+
+  async getSignalHistory(filters: SignalFilterDto) {
+    const page = filters.page ?? 1;
+    const limit = filters.limit ?? 20;
+    const skip = (page - 1) * limit;
+
+    const where: any = {};
+
+    if (filters.strategy) {
+      where.strategy = filters.strategy;
+    }
+    if (filters.confidence) {
+      where.confidence = filters.confidence;
+    }
+    if (filters.minScore !== undefined) {
+      where.confidenceScore = { gte: filters.minScore };
+    }
+    if (filters.isActive !== undefined) {
+      where.isActive = filters.isActive;
+    }
+    if (filters.segment) {
+      where.instrument = { segment: filters.segment };
+    }
+    if (filters.from || filters.to) {
+      where.createdAt = {};
+      if (filters.from) {
+        where.createdAt.gte = new Date(filters.from);
+      }
+      if (filters.to) {
+        where.createdAt.lte = new Date(filters.to);
+      }
+    }
+
+    const [data, total] = await Promise.all([
+      this.prisma.signal.findMany({
+        where,
+        include: { instrument: true },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.signal.count({ where }),
+    ]);
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
+  async deactivateSignal(id: string) {
+    try {
+      return await this.prisma.signal.update({
+        where: { id },
+        data: { isActive: false },
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to deactivate signal ${id}: ${error instanceof Error ? error.message : error}`,
+      );
+      throw error;
+    }
+  }
+
+  async deactivateExpiredSignals(maxAgeMinutes: number): Promise<number> {
+    const cutoff = new Date(Date.now() - maxAgeMinutes * 60 * 1000);
+
+    try {
+      const result = await this.prisma.signal.updateMany({
+        where: {
+          isActive: true,
+          OR: [
+            { createdAt: { lt: cutoff } },
+            { expiresAt: { lt: new Date() } },
+          ],
+        },
+        data: { isActive: false },
+      });
+
+      if (result.count > 0) {
+        this.logger.log(`Deactivated ${result.count} expired signals`);
+      }
+
+      return result.count;
+    } catch (error) {
+      this.logger.error(
+        `Failed to deactivate expired signals: ${error instanceof Error ? error.message : error}`,
+      );
+      throw error;
+    }
+  }
+
+  async getSignalById(id: string) {
+    return this.prisma.signal.findUnique({
+      where: { id },
+      include: { instrument: true, trades: true },
+    });
+  }
+
+  async getStrategyPerformance(
+    strategyName: string,
+    fromDate: Date,
+  ): Promise<StrategyPerformance> {
+    const signals = await this.prisma.signal.findMany({
+      where: {
+        strategy: strategyName,
+        createdAt: { gte: fromDate },
+      },
+      select: { id: true },
+    });
+
+    const signalIds = signals.map((s) => s.id);
+
+    const trades = await this.prisma.trade.findMany({
+      where: {
+        signalId: { in: signalIds },
+        status: { in: ['CLOSED', 'FILLED'] },
+      },
+      select: { pnl: true },
+    });
+
+    const winningTrades = trades.filter((t) => (t.pnl ?? 0) > 0).length;
+    const losingTrades = trades.filter((t) => (t.pnl ?? 0) <= 0).length;
+    const totalPnl = trades.reduce((sum, t) => sum + (t.pnl ?? 0), 0);
+    const averagePnl = trades.length > 0 ? totalPnl / trades.length : 0;
+
+    return {
+      totalSignals: signals.length,
+      totalTrades: trades.length,
+      winningTrades,
+      losingTrades,
+      winRate: trades.length > 0 ? (winningTrades / trades.length) * 100 : 0,
+      averagePnl: Math.round(averagePnl * 100) / 100,
+      totalPnl: Math.round(totalPnl * 100) / 100,
+    };
+  }
+}
