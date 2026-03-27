@@ -1,0 +1,246 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { PrismaService } from '../../../common/prisma/prisma.service';
+
+export interface SaveCandleInput {
+  instrumentId: string;
+  timeframe: string;
+  timestamp: Date;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface SaveOISnapshotInput {
+  instrumentId: string;
+  oi: number;
+  oiChange: number;
+  volume: number;
+  timestamp: Date;
+}
+
+export interface UpsertInstrumentInput {
+  symbol: string;
+  token: string;
+  name: string;
+  exchange: string;
+  segment: string;
+  lotSize?: number;
+  tickSize?: number;
+  expiry?: Date;
+  strike?: number;
+  optionType?: string;
+}
+
+@Injectable()
+export class MarketDataRepository {
+  private readonly logger = new Logger(MarketDataRepository.name);
+
+  constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * Bulk insert candles using createMany with skipDuplicates to handle
+   * the unique constraint on (instrumentId, timeframe, timestamp).
+   */
+  async saveCandles(candles: SaveCandleInput[]): Promise<number> {
+    if (candles.length === 0) return 0;
+
+    try {
+      const result = await this.prisma.candle.createMany({
+        data: candles.map((c) => ({
+          instrumentId: c.instrumentId,
+          timeframe: c.timeframe,
+          timestamp: c.timestamp,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+          volume: BigInt(Math.round(c.volume)),
+        })),
+        skipDuplicates: true,
+      });
+
+      this.logger.debug(`Saved ${result.count} candles`);
+      return result.count;
+    } catch (error) {
+      this.logger.error(
+        `Failed to save candles: ${error instanceof Error ? error.message : error}`,
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Query candles for a given instrument, timeframe, and date range.
+   */
+  async getCandles(
+    instrumentId: string,
+    timeframe: string,
+    from: Date,
+    to: Date,
+  ) {
+    return this.prisma.candle.findMany({
+      where: {
+        instrumentId,
+        timeframe,
+        timestamp: {
+          gte: from,
+          lte: to,
+        },
+      },
+      orderBy: { timestamp: 'asc' },
+    });
+  }
+
+  /**
+   * Save a single OI snapshot data point.
+   */
+  async saveOISnapshot(snapshot: SaveOISnapshotInput): Promise<void> {
+    try {
+      await this.prisma.oISnapshot.create({
+        data: {
+          instrumentId: snapshot.instrumentId,
+          oi: BigInt(snapshot.oi),
+          oiChange: BigInt(snapshot.oiChange),
+          volume: BigInt(snapshot.volume),
+          timestamp: snapshot.timestamp,
+        },
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to save OI snapshot: ${error instanceof Error ? error.message : error}`,
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Query OI history for a given instrument and date range.
+   */
+  async getOIHistory(instrumentId: string, from: Date, to: Date) {
+    return this.prisma.oISnapshot.findMany({
+      where: {
+        instrumentId,
+        timestamp: {
+          gte: from,
+          lte: to,
+        },
+      },
+      orderBy: { timestamp: 'asc' },
+    });
+  }
+
+  /**
+   * Create or update an instrument record.
+   * Uses the unique constraint on (symbol, exchange, token).
+   */
+  async upsertInstrument(data: UpsertInstrumentInput) {
+    return this.prisma.instrument.upsert({
+      where: {
+        symbol_exchange_token: {
+          symbol: data.symbol,
+          exchange: data.exchange,
+          token: data.token,
+        },
+      },
+      update: {
+        name: data.name,
+        segment: data.segment,
+        lotSize: data.lotSize ?? 1,
+        tickSize: data.tickSize ?? 0.05,
+        expiry: data.expiry ?? null,
+        strike: data.strike ?? null,
+        optionType: data.optionType ?? null,
+        isActive: true,
+      },
+      create: {
+        symbol: data.symbol,
+        token: data.token,
+        name: data.name,
+        exchange: data.exchange,
+        segment: data.segment,
+        lotSize: data.lotSize ?? 1,
+        tickSize: data.tickSize ?? 0.05,
+        expiry: data.expiry ?? null,
+        strike: data.strike ?? null,
+        optionType: data.optionType ?? null,
+      },
+    });
+  }
+
+  /**
+   * Search instruments by symbol/name with optional exchange and segment filters.
+   * Uses case-insensitive matching.
+   */
+  async searchInstruments(
+    query: string,
+    exchange?: string,
+    segment?: string,
+  ) {
+    const where: any = {
+      isActive: true,
+      OR: [
+        { symbol: { contains: query, mode: 'insensitive' } },
+        { name: { contains: query, mode: 'insensitive' } },
+      ],
+    };
+
+    if (exchange) {
+      where.exchange = exchange;
+    }
+    if (segment) {
+      where.segment = segment;
+    }
+
+    return this.prisma.instrument.findMany({
+      where,
+      take: 50,
+      orderBy: { symbol: 'asc' },
+    });
+  }
+
+  /**
+   * Get a single instrument by its token.
+   */
+  async getInstrumentByToken(token: string) {
+    return this.prisma.instrument.findFirst({
+      where: { token, isActive: true },
+    });
+  }
+
+  /**
+   * Get instruments by a list of tokens.
+   */
+  async getInstrumentsByTokens(tokens: string[]) {
+    return this.prisma.instrument.findMany({
+      where: { token: { in: tokens }, isActive: true },
+    });
+  }
+
+  /**
+   * Bulk upsert instruments (used during master refresh).
+   * Processes in batches to avoid overwhelming the database.
+   */
+  async bulkUpsertInstruments(instruments: UpsertInstrumentInput[]): Promise<number> {
+    let count = 0;
+    const batchSize = 100;
+
+    for (let i = 0; i < instruments.length; i += batchSize) {
+      const batch = instruments.slice(i, i + batchSize);
+      const promises = batch.map((inst) => this.upsertInstrument(inst));
+
+      try {
+        await Promise.all(promises);
+        count += batch.length;
+      } catch (error) {
+        this.logger.error(
+          `Failed upserting instrument batch at offset ${i}: ${error instanceof Error ? error.message : error}`,
+        );
+        // Continue with remaining batches
+      }
+    }
+
+    return count;
+  }
+}

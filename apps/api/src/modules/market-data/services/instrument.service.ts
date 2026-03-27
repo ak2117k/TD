@@ -1,0 +1,191 @@
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import {
+  MarketDataRepository,
+  UpsertInstrumentInput,
+} from '../repositories/market-data.repository';
+import { INDICES } from '@td/shared/constants';
+
+export interface InstrumentRecord {
+  id: string;
+  symbol: string;
+  token: string;
+  name: string;
+  exchange: string;
+  segment: string;
+  lotSize: number;
+  tickSize: number;
+  expiry: Date | null;
+  strike: number | null;
+  optionType: string | null;
+}
+
+@Injectable()
+export class InstrumentService implements OnModuleInit {
+  private readonly logger = new Logger(InstrumentService.name);
+
+  /** In-memory cache keyed by token for O(1) lookups. */
+  private instrumentsByToken = new Map<string, InstrumentRecord>();
+
+  /** Track when the master was last loaded. */
+  private lastRefreshedAt: Date | null = null;
+
+  constructor(
+    private readonly repository: MarketDataRepository,
+    private readonly configService: ConfigService,
+  ) {}
+
+  async onModuleInit(): Promise<void> {
+    try {
+      await this.loadFromDatabase();
+      this.logger.log(
+        `Instrument cache initialized with ${this.instrumentsByToken.size} instruments`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to initialize instrument cache: ${error instanceof Error ? error.message : error}`,
+      );
+    }
+  }
+
+  /**
+   * Search instruments by symbol/name with optional exchange and segment filters.
+   */
+  async search(
+    query: string,
+    exchange?: string,
+    segment?: string,
+  ): Promise<InstrumentRecord[]> {
+    // First try in-memory for speed
+    const results: InstrumentRecord[] = [];
+    const lowerQuery = query.toLowerCase();
+
+    for (const inst of this.instrumentsByToken.values()) {
+      if (
+        (inst.symbol.toLowerCase().includes(lowerQuery) ||
+          inst.name.toLowerCase().includes(lowerQuery)) &&
+        (!exchange || inst.exchange === exchange) &&
+        (!segment || inst.segment === segment)
+      ) {
+        results.push(inst);
+        if (results.length >= 50) break;
+      }
+    }
+
+    // Fall back to DB if in-memory cache is empty
+    if (this.instrumentsByToken.size === 0) {
+      const dbResults = await this.repository.searchInstruments(
+        query,
+        exchange,
+        segment,
+      );
+      return dbResults as InstrumentRecord[];
+    }
+
+    return results;
+  }
+
+  /**
+   * Fast O(1) lookup by token from the in-memory cache.
+   * Falls back to DB if not found in cache.
+   */
+  async getByToken(token: string): Promise<InstrumentRecord | null> {
+    const cached = this.instrumentsByToken.get(token);
+    if (cached) return cached;
+
+    // Try DB as fallback
+    const dbInstrument = await this.repository.getInstrumentByToken(token);
+    if (dbInstrument) {
+      const record = dbInstrument as InstrumentRecord;
+      this.instrumentsByToken.set(token, record);
+      return record;
+    }
+
+    return null;
+  }
+
+  /**
+   * Get major market indices (NIFTY 50, BANK NIFTY, etc.) with their instrument data.
+   */
+  getIndices(): Array<{
+    key: string;
+    symbol: string;
+    token: string;
+    exchange: string;
+    instrument: InstrumentRecord | null;
+  }> {
+    return Object.entries(INDICES).map(([key, indexDef]) => ({
+      key,
+      symbol: indexDef.symbol,
+      token: indexDef.token,
+      exchange: indexDef.exchange,
+      instrument: this.instrumentsByToken.get(indexDef.token) ?? null,
+    }));
+  }
+
+  /**
+   * Refresh instrument master list from Angel One API.
+   * This is called daily by the housekeeping cron job.
+   * The actual API call is delegated to the broker adapter;
+   * if unavailable, the existing DB data is preserved.
+   */
+  async refreshMaster(rawInstruments?: UpsertInstrumentInput[]): Promise<number> {
+    this.logger.log('Starting instrument master refresh');
+
+    if (!rawInstruments || rawInstruments.length === 0) {
+      this.logger.warn(
+        'No instruments provided for refresh; skipping. ' +
+          'The broker adapter should supply the instrument list.',
+      );
+      return 0;
+    }
+
+    const count = await this.repository.bulkUpsertInstruments(rawInstruments);
+    this.logger.log(`Upserted ${count} instruments into database`);
+
+    // Reload the in-memory cache
+    await this.loadFromDatabase();
+    this.lastRefreshedAt = new Date();
+    this.logger.log(
+      `Instrument cache refreshed with ${this.instrumentsByToken.size} instruments`,
+    );
+
+    return count;
+  }
+
+  /**
+   * Get the timestamp of the last successful master refresh.
+   */
+  getLastRefreshedAt(): Date | null {
+    return this.lastRefreshedAt;
+  }
+
+  /**
+   * Get total cached instrument count.
+   */
+  getCachedCount(): number {
+    return this.instrumentsByToken.size;
+  }
+
+  /**
+   * Load all active instruments from the database into the in-memory cache.
+   */
+  private async loadFromDatabase(): Promise<void> {
+    // We use a broad search with empty query to load all
+    // This is more efficient with a direct Prisma call
+    try {
+      const instruments = await this.repository.searchInstruments('');
+      this.instrumentsByToken.clear();
+      for (const inst of instruments) {
+        this.instrumentsByToken.set(
+          inst.token,
+          inst as InstrumentRecord,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `Failed to load instruments from DB: ${error instanceof Error ? error.message : error}`,
+      );
+    }
+  }
+}
