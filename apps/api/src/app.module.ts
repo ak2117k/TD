@@ -18,6 +18,7 @@ import { NewsModule } from './modules/news/news.module';
 import { BacktestModule } from './modules/backtest/backtest.module';
 import { OptionsChainModule } from './modules/options-chain/options-chain.module';
 import { AIAdvisorModule } from './modules/ai-advisor/ai-advisor.module';
+import { AutoTradeModule } from './modules/auto-trade/auto-trade.module';
 
 @Module({
   imports: [
@@ -73,8 +74,8 @@ import { AIAdvisorModule } from './modules/ai-advisor/ai-advisor.module';
     // AI-powered trading advisor — insights, chat, weekly reports
     AIAdvisorModule,
 
-    // Feature modules (upcoming stages)
-    // AutoTradeModule,
+    // Auto-trade — signal-to-trade automation with approval workflow
+    AutoTradeModule,
   ],
   providers: [
     // Angel One broker services

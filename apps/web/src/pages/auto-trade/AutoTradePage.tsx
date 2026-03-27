@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react';
 import { useTrades } from '@/hooks/useTrades';
+import { useAutoTrade } from '@/hooks/useAutoTrade';
 import { useTradeStore } from '@/stores/trade-store';
 import {
   AutoTradeControls,
@@ -19,10 +20,25 @@ import {
   BarChart3,
   Target,
   CircleDot,
+  Scan,
+  Clock,
+  Check,
+  X,
+  Zap,
+  AlertCircle,
 } from 'lucide-react';
 
 export default function AutoTradePage() {
   const { openTrades, positions, recentTrades, isLoading } = useTrades();
+  const {
+    status: autoTradeStatus,
+    pendingApprovals,
+    isLoading: autoTradeLoading,
+    approveSignal,
+    rejectSignal,
+    forceExecute,
+    triggerScan,
+  } = useAutoTrade();
   const closeTrade = useTradeStore((s) => s.closeTrade);
 
   const [showTradeModal, setShowTradeModal] = useState(false);
@@ -54,6 +70,13 @@ export default function AutoTradePage() {
     }
   };
 
+  const lastScanTime = autoTradeStatus.lastScanStats?.timestamp
+    ? new Date(autoTradeStatus.lastScanStats.timestamp).toLocaleTimeString('en-IN', {
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+    : null;
+
   return (
     <div className="space-y-5">
       {/* Top bar: Controls + Kill Switch */}
@@ -61,8 +84,21 @@ export default function AutoTradePage() {
         <div className="flex items-center gap-3">
           <Bot size={24} className="text-[var(--color-accent-green)]" />
           <h1 className="text-xl font-bold text-[var(--color-text-primary)]">Auto-Trade</h1>
+          {autoTradeStatus.isRunning && (
+            <span className="flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              RUNNING
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-4">
+          <button
+            onClick={() => triggerScan()}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium border border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] transition-colors"
+          >
+            <Scan size={14} />
+            Scan Now
+          </button>
           <AutoTradeControls />
           <KillSwitchButton />
         </div>
@@ -100,6 +136,105 @@ export default function AutoTradePage() {
           icon={<CircleDot size={16} />}
         />
       </div>
+
+      {/* Last Scan Stats */}
+      {autoTradeStatus.lastScanStats?.timestamp && (
+        <div className="flex items-center gap-4 px-4 py-2.5 rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)] text-xs text-[var(--color-text-muted)]">
+          <div className="flex items-center gap-1.5">
+            <Clock size={12} />
+            <span>Last scan: {lastScanTime}</span>
+          </div>
+          <span>Processed: {autoTradeStatus.lastScanStats.processed}</span>
+          <span className="text-emerald-400">Executed: {autoTradeStatus.lastScanStats.executed}</span>
+          <span className="text-amber-400">Pending: {autoTradeStatus.lastScanStats.pending}</span>
+          <span>Skipped: {autoTradeStatus.lastScanStats.skipped}</span>
+          {autoTradeStatus.lastScanStats.errors > 0 && (
+            <span className="text-red-400">Errors: {autoTradeStatus.lastScanStats.errors}</span>
+          )}
+        </div>
+      )}
+
+      {/* Pending Approvals */}
+      {pendingApprovals.length > 0 && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5">
+          <div className="flex items-center gap-2 px-4 py-3 border-b border-amber-500/20">
+            <AlertCircle size={14} className="text-amber-400" />
+            <span className="text-sm font-semibold text-amber-300">
+              Pending Approvals
+            </span>
+            <span className="text-[10px] text-amber-400/70 ml-auto">
+              {pendingApprovals.length} signal{pendingApprovals.length > 1 ? 's' : ''} awaiting approval
+            </span>
+          </div>
+          <div className="divide-y divide-amber-500/10">
+            {pendingApprovals.map((approval) => (
+              <div
+                key={approval.signalId}
+                className="flex items-center gap-4 px-4 py-3"
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-[var(--color-text-primary)]">
+                      {approval.symbol}
+                    </span>
+                    <span
+                      className={`text-[10px] font-bold px-1.5 rounded ${
+                        approval.side === 'BUY'
+                          ? 'text-emerald-400 bg-emerald-400/10'
+                          : 'text-red-400 bg-red-400/10'
+                      }`}
+                    >
+                      {approval.side}
+                    </span>
+                    <span className="text-[10px] text-[var(--color-text-muted)]">
+                      x{approval.quantity}
+                    </span>
+                    <span className="text-[10px] text-[var(--color-text-muted)]">
+                      @{approval.entryPrice.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3 mt-0.5 text-[10px] text-[var(--color-text-muted)]">
+                    <span>Strategy: {approval.strategy}</span>
+                    <span>Confidence: {approval.confidenceScore}%</span>
+                    <span>
+                      Target: {approval.targetPrice.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </span>
+                    <span>
+                      SL: {approval.stoplossPrice.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => approveSignal(approval.signalId)}
+                    disabled={autoTradeLoading}
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-medium bg-emerald-600 text-white hover:bg-emerald-500 transition-colors disabled:opacity-50"
+                  >
+                    <Check size={12} />
+                    Approve
+                  </button>
+                  <button
+                    onClick={() => rejectSignal(approval.signalId)}
+                    disabled={autoTradeLoading}
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-medium bg-gray-700 text-gray-300 hover:bg-gray-600 transition-colors disabled:opacity-50"
+                  >
+                    <X size={12} />
+                    Reject
+                  </button>
+                  <button
+                    onClick={() => forceExecute(approval.signalId)}
+                    disabled={autoTradeLoading}
+                    className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs font-medium text-amber-400 hover:bg-amber-400/10 transition-colors disabled:opacity-50"
+                    title="Force execute immediately"
+                  >
+                    <Zap size={12} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Main content: Two columns */}
       <div className="flex gap-4" style={{ minHeight: '400px' }}>
