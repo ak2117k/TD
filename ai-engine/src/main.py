@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .routes.scoring import router as scoring_router
 from .routes.sentiment import router as sentiment_router
 from .routes.analysis import router as analysis_router
+from .routes.advisor import router as advisor_router
 
 # Configure logging
 logging.basicConfig(
@@ -36,6 +37,7 @@ app.add_middleware(
 app.include_router(scoring_router, prefix="/api", tags=["scoring"])
 app.include_router(sentiment_router, prefix="/api", tags=["sentiment"])
 app.include_router(analysis_router, prefix="/api", tags=["analysis"])
+app.include_router(advisor_router, prefix="/api", tags=["advisor"])
 
 
 @app.get("/health")
@@ -46,5 +48,4 @@ async def health_check():
 
 # Remaining route modules (to be added in future stages):
 # - /api/weekly-report   → Generate weekly performance report
-# - /api/ask-advisor     → Chat with AI advisor
 # - /api/backtest        → Run strategy backtest

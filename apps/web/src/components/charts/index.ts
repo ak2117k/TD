@@ -10,3 +10,4 @@ export { default as EquityCurve } from './EquityCurve';
 export { default as PnLChart } from './PnLChart';
 export { default as WinRateDonut } from './WinRateDonut';
 export { default as SegmentBreakdown } from './SegmentBreakdown';
+export { default as BacktestEquityCurve } from './BacktestEquityCurve';
