@@ -13,6 +13,7 @@ import {
   FeedCallback,
   BrokerAdapter,
 } from '../../../common/interfaces/broker-adapter.interface';
+import { AngelOneAuthService } from './angel-one-auth.service';
 import { Quote, Exchange } from '@td/shared/types';
 import {
   MARKET_OPEN_HOUR,
@@ -21,6 +22,9 @@ import {
   MARKET_CLOSE_MINUTE,
   ANGEL_ONE_WEBSOCKET_MAX_TOKENS,
   INDICES,
+  SECTOR_INDICES,
+  MAJOR_STOCKS,
+  COMMODITIES,
 } from '@td/shared/constants';
 import { CandleAggregatorService } from './candle-aggregator.service';
 import { InstrumentService } from './instrument.service';
@@ -60,6 +64,21 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
   /** Whether the feed is actively running. */
   private feedActive = false;
 
+  /** Current feed mode: 'websocket', 'rest-polling', or 'none'. */
+  private feedMode: 'websocket' | 'rest-polling' | 'none' = 'none';
+
+  /** Interval handle for REST-based polling fallback. */
+  private restPollingInterval: ReturnType<typeof setInterval> | null = null;
+
+  /** Interval handle for periodic WebSocket reconnect attempts while REST-polling. */
+  private wsReconnectInterval: ReturnType<typeof setInterval> | null = null;
+
+  /** REST polling interval in milliseconds. */
+  private readonly REST_POLL_INTERVAL_MS = 5_000;
+
+  /** How often to retry WebSocket connection while REST-polling (ms). */
+  private readonly WS_RECONNECT_RETRY_MS = 60_000;
+
   /** Redis publisher for cross-service tick distribution. */
   private redisPub: Redis | null = null;
 
@@ -77,6 +96,7 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
     @Optional()
     @Inject(BROKER_ADAPTER_TOKEN)
     private readonly brokerAdapter: BrokerAdapter | null,
+    private readonly angelOneAuth: AngelOneAuthService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -98,9 +118,15 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
     });
 
     this.logger.log('MarketFeedService initialized');
+
+    // Auto-start: wait for auth service to finish initialising, then seed
+    // quotes and optionally start the WebSocket feed.
+    this.autoStart();
   }
 
   async onModuleDestroy(): Promise<void> {
+    this.stopRestPolling();
+    this.stopWsReconnectTimer();
     await this.stopFeed();
     await this.redisPub?.quit();
     await this.redisSub?.quit();
@@ -126,6 +152,7 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
           'Serving cached data only.',
       );
       this.feedActive = true;
+      this.feedMode = 'none';
       this.broadcastStatus();
       return;
     }
@@ -133,13 +160,21 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
     try {
       this.feedCallback = (tick: TickData) => this.handleTick(tick);
 
-      // Subscribe to major indices by default
-      const indexTokens = Object.values(INDICES).map((idx) => idx.token);
-      await this.subscribe(indexTokens);
+      // Subscribe to major indices, sector indices, major stocks, and commodities
+      const allDefaultTokens = [
+        ...(Object.values(INDICES) as Array<{ token: string }>).map((idx) => idx.token),
+        ...(Object.values(SECTOR_INDICES) as Array<{ token: string }>).map((s) => s.token),
+        ...(Object.values(MAJOR_STOCKS) as Array<{ token: string }>).map((s) => s.token),
+        ...(Object.values(COMMODITIES) as Array<{ token: string }>).map((c) => c.token),
+      ];
+      // Deduplicate
+      const uniqueTokens = [...new Set(allDefaultTokens)];
+      await this.subscribe(uniqueTokens);
 
       this.feedActive = true;
+      this.feedMode = 'websocket';
       this.broadcastStatus();
-      this.logger.log('Market data feed started');
+      this.logger.log('Market data feed started (WebSocket mode)');
     } catch (error) {
       this.logger.error(
         `Failed to start feed: ${error instanceof Error ? error.message : error}`,
@@ -167,9 +202,12 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
 
       await this.candleAggregator.flushAll();
 
+      this.stopRestPolling();
+      this.stopWsReconnectTimer();
       this.primaryTokens.clear();
       this.scanTokens.clear();
       this.feedActive = false;
+      this.feedMode = 'none';
       this.broadcastStatus();
       this.logger.log('Market data feed stopped');
     } catch (error) {
@@ -177,6 +215,7 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
         `Error stopping feed: ${error instanceof Error ? error.message : error}`,
       );
       this.feedActive = false;
+      this.feedMode = 'none';
     }
   }
 
@@ -289,6 +328,7 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
    */
   getStatus(): {
     feedActive: boolean;
+    feedMode: string;
     primarySubscriptions: number;
     scanSubscriptions: number;
     totalSubscriptions: number;
@@ -298,6 +338,7 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
   } {
     return {
       feedActive: this.feedActive,
+      feedMode: this.feedMode,
       primarySubscriptions: this.primaryTokens.size,
       scanSubscriptions: this.scanTokens.size,
       totalSubscriptions: this.primaryTokens.size + this.scanTokens.size,
@@ -305,6 +346,111 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
       connectedClients: this.gateway.getConnectedClientCount(),
       brokerAdapterAvailable: this.brokerAdapter !== null,
     };
+  }
+
+  /**
+   * Calculate market breadth from cached quotes.
+   * Counts how many cached quotes are up (advances), down (declines),
+   * or flat (unchanged) based on change%.
+   */
+  getBreadth(): {
+    advances: number;
+    declines: number;
+    unchanged: number;
+    adRatio: number;
+    total: number;
+  } {
+    let advances = 0;
+    let declines = 0;
+    let unchanged = 0;
+
+    for (const quote of this.quoteCache.values()) {
+      if (quote.changePercent > 0) advances++;
+      else if (quote.changePercent < 0) declines++;
+      else unchanged++;
+    }
+
+    const total = advances + declines + unchanged;
+    const adRatio =
+      declines > 0
+        ? Math.round((advances / declines) * 100) / 100
+        : advances > 0
+          ? advances
+          : 0;
+
+    return { advances, declines, unchanged, adRatio, total };
+  }
+
+  /** Mapping from sector index symbol to a friendly sector name. */
+  private static readonly SECTOR_NAME_MAP: Record<string, string> = {
+    'NIFTY IT': 'IT',
+    'NIFTY BANK': 'Banking',
+    'NIFTY PHARMA': 'Pharma',
+    'NIFTY AUTO': 'Auto',
+    'NIFTY FMCG': 'FMCG',
+    'NIFTY METAL': 'Metal',
+    'NIFTY ENERGY': 'Energy',
+    'NIFTY REALTY': 'Realty',
+    'NIFTY INFRA': 'Infra',
+    'NIFTY MEDIA': 'Media',
+    'NIFTY PSU BANK': 'PSU Bank',
+    'NIFTY PVT BANK': 'Pvt Bank',
+    'NIFTY FIN SERVICE': 'Fin Services',
+    'NIFTY HEALTHCARE': 'Healthcare',
+    'NIFTY CONSUMER': 'Consumer',
+  };
+
+  /** Main index symbols to exclude from sector performance. */
+  private static readonly MAIN_INDEX_SYMBOLS = new Set([
+    'NIFTY',
+    'BANKNIFTY',
+    'FINNIFTY',
+    'SENSEX',
+    'NIFTY 50',
+    'NIFTY BANK',
+  ]);
+
+  /**
+   * Get sector performance from cached sector index quotes.
+   * Filters for sector index tokens (starting with "99926") that are not
+   * main indices, maps to friendly sector names, and sorts by changePercent
+   * descending (best performing sectors first).
+   */
+  getSectorPerformance(): Array<{
+    sector: string;
+    symbol: string;
+    changePercent: number;
+    ltp: number;
+  }> {
+    const sectors: Array<{
+      sector: string;
+      symbol: string;
+      changePercent: number;
+      ltp: number;
+    }> = [];
+
+    for (const [token, quote] of this.quoteCache.entries()) {
+      // Only include sector index tokens (starting with "99926")
+      if (!token.startsWith('99926')) continue;
+
+      // Exclude main indices
+      if (MarketFeedService.MAIN_INDEX_SYMBOLS.has(quote.symbol)) continue;
+
+      const friendlyName =
+        MarketFeedService.SECTOR_NAME_MAP[quote.symbol] ?? quote.symbol;
+
+      sectors.push({
+        sector: friendlyName,
+        symbol: quote.symbol,
+        changePercent: quote.changePercent,
+        ltp: quote.ltp,
+      });
+    }
+
+    // Sort by changePercent descending (best performing first)
+    sectors.sort((a, b) => b.changePercent - a.changePercent);
+
+    return sectors;
   }
 
   /**
@@ -322,11 +468,21 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
    */
   isMarketOpen(): boolean {
     const now = new Date();
-    // Convert to IST (UTC+5:30)
-    const istOffset = 5.5 * 60 * 60 * 1000;
-    const ist = new Date(now.getTime() + istOffset + now.getTimezoneOffset() * 60 * 1000);
-    const hours = ist.getHours();
-    const minutes = ist.getMinutes();
+
+    // Use Intl to reliably get IST time regardless of server timezone
+    const istParts = new Intl.DateTimeFormat('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      hour: 'numeric',
+      minute: 'numeric',
+      weekday: 'short',
+      hour12: false,
+    }).formatToParts(now);
+
+    const weekday = istParts.find((p) => p.type === 'weekday')?.value ?? '';
+    if (weekday === 'Sat' || weekday === 'Sun') return false;
+
+    const hours = Number(istParts.find((p) => p.type === 'hour')?.value ?? 0);
+    const minutes = Number(istParts.find((p) => p.type === 'minute')?.value ?? 0);
     const totalMinutes = hours * 60 + minutes;
     const marketOpen = MARKET_OPEN_HOUR * 60 + MARKET_OPEN_MINUTE;
     const marketClose = MARKET_CLOSE_HOUR * 60 + MARKET_CLOSE_MINUTE;
@@ -343,6 +499,11 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
    */
   private handleTick(tick: TickData): void {
     try {
+      // Normalize the symbol: WebSocket ticks often arrive without a symbol
+      // name (or with a different format than our INDICES constants).
+      // Ensure we always use our canonical symbol for consistent frontend filtering.
+      this.normalizeTickSymbol(tick);
+
       // 1. Update in-memory quote cache
       const quote = this.tickToQuote(tick);
       this.quoteCache.set(tick.token, quote);
@@ -420,6 +581,381 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
   // ------------------------------------------------------------------
   //  Helpers
   // ------------------------------------------------------------------
+
+  /**
+   * Wait for the auth service to become authenticated, then seed the
+   * quote cache and start the WebSocket feed.
+   */
+  private async autoStart(): Promise<void> {
+    if (!this.brokerAdapter) {
+      this.logger.log(
+        'Broker not authenticated — feed will not auto-start. ' +
+          'Configure Angel One credentials in .env to enable live data.',
+      );
+      return;
+    }
+
+    // Poll for auth readiness (auth service may still be retrying login)
+    const maxWaitMs = 15_000;
+    const pollMs = 1_000;
+    const start = Date.now();
+
+    while (!this.angelOneAuth.isAuthenticated() && Date.now() - start < maxWaitMs) {
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+
+    if (!this.angelOneAuth.isAuthenticated()) {
+      this.logger.log(
+        'Broker not authenticated — feed will not auto-start. ' +
+          'Configure Angel One credentials in .env to enable live data.',
+      );
+      return;
+    }
+
+    // Always seed the quote cache from REST first
+    await this.seedQuoteCacheFromRest();
+
+    // Attempt WebSocket feed — fall back to REST polling on failure
+    try {
+      this.logger.log('Auth detected — connecting broker adapter and starting WebSocket feed...');
+      await this.brokerAdapter.connect();
+      await this.startFeed();
+    } catch (error) {
+      this.logger.warn(
+        `WebSocket feed failed: ${error instanceof Error ? error.message : error}`,
+      );
+      this.logger.log('Falling back to REST polling (5s interval)');
+      this.startRestPolling();
+    }
+  }
+
+  /**
+   * Manually start the market data feed.
+   * Tries WebSocket first, falls back to REST polling if WebSocket fails.
+   * Called from the /api/market-data/feed/start endpoint.
+   */
+  async manualStartFeed(): Promise<{
+    feedActive: boolean;
+    feedMode: string;
+    message: string;
+  }> {
+    if (this.feedActive && this.feedMode === 'websocket') {
+      return {
+        feedActive: true,
+        feedMode: 'websocket',
+        message: 'Feed is already running in WebSocket mode.',
+      };
+    }
+
+    if (!this.brokerAdapter) {
+      return {
+        feedActive: false,
+        feedMode: 'none',
+        message: 'No broker adapter available. Configure Angel One credentials in .env.',
+      };
+    }
+
+    if (!this.angelOneAuth.isAuthenticated()) {
+      return {
+        feedActive: false,
+        feedMode: 'none',
+        message: 'Broker is not authenticated. Ensure Angel One login succeeds first.',
+      };
+    }
+
+    // Stop any existing REST polling before attempting WebSocket
+    this.stopRestPolling();
+    this.stopWsReconnectTimer();
+
+    // If feed was running in rest-polling mode, stop it so startFeed() can re-init
+    if (this.feedActive) {
+      this.feedActive = false;
+      this.feedMode = 'none';
+    }
+
+    // Seed cache first
+    await this.seedQuoteCacheFromRest();
+
+    // Attempt WebSocket
+    try {
+      this.logger.log('Manual feed start — attempting WebSocket connection...');
+      await this.brokerAdapter.connect();
+      await this.startFeed();
+      return {
+        feedActive: true,
+        feedMode: 'websocket',
+        message: 'Feed started in WebSocket mode.',
+      };
+    } catch (error) {
+      this.logger.warn(
+        `WebSocket feed failed, falling back to REST polling: ${error instanceof Error ? error.message : error}`,
+      );
+      this.startRestPolling();
+      return {
+        feedActive: true,
+        feedMode: 'rest-polling',
+        message: `WebSocket failed (${error instanceof Error ? error.message : 'unknown error'}). Feed running via REST polling (5s interval).`,
+      };
+    }
+  }
+
+  // ------------------------------------------------------------------
+  //  REST polling fallback
+  // ------------------------------------------------------------------
+
+  /**
+   * Start REST-based polling as a fallback when WebSocket is unavailable.
+   * Polls every 5 seconds for all subscribed tokens (or default indices).
+   * Also schedules periodic WebSocket reconnect attempts every 60 seconds.
+   */
+  private startRestPolling(): void {
+    if (this.restPollingInterval) {
+      this.logger.log('REST polling is already active');
+      return;
+    }
+
+    if (!this.brokerAdapter) return;
+
+    // Ensure we have tokens to poll — default to indices, sectors, stocks, and commodities
+    if (this.primaryTokens.size === 0) {
+      const defaultTokens = [
+        ...(Object.values(INDICES) as Array<{ token: string }>).map((idx) => idx.token),
+        ...(Object.values(SECTOR_INDICES) as Array<{ token: string }>).map((s) => s.token),
+        ...(Object.values(MAJOR_STOCKS) as Array<{ token: string }>).map((s) => s.token),
+        ...(Object.values(COMMODITIES) as Array<{ token: string }>).map((c) => c.token),
+      ];
+      // Deduplicate (some sector tokens overlap with INDICES)
+      for (const token of new Set(defaultTokens)) {
+        this.primaryTokens.add(token);
+      }
+    }
+
+    this.feedActive = true;
+    this.feedMode = 'rest-polling';
+    this.broadcastStatus();
+
+    // Run the first poll immediately
+    this.pollQuotesViaRest();
+
+    // Set up recurring REST poll
+    this.restPollingInterval = setInterval(() => {
+      this.pollQuotesViaRest();
+    }, this.REST_POLL_INTERVAL_MS);
+
+    this.logger.log(
+      `REST polling started — polling ${this.primaryTokens.size + this.scanTokens.size} tokens every ${this.REST_POLL_INTERVAL_MS / 1000}s`,
+    );
+
+    // Schedule periodic WebSocket reconnect attempts
+    this.startWsReconnectTimer();
+  }
+
+  /**
+   * Stop REST polling.
+   */
+  private stopRestPolling(): void {
+    if (this.restPollingInterval) {
+      clearInterval(this.restPollingInterval);
+      this.restPollingInterval = null;
+      this.logger.log('REST polling stopped');
+    }
+  }
+
+  /**
+   * Poll live quotes for all subscribed tokens via the REST API
+   * and process them through the standard tick handler pipeline.
+   */
+  private async pollQuotesViaRest(): Promise<void> {
+    if (!this.brokerAdapter) return;
+
+    const allTokens = [
+      ...Array.from(this.primaryTokens),
+      ...Array.from(this.scanTokens),
+    ];
+
+    if (allTokens.length === 0) return;
+
+    // Build a token-to-exchange map from all known token sets
+    const indexMap = new Map<string, string>();
+    for (const idx of Object.values(INDICES)) {
+      indexMap.set(idx.token, idx.exchange);
+    }
+    for (const s of Object.values(SECTOR_INDICES)) {
+      indexMap.set(s.token, s.exchange);
+    }
+    for (const s of Object.values(MAJOR_STOCKS)) {
+      indexMap.set(s.token, s.exchange);
+    }
+    for (const c of Object.values(COMMODITIES)) {
+      indexMap.set(c.token, c.exchange);
+    }
+
+    const results = await Promise.allSettled(
+      allTokens.map(async (token) => {
+        const exchange = indexMap.get(token) ?? 'NSE';
+        const tick = await this.brokerAdapter!.getLiveQuote(token, exchange);
+        // Symbol normalization is handled centrally in handleTick()
+        this.handleTick(tick);
+      }),
+    );
+
+    const failed = results.filter((r) => r.status === 'rejected').length;
+    if (failed > 0) {
+      this.logger.warn(`REST poll: ${failed}/${allTokens.length} token fetches failed`);
+    }
+  }
+
+  /**
+   * Periodically attempt to upgrade from REST polling to WebSocket.
+   */
+  private startWsReconnectTimer(): void {
+    this.stopWsReconnectTimer();
+
+    this.wsReconnectInterval = setInterval(async () => {
+      if (this.feedMode === 'websocket') {
+        // Already on WebSocket — no need to keep trying
+        this.stopWsReconnectTimer();
+        return;
+      }
+
+      if (!this.brokerAdapter || !this.angelOneAuth.isAuthenticated()) return;
+
+      this.logger.log('Attempting to upgrade from REST polling to WebSocket...');
+
+      try {
+        await this.brokerAdapter.connect();
+
+        // Connection succeeded — switch to WebSocket mode
+        this.stopRestPolling();
+        this.feedActive = false; // Reset so startFeed() proceeds
+        this.feedMode = 'none';
+        await this.startFeed();
+
+        this.logger.log('Successfully upgraded to WebSocket feed');
+        this.stopWsReconnectTimer();
+      } catch (error) {
+        this.logger.warn(
+          `WebSocket upgrade attempt failed, continuing REST polling: ${error instanceof Error ? error.message : error}`,
+        );
+      }
+    }, this.WS_RECONNECT_RETRY_MS);
+
+    this.logger.log(
+      `WebSocket reconnect timer started — retrying every ${this.WS_RECONNECT_RETRY_MS / 1000}s`,
+    );
+  }
+
+  /**
+   * Stop the periodic WebSocket reconnect timer.
+   */
+  private stopWsReconnectTimer(): void {
+    if (this.wsReconnectInterval) {
+      clearInterval(this.wsReconnectInterval);
+      this.wsReconnectInterval = null;
+    }
+  }
+
+  /**
+   * Fetch LTP data from Angel One REST API for all indices, sector
+   * indices, and major stocks, then seed the in-memory quote cache.
+   * This ensures the UI shows real prices even when the WebSocket feed
+   * hasn't started or the market is closed.
+   */
+  private async seedQuoteCacheFromRest(): Promise<void> {
+    if (!this.brokerAdapter) return;
+
+    // Combine indices, sector indices, major stocks, and commodities for seeding
+    const indexEntries = Object.values(INDICES);
+    const sectorEntries = Object.values(SECTOR_INDICES)
+      // Skip sector tokens that overlap with INDICES (e.g. NIFTY IT, NIFTY BANK)
+      .filter((s) => !indexEntries.some((idx) => idx.token === s.token));
+    const stockEntries = Object.values(MAJOR_STOCKS);
+    const commodityEntries = Object.values(COMMODITIES);
+    const allEntries = [
+      ...indexEntries.map((e) => ({ ...e, type: 'index' as const })),
+      ...sectorEntries.map((e) => ({ ...e, type: 'sector' as const })),
+      ...stockEntries.map((e) => ({ ...e, type: 'stock' as const })),
+      ...commodityEntries.map((e) => ({ ...e, type: 'commodity' as const })),
+    ];
+
+    this.logger.log(
+      `Seeding quote cache for ${allEntries.length} instruments ` +
+        `(${indexEntries.length} indices, ${sectorEntries.length} sector indices, ${stockEntries.length} stocks, ${commodityEntries.length} commodities) via REST API...`,
+    );
+
+    const results = await Promise.allSettled(
+      allEntries.map(async (entry) => {
+        const tick = await this.brokerAdapter!.getLiveQuote(entry.token, entry.exchange);
+        this.normalizeTickSymbol(tick); // Use canonical symbol names
+        const quote = this.tickToQuote(tick);
+        quote.exchange = entry.exchange as Exchange;
+        this.quoteCache.set(entry.token, quote);
+        return entry.symbol;
+      }),
+    );
+
+    const succeeded = results.filter((r) => r.status === 'fulfilled').length;
+    const failed = results.filter((r) => r.status === 'rejected').length;
+
+    if (failed > 0) {
+      const errors = results
+        .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+        .map((r) => r.reason?.message ?? r.reason);
+      this.logger.warn(
+        `Quote seed: ${succeeded} succeeded, ${failed} failed — ${errors.join('; ')}`,
+      );
+    } else {
+      this.logger.log(`Quote cache seeded with ${succeeded} quotes`);
+    }
+  }
+
+  /**
+   * Normalise the symbol field on an incoming tick so it matches the
+   * canonical names used in the INDICES constant and the frontend store.
+   *
+   * WebSocket ticks from Angel One often arrive with an empty symbol or a
+   * different format (e.g. "Nifty 50" instead of "NIFTY"). REST API ticks
+   * can also have broker-specific trading symbol names. We look up the
+   * token in INDICES first, then fall back to the in-memory instrument
+   * cache to ensure consistent naming across the system.
+   */
+  private normalizeTickSymbol(tick: TickData): void {
+    // Fast path: check INDICES constant (covers the 6 major indices)
+    const indexEntry = Object.values(INDICES).find((idx) => idx.token === tick.token);
+    if (indexEntry) {
+      tick.symbol = indexEntry.symbol;
+      return;
+    }
+
+    // Check sector indices
+    const sectorEntry = Object.values(SECTOR_INDICES).find((s) => s.token === tick.token);
+    if (sectorEntry) {
+      tick.symbol = sectorEntry.symbol;
+      return;
+    }
+
+    // Check major stocks
+    const stockEntry = Object.values(MAJOR_STOCKS).find((s) => s.token === tick.token);
+    if (stockEntry) {
+      tick.symbol = stockEntry.symbol;
+      return;
+    }
+
+    // Check commodities
+    const commodityEntry = Object.values(COMMODITIES).find((c) => c.token === tick.token);
+    if (commodityEntry) {
+      tick.symbol = commodityEntry.symbol;
+      return;
+    }
+
+    // Fallback: use cached instrument data if the symbol is missing or empty
+    if (!tick.symbol || tick.symbol.trim() === '') {
+      const cached = this.quoteCache.get(tick.token);
+      if (cached?.symbol) {
+        tick.symbol = cached.symbol;
+      }
+    }
+  }
 
   private tickToQuote(tick: TickData): Quote {
     const previousQuote = this.quoteCache.get(tick.token);

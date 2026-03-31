@@ -18,30 +18,56 @@ export default function OIOverlay({ chart, oiData, visible }: OIOverlayProps) {
   useEffect(() => {
     if (!chart) return;
 
-    const series = chart.addLineSeries({
-      color: '#fbbf24',
-      lineWidth: 2,
-      priceScaleId: 'oi',
-      lastValueVisible: true,
-      priceLineVisible: false,
-      crosshairMarkerVisible: true,
-      crosshairMarkerRadius: 4,
-    });
+    // The chart prop may point to a freshly-created instance whose internal
+    // model has not finished initialising yet (e.g. after a key-driven
+    // remount).  Defer series creation to the next task so the chart has a
+    // full render cycle to complete its setup before we touch it.
+    let cancelled = false;
+    let createdSeries: ISeriesApi<'Line'> | null = null;
 
-    chart.priceScale('oi').applyOptions({
-      scaleMargins: { top: 0.1, bottom: 0.3 },
-      drawTicks: false,
-      borderVisible: false,
-      textColor: '#fbbf24',
-    });
+    const setup = () => {
+      if (cancelled) return;
 
-    seriesRef.current = series;
+      try {
+        const series = chart.addLineSeries({
+          color: '#fbbf24',
+          lineWidth: 2,
+          priceScaleId: 'oi',
+          lastValueVisible: true,
+          priceLineVisible: false,
+          crosshairMarkerVisible: true,
+          crosshairMarkerRadius: 4,
+        });
+
+        chart.priceScale('oi').applyOptions({
+          scaleMargins: { top: 0.1, bottom: 0.3 },
+          borderVisible: false,
+          textColor: '#fbbf24',
+        });
+
+        createdSeries = series;
+        seriesRef.current = series;
+      } catch (err) {
+        // Chart was disposed or not yet ready — skip silently.
+        console.warn('[OIOverlay] addLineSeries failed (chart not ready):', err);
+      }
+    };
+
+    // Use setTimeout(0) instead of queueMicrotask so we yield past the
+    // current synchronous React reconciliation pass.
+    const timerId = setTimeout(setup, 0);
 
     return () => {
-      try {
-        chart.removeSeries(series);
-      } catch {
-        // Chart may already be disposed
+      cancelled = true;
+      clearTimeout(timerId);
+      // createdSeries may still be null if the timeout never fired.
+      const seriesToRemove = createdSeries ?? seriesRef.current;
+      if (seriesToRemove) {
+        try {
+          chart.removeSeries(seriesToRemove);
+        } catch {
+          // Chart may already be disposed during remount.
+        }
       }
       seriesRef.current = null;
     };

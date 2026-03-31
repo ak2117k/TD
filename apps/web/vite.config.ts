@@ -8,6 +8,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      '@td/shared': path.resolve(__dirname, '../../packages/shared/src'),
     },
   },
   server: {
@@ -17,9 +18,11 @@ export default defineConfig({
         target: 'http://localhost:3001',
         changeOrigin: true,
       },
-      '/ws': {
+      '/socket.io': {
         target: 'ws://localhost:3001',
+        changeOrigin: true,
         ws: true,
+        rewriteWsOrigin: true,
       },
     },
   },

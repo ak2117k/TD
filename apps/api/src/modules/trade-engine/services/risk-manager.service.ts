@@ -154,7 +154,8 @@ export class RiskManagerService {
       dailyLossLimit: settings.maxDailyLoss,
       positionsUsed: openTrades.length,
       positionsLimit: settings.maxConcurrentPositions,
-      capitalUsed: this.currentCapitalDeployed,
+      capitalDeployed: this.currentCapitalDeployed,
+      capitalLimit: settings.maxCapitalPerTrade * settings.maxConcurrentPositions,
       killSwitchActive: this.killSwitchActive,
     };
   }

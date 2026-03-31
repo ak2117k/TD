@@ -61,7 +61,7 @@ export class NewsSentimentService {
     summary: string,
   ): Promise<SentimentResult> {
     const response = await firstValueFrom(
-      this.httpService.post('http://localhost:5000/api/sentiment', {
+      this.httpService.post<any>('http://localhost:5000/api/sentiment', {
         title,
         summary,
       }),

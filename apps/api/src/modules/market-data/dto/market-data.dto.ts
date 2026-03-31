@@ -60,6 +60,14 @@ export class GetCandlesQueryDto {
 
   @IsDateString()
   to: string;
+
+  /**
+   * Optional exchange override used when the instrument is not found in the
+   * local database (e.g., MCX commodity tokens).  Defaults to "NSE".
+   */
+  @IsOptional()
+  @IsString()
+  exchange?: string;
 }
 
 export class SearchInstrumentDto {

@@ -20,7 +20,7 @@ export function SearchInput({
   className,
 }: SearchInputProps) {
   const [internal, setInternal] = useState(value);
-  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   // Sync external value changes
   useEffect(() => {

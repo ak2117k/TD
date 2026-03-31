@@ -7,6 +7,9 @@ import { CandleAggregatorService } from './services/candle-aggregator.service';
 import { InstrumentService } from './services/instrument.service';
 import { MarketDataRepository } from './repositories/market-data.repository';
 import { OITrackerProcessor } from './workers/oi-tracker.processor';
+import { AngelOneAuthService } from './services/angel-one-auth.service';
+import { AngelOneWebSocketService } from './services/angel-one-websocket.service';
+import { AngelOneAdapterService } from './services/angel-one-adapter.service';
 
 @Module({
   imports: [
@@ -21,6 +24,11 @@ import { OITrackerProcessor } from './workers/oi-tracker.processor';
     CandleAggregatorService,
     InstrumentService,
 
+    // Angel One broker services
+    AngelOneAuthService,
+    AngelOneWebSocketService,
+    AngelOneAdapterService,
+
     // Gateway (WebSocket)
     MarketDataGateway,
 
@@ -30,13 +38,10 @@ import { OITrackerProcessor } from './workers/oi-tracker.processor';
     // Bull queue processor
     OITrackerProcessor,
 
-    // Broker adapter placeholder — provide `null` if no adapter is registered.
-    // When the AngelOneAdapterService module is imported alongside this module,
-    // it should provide a value for BROKER_ADAPTER_TOKEN in the parent module
-    // or via a shared providers module.
+    // Wire the Angel One adapter as the broker adapter
     {
       provide: BROKER_ADAPTER_TOKEN,
-      useValue: null,
+      useExisting: AngelOneAdapterService,
     },
   ],
   exports: [
@@ -45,6 +50,9 @@ import { OITrackerProcessor } from './workers/oi-tracker.processor';
     InstrumentService,
     MarketDataRepository,
     MarketDataGateway,
+    AngelOneAuthService,
+    AngelOneAdapterService,
+    BROKER_ADAPTER_TOKEN,
   ],
 })
 export class MarketDataModule {}

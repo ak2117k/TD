@@ -153,7 +153,8 @@ export interface DailyRiskStatus {
   dailyLossLimit: number;
   positionsUsed: number;
   positionsLimit: number;
-  capitalUsed: number;
+  capitalDeployed: number;
+  capitalLimit: number;
   killSwitchActive: boolean;
 }
 

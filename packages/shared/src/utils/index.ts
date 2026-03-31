@@ -6,18 +6,25 @@ import {
 } from '../constants';
 
 /**
- * Check if Indian equity market is currently open (IST)
+ * Check if Indian equity market is currently open (IST).
+ * Uses Intl.DateTimeFormat for reliable IST conversion regardless of host timezone.
  */
 export function isMarketOpen(): boolean {
   const now = new Date();
-  const istOffset = 5.5 * 60 * 60 * 1000;
-  const ist = new Date(now.getTime() + istOffset + now.getTimezoneOffset() * 60 * 1000);
 
-  const day = ist.getDay();
-  if (day === 0 || day === 6) return false; // Weekend
+  const istParts = new Intl.DateTimeFormat('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    hour: 'numeric',
+    minute: 'numeric',
+    weekday: 'short',
+    hour12: false,
+  }).formatToParts(now);
 
-  const hours = ist.getHours();
-  const minutes = ist.getMinutes();
+  const weekday = istParts.find((p) => p.type === 'weekday')?.value ?? '';
+  if (weekday === 'Sat' || weekday === 'Sun') return false;
+
+  const hours = Number(istParts.find((p) => p.type === 'hour')?.value ?? 0);
+  const minutes = Number(istParts.find((p) => p.type === 'minute')?.value ?? 0);
   const currentMinutes = hours * 60 + minutes;
   const openMinutes = MARKET_OPEN_HOUR * 60 + MARKET_OPEN_MINUTE;
   const closeMinutes = MARKET_CLOSE_HOUR * 60 + MARKET_CLOSE_MINUTE;

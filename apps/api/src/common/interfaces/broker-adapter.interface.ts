@@ -92,5 +92,25 @@ export interface BrokerAdapter {
   ): Promise<any[]>;
 
   /** Search instruments */
-  searchInstruments(query: string): Promise<any[]>;
+  searchInstruments(query: string, exchange?: string): Promise<any[]>;
+
+  /** Download the full instrument master list for a given exchange */
+  fetchInstrumentMaster?(exchange?: string): Promise<any[]>;
+
+  /** Get option contracts for an underlying from the instrument master */
+  getOptionContracts?(
+    underlying: string,
+    instrumentMaster?: any[],
+  ): Promise<
+    Array<{
+      token: string;
+      symbol: string;
+      name: string;
+      exchange: string;
+      expiry: Date;
+      strike: number;
+      optionType: 'CE' | 'PE';
+      lotSize: number;
+    }>
+  >;
 }

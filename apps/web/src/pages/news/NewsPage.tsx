@@ -1,6 +1,6 @@
 import { Newspaper, RefreshCw, TrendingUp, TrendingDown, Minus } from 'lucide-react';
 import { useNews } from '@/hooks/useNews';
-import { NewsFeed, NewsFilters, SentimentBadge } from '@/components/news';
+import { NewsFeed, NewsFilters } from '@/components/news';
 import { cn } from '@/utils/cn';
 
 function formatTime(date: Date | null): string {

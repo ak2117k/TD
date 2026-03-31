@@ -4,22 +4,20 @@ import { useAutoTradeStore } from '@/stores/auto-trade-store';
 import toast from 'react-hot-toast';
 
 export function useAutoTrade() {
-  const {
-    status,
-    pendingApprovals,
-    isLoading,
-    fetchStatus,
-    fetchPendingApprovals,
-    approveSignal,
-    rejectSignal,
-    forceExecute,
-    triggerScan,
-    addPendingApproval,
-    removePendingApproval,
-    setStatus,
-  } = useAutoTradeStore();
+  const status = useAutoTradeStore((s) => s.status);
+  const pendingApprovals = useAutoTradeStore((s) => s.pendingApprovals);
+  const isLoading = useAutoTradeStore((s) => s.isLoading);
+  const fetchStatus = useAutoTradeStore((s) => s.fetchStatus);
+  const fetchPendingApprovals = useAutoTradeStore((s) => s.fetchPendingApprovals);
+  const approveSignal = useAutoTradeStore((s) => s.approveSignal);
+  const rejectSignal = useAutoTradeStore((s) => s.rejectSignal);
+  const forceExecute = useAutoTradeStore((s) => s.forceExecute);
+  const triggerScan = useAutoTradeStore((s) => s.triggerScan);
+  const addPendingApproval = useAutoTradeStore((s) => s.addPendingApproval);
+  const removePendingApproval = useAutoTradeStore((s) => s.removePendingApproval);
+  const setStatus = useAutoTradeStore((s) => s.setStatus);
 
-  const intervalRef = useRef<ReturnType<typeof setInterval>>();
+  const intervalRef = useRef<ReturnType<typeof setInterval>>(undefined);
 
   useEffect(() => {
     fetchStatus();

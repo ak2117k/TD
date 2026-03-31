@@ -20,7 +20,7 @@ export default function SymbolSearch() {
   const [highlightIndex, setHighlightIndex] = useState(-1);
   const inputRef = useRef<HTMLInputElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const doSearch = useCallback(async (searchQuery: string) => {
     if (searchQuery.length < 1) {

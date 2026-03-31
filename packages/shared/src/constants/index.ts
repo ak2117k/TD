@@ -28,6 +28,43 @@ export const INDICES = {
   NIFTY_IT: { symbol: 'NIFTY IT', token: '99926013', exchange: 'NSE' },
 } as const;
 
+// Sector index tokens (Angel One NSE)
+export const SECTOR_INDICES = {
+  NIFTY_IT: { symbol: 'NIFTY IT', token: '99926013', exchange: 'NSE', sector: 'IT' },
+  NIFTY_BANK: { symbol: 'NIFTY BANK', token: '99926009', exchange: 'NSE', sector: 'Banking' },
+  NIFTY_PHARMA: { symbol: 'NIFTY PHARMA', token: '99926017', exchange: 'NSE', sector: 'Pharma' },
+  NIFTY_AUTO: { symbol: 'NIFTY AUTO', token: '99926021', exchange: 'NSE', sector: 'Auto' },
+  NIFTY_FMCG: { symbol: 'NIFTY FMCG', token: '99926015', exchange: 'NSE', sector: 'FMCG' },
+  NIFTY_METAL: { symbol: 'NIFTY METAL', token: '99926023', exchange: 'NSE', sector: 'Metal' },
+  NIFTY_ENERGY: { symbol: 'NIFTY ENERGY', token: '99926019', exchange: 'NSE', sector: 'Energy' },
+  NIFTY_REALTY: { symbol: 'NIFTY REALTY', token: '99926027', exchange: 'NSE', sector: 'Realty' },
+  NIFTY_INFRA: { symbol: 'NIFTY INFRA', token: '99926029', exchange: 'NSE', sector: 'Infra' },
+  NIFTY_MEDIA: { symbol: 'NIFTY MEDIA', token: '99926031', exchange: 'NSE', sector: 'Media' },
+  NIFTY_PSU_BANK: { symbol: 'NIFTY PSU BANK', token: '99926033', exchange: 'NSE', sector: 'PSU Bank' },
+  NIFTY_PVT_BANK: { symbol: 'NIFTY PVT BANK', token: '99926035', exchange: 'NSE', sector: 'Pvt Bank' },
+  NIFTY_FIN_SERVICE: { symbol: 'NIFTY FIN SERVICE', token: '99926011', exchange: 'NSE', sector: 'Fin Services' },
+  NIFTY_HEALTHCARE: { symbol: 'NIFTY HEALTHCARE', token: '99926041', exchange: 'NSE', sector: 'Healthcare' },
+  NIFTY_CONSUMER: { symbol: 'NIFTY CONSUMER', token: '99926039', exchange: 'NSE', sector: 'Consumer' },
+} as const;
+
+// Major stocks for watchlist/polling (Angel One NSE)
+export const MAJOR_STOCKS = {
+  RELIANCE: { symbol: 'RELIANCE', token: '2885', exchange: 'NSE' },
+  TCS: { symbol: 'TCS', token: '11536', exchange: 'NSE' },
+  HDFCBANK: { symbol: 'HDFCBANK', token: '1333', exchange: 'NSE' },
+  INFY: { symbol: 'INFY', token: '1594', exchange: 'NSE' },
+  ICICIBANK: { symbol: 'ICICIBANK', token: '4963', exchange: 'NSE' },
+} as const;
+
+// Major MCX commodity tokens (Angel One — placeholder tokens, may change with expiry)
+export const COMMODITIES = {
+  GOLD: { symbol: 'GOLD', token: '66745', exchange: 'MCX', sector: 'Gold' },
+  SILVER: { symbol: 'SILVER', token: '66754', exchange: 'MCX', sector: 'Silver' },
+  CRUDEOIL: { symbol: 'CRUDEOIL', token: '66767', exchange: 'MCX', sector: 'Crude Oil' },
+  NATURALGAS: { symbol: 'NATURALGAS', token: '66781', exchange: 'MCX', sector: 'Natural Gas' },
+  COPPER: { symbol: 'COPPER', token: '66799', exchange: 'MCX', sector: 'Copper' },
+} as const;
+
 // Candle timeframes
 export const TIMEFRAMES = {
   ONE_MIN: '1m',

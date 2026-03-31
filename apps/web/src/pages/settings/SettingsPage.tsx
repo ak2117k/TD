@@ -144,7 +144,10 @@ const autoTradeModes: {
 // ---- Main Component ----
 
 export default function SettingsPage() {
-  const { settings, isLoading, updateSettings, loadSettings } = useSettingsStore();
+  const settings = useSettingsStore((s) => s.settings);
+  const isLoading = useSettingsStore((s) => s.isLoading);
+  const updateSettings = useSettingsStore((s) => s.updateSettings);
+  const loadSettings = useSettingsStore((s) => s.loadSettings);
 
   // Local state for non-store settings
   const [strategies, setStrategies] = useState<StrategyInfo[]>([]);

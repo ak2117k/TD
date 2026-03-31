@@ -36,7 +36,7 @@ const defaultRiskStatus: RiskStatus = {
   capitalLimit: 100000,
 };
 
-export const useTradeStore = create<TradeState>((set, get) => ({
+export const useTradeStore = create<TradeState>((set) => ({
   openTrades: [],
   positions: [],
   recentTrades: [],

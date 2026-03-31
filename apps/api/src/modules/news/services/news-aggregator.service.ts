@@ -22,6 +22,7 @@ interface ParsedArticle {
 }
 
 const RSS_SOURCES: RSSSource[] = [
+  // Indian market sources
   {
     name: 'Economic Times',
     url: 'https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms',
@@ -36,6 +37,69 @@ const RSS_SOURCES: RSSSource[] = [
     name: 'LiveMint',
     url: 'https://www.livemint.com/rss/markets',
     category: 'indian',
+  },
+  // Global market sources
+  {
+    name: 'Reuters Business',
+    url: 'https://www.reutersagency.com/feed/?best-topics=business-finance',
+    category: 'global',
+  },
+  {
+    name: 'CNBC World',
+    url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100727362',
+    category: 'global',
+  },
+  {
+    name: 'MarketWatch',
+    url: 'https://feeds.content.dowjones.io/public/rss/mw_topstories',
+    category: 'global',
+  },
+  // Sector-specific sources
+  {
+    name: 'ET Auto',
+    url: 'https://auto.economictimes.indiatimes.com/rss/topstories',
+    category: 'sector',
+  },
+  {
+    name: 'ET Tech',
+    url: 'https://economictimes.indiatimes.com/tech/rssfeeds/13357270.cms',
+    category: 'sector',
+  },
+  {
+    name: 'ET Energy',
+    url: 'https://energy.economictimes.indiatimes.com/rss/topstories',
+    category: 'sector',
+  },
+  {
+    name: 'ET Pharma',
+    url: 'https://health.economictimes.indiatimes.com/rss/topstories',
+    category: 'sector',
+  },
+  {
+    name: 'ET BFSI',
+    url: 'https://bfsi.economictimes.indiatimes.com/rss/topstories',
+    category: 'sector',
+  },
+  {
+    name: 'ET Realty',
+    url: 'https://realty.economictimes.indiatimes.com/rss/topstories',
+    category: 'sector',
+  },
+  // Company-specific sources
+  {
+    name: 'ET Earnings',
+    url: 'https://economictimes.indiatimes.com/markets/stocks/earnings/rssfeeds/12aborede_2.cms',
+    category: 'company',
+  },
+  {
+    name: 'ET Stock News',
+    url: 'https://economictimes.indiatimes.com/markets/stocks/news/rssfeeds/2146842.cms',
+    category: 'company',
+  },
+  {
+    name: 'LiveMint Companies',
+    url: 'https://www.livemint.com/rss/companies',
+    category: 'company',
   },
 ];
 
@@ -219,7 +283,7 @@ export class NewsAggregatorService {
   private async fetchFromSource(source: RSSSource): Promise<ParsedArticle[]> {
     try {
       const response = await firstValueFrom(
-        this.httpService.get(source.url, {
+        this.httpService.get<any>(source.url, {
           timeout: 10000,
           headers: {
             'User-Agent': 'TD-Automation-News-Bot/1.0',

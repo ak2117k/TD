@@ -9,7 +9,7 @@ import {
 } from '@nestjs/common';
 import { AutoTradeService } from '../services/auto-trade.service';
 
-@Controller('auto-trade')
+@Controller('api/auto-trade')
 export class AutoTradeController {
   constructor(private readonly autoTradeService: AutoTradeService) {}
 

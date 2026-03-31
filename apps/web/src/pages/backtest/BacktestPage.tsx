@@ -45,13 +45,11 @@ export default function BacktestPage() {
     updateConfig,
     runBacktest,
     compareStrategies,
-    fetchHistory,
     loadBacktest,
     deleteBacktest,
     addToCompare,
     removeFromCompare,
     toggleCompareMode,
-    clearResults,
   } = useBacktest();
 
   const [showHistory, setShowHistory] = useState(false);
@@ -173,7 +171,7 @@ export default function BacktestPage() {
               <LoadingSkeleton variant="text" height="24px" className="mb-4" />
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                 {Array.from({ length: 8 }, (_, i) => (
-                  <LoadingSkeleton key={i} variant="rectangle" height="80px" />
+                  <LoadingSkeleton key={i} variant="card" height="80px" />
                 ))}
               </div>
             </div>
@@ -250,7 +248,7 @@ export default function BacktestPage() {
           {isLoadingHistory && (
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {Array.from({ length: 6 }, (_, i) => (
-                <LoadingSkeleton key={i} variant="rectangle" height="140px" />
+                <LoadingSkeleton key={i} variant="card" height="140px" />
               ))}
             </div>
           )}

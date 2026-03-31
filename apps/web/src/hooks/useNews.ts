@@ -1,10 +1,5 @@
-import { useEffect, useRef } from 'react';
-import {
-  useNewsStore,
-  selectSentimentCounts,
-  selectTrendingSymbols,
-  selectSources,
-} from '@/stores/news-store';
+import { useEffect, useRef, useMemo } from 'react';
+import { useNewsStore } from '@/stores/news-store';
 import { wsService } from '@/services/websocket';
 import type { NewsItem } from '@/types';
 
@@ -22,9 +17,36 @@ export function useNews() {
   const isRefreshing = useNewsStore((s) => s.isRefreshing);
   const total = useNewsStore((s) => s.total);
   const lastUpdated = useNewsStore((s) => s.lastUpdated);
-  const sentimentCounts = useNewsStore(selectSentimentCounts);
-  const trendingSymbols = useNewsStore(selectTrendingSymbols);
-  const sources = useNewsStore(selectSources);
+
+  const sentimentCounts = useMemo(() => {
+    const counts = { bullish: 0, bearish: 0, neutral: 0 };
+    for (const article of articles) {
+      const s = article.sentiment as keyof typeof counts;
+      if (s in counts) counts[s]++;
+    }
+    return counts;
+  }, [articles]);
+
+  const trendingSymbols = useMemo(() => {
+    const symbolMap = new Map<string, number>();
+    for (const article of articles) {
+      for (const symbol of article.relatedSymbols) {
+        symbolMap.set(symbol, (symbolMap.get(symbol) ?? 0) + 1);
+      }
+    }
+    return Array.from(symbolMap.entries())
+      .map(([symbol, count]) => ({ symbol, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+  }, [articles]);
+
+  const sources = useMemo(() => {
+    const sourceSet = new Set<string>();
+    for (const article of articles) {
+      sourceSet.add(article.source);
+    }
+    return Array.from(sourceSet).sort();
+  }, [articles]);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {

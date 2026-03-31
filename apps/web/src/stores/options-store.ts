@@ -79,16 +79,16 @@ export const useOptionsStore = create<OptionsState>((set, get) => ({
       });
       const chain: OptionsChainEntry[] = res.data.chain ?? [];
 
-      // Derive spot price from ATM strike data
-      let spotPrice = get().spotPrice;
-      if (chain.length > 0) {
-        // Estimate spot from mid-chain strike
+      // Use spot price from API response if available
+      let spotPrice = res.data.spotPrice ?? 0;
+
+      // Fallback: estimate spot from chain data
+      if (spotPrice === 0 && chain.length > 0) {
         const midIdx = Math.floor(chain.length / 2);
         const midStrike = chain[midIdx].strikePrice;
-        // If we have both CE and PE at ATM, spot is approximately at strike where CE ltp ~ PE ltp
         let closestDiff = Infinity;
         for (const entry of chain) {
-          if (entry.ceData && entry.peData) {
+          if (entry.ceData && entry.peData && entry.ceData.ltp > 0 && entry.peData.ltp > 0) {
             const diff = Math.abs(entry.ceData.ltp - entry.peData.ltp);
             if (diff < closestDiff) {
               closestDiff = diff;

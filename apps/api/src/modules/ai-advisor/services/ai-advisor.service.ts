@@ -50,7 +50,7 @@ export class AIAdvisorService {
   ) {
     this.aiEngineUrl =
       this.configService.get<string>('AI_ENGINE_URL') ||
-      'http://localhost:8000';
+      'http://localhost:5000';
   }
 
   /**
@@ -69,15 +69,539 @@ export class AIAdvisorService {
       );
       return response.data;
     } catch (error) {
-      this.logger.error('Failed to reach AI engine for ask-advisor', error);
+      this.logger.warn(
+        'AI engine unreachable — using built-in advisor fallback',
+        error?.message ?? error,
+      );
+      return this.generateBuiltInResponse(question, context);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Built-in rule-based advisor (fallback when Python engine is unavailable)
+  // ---------------------------------------------------------------------------
+
+  private generateBuiltInResponse(
+    question: string,
+    context: Record<string, any>,
+  ): AIResponse {
+    const q = question.toLowerCase().trim();
+
+    if (this.matchesTradeAssessment(q)) {
+      return this.assessTrade(context);
+    }
+    if (this.matchesLossAnalysis(q)) {
+      return this.analyzeLosses(context.recent_trades ?? []);
+    }
+    if (this.matchesPerformanceQuery(q)) {
+      return this.summarizePerformance(context);
+    }
+    if (this.matchesImprovementQuery(q)) {
+      return this.suggestImprovements(context);
+    }
+    return this.handleGeneralQuestion(question, context);
+  }
+
+  // --- Pattern matchers ---
+
+  private matchesTradeAssessment(q: string): boolean {
+    return [
+      /should i (take|enter|buy|sell)/,
+      /is this.*(good|bad).*(trade|setup|signal)/,
+      /(take|enter) this trade/,
+      /trade (worth|good)/,
+    ].some((p) => p.test(q));
+  }
+
+  private matchesLossAnalysis(q: string): boolean {
+    return [
+      /why.*(lose|lost|losing|loss)/,
+      /what went wrong/,
+      /losing trades/,
+      /why.*(down|red|negative)/,
+      /analyze.*(losses|losing)/,
+    ].some((p) => p.test(q));
+  }
+
+  private matchesPerformanceQuery(q: string): boolean {
+    return [
+      /how am i doing/,
+      /(my|overall).*(performance|results|stats)/,
+      /how.*(performing|going)/,
+      /(show|tell).*(performance|summary|stats)/,
+      /am i.*(profit|doing well|doing good)/,
+    ].some((p) => p.test(q));
+  }
+
+  private matchesImprovementQuery(q: string): boolean {
+    return [
+      /what should i (improve|change|fix)/,
+      /how.*(improve|better|get better)/,
+      /(tips|advice|suggestions)/,
+      /what.*(wrong|change|optimize)/,
+      /best strategy/,
+    ].some((p) => p.test(q));
+  }
+
+  // --- Response generators ---
+
+  private assessTrade(context: Record<string, any>): AIResponse {
+    const stats = context.stats ?? {};
+    const recentTrades: any[] = context.recent_trades ?? [];
+
+    const insights: string[] = [];
+    const actions: string[] = [];
+    let confidence = 0.5;
+
+    const winRate = stats.win_rate ?? 50;
+    if (winRate < 40) {
+      insights.push(
+        `Your recent win rate is low (${winRate}%), so be selective with entries.`,
+      );
+      confidence -= 0.15;
+      actions.push('Wait for higher-confidence setups');
+    } else if (winRate > 60) {
+      insights.push(
+        `Your win rate is strong at ${winRate}%. Current form supports taking trades.`,
+      );
+      confidence += 0.1;
+    }
+
+    // Losing streak check
+    let recentLosses = 0;
+    for (const t of recentTrades.slice(0, 5)) {
+      if ((t.pnl ?? 0) < 0 && t.status === 'CLOSED') recentLosses++;
+      else break;
+    }
+    if (recentLosses >= 3) {
+      insights.push(
+        `You are on a ${recentLosses}-trade losing streak. Consider pausing.`,
+      );
+      confidence -= 0.2;
+      actions.push('Take a break and review recent losses before entering');
+    } else if (recentLosses === 0 && recentTrades.length >= 3) {
+      insights.push(
+        'You are on a winning streak. Stay disciplined with your stops.',
+      );
+      confidence += 0.05;
+    }
+
+    const openPositions = stats.open_positions ?? 0;
+    if (openPositions >= 4) {
+      insights.push(
+        `You have ${openPositions} open positions. Adding more increases concentration risk.`,
+      );
+      actions.push('Consider closing an existing position first');
+      confidence -= 0.1;
+    }
+
+    let answer: string;
+    if (confidence >= 0.6) {
+      answer =
+        'Based on your recent performance, conditions look favorable for taking a trade. ' +
+        'Make sure it fits your risk management rules: proper stop-loss, position sizing, ' +
+        'and a minimum 1:2 risk-reward ratio.';
+    } else if (confidence >= 0.4) {
+      answer =
+        'The situation is neutral. While there is no strong reason to avoid trading, ' +
+        'be selective and only enter on high-confidence signals. ' +
+        'Ensure your stop-loss is tight and position size is conservative.';
+    } else {
+      answer =
+        'I would recommend caution right now. Your recent trading patterns suggest ' +
+        'it may be better to sit this one out or reduce size. ' +
+        'Focus on reviewing what is not working before adding new positions.';
+    }
+
+    if (insights.length === 0) {
+      insights.push(
+        'Limited context available — trade with standard risk parameters.',
+      );
+    }
+    if (actions.length === 0) {
+      actions.push('Verify signal confidence is HIGH or VERY_HIGH before entering');
+      actions.push('Set stop-loss and target before placing the order');
+    }
+
+    return {
+      answer,
+      confidence: Math.round(Math.min(1, Math.max(0, confidence)) * 100) / 100,
+      relatedInsights: insights,
+      suggestedActions: actions,
+    };
+  }
+
+  private analyzeLosses(trades: any[]): AIResponse {
+    const closedTrades = trades.filter((t: any) => t.status === 'CLOSED');
+    const losingTrades = closedTrades.filter((t: any) => (t.pnl ?? 0) < 0);
+
+    if (losingTrades.length === 0) {
       return {
         answer:
-          'I am unable to connect to the AI engine right now. Please try again in a moment.',
-        confidence: 0,
-        relatedInsights: [],
-        suggestedActions: ['Check that the AI engine is running'],
+          'Great news — you have no losing trades in the recent period! Keep up the discipline.',
+        confidence: 0.9,
+        relatedInsights: ['No losses detected in recent trades'],
+        suggestedActions: ['Continue current strategy execution'],
       };
     }
+
+    const totalLoss = losingTrades.reduce(
+      (s: number, t: any) => s + (t.pnl ?? 0),
+      0,
+    );
+    const avgLoss = totalLoss / losingTrades.length;
+
+    const insights: string[] = [];
+    const actions: string[] = [];
+
+    // Strategy breakdown
+    const stratLosses: Record<string, number> = {};
+    for (const t of losingTrades) {
+      const strat = t.strategy ?? 'unknown';
+      stratLosses[strat] = (stratLosses[strat] ?? 0) + 1;
+    }
+    const worstStrat = Object.entries(stratLosses).sort(
+      (a, b) => b[1] - a[1],
+    )[0];
+    if (worstStrat && worstStrat[1] >= 2) {
+      insights.push(
+        `Strategy "${worstStrat[0]}" has ${worstStrat[1]} losing trades — it may need parameter tuning.`,
+      );
+      actions.push(`Review "${worstStrat[0]}" entry and exit criteria`);
+    }
+
+    // Time-of-day analysis
+    const hourLosses: Record<number, number> = {};
+    for (const t of losingTrades) {
+      if (t.entry_time) {
+        try {
+          const h = new Date(t.entry_time).getHours();
+          hourLosses[h] = (hourLosses[h] ?? 0) + 1;
+        } catch {
+          // ignore parse errors
+        }
+      }
+    }
+    const worstHourEntry = Object.entries(hourLosses).sort(
+      (a, b) => Number(b[1]) - Number(a[1]),
+    )[0];
+    if (worstHourEntry && Number(worstHourEntry[1]) >= 2) {
+      insights.push(
+        `Multiple losses around ${worstHourEntry[0]}:00 — market conditions at this time may not suit your approach.`,
+      );
+      actions.push(`Consider avoiding trades around ${worstHourEntry[0]}:00`);
+    }
+
+    // Side analysis
+    const buyLosses = losingTrades.filter((t: any) => t.side === 'BUY').length;
+    const sellLosses = losingTrades.filter(
+      (t: any) => t.side === 'SELL',
+    ).length;
+    if (buyLosses > sellLosses * 2 && buyLosses >= 3) {
+      insights.push(
+        `Most losses (${buyLosses}) are on the BUY side. The market may be in a downtrend — consider more SELL-side setups.`,
+      );
+      actions.push('Check if market bias aligns with your trade direction');
+    }
+
+    const answerParts = [
+      `You have ${losingTrades.length} losing trades out of ${closedTrades.length} recent closed trades.`,
+      `Total loss: ${totalLoss.toFixed(2)} | Average loss per trade: ${avgLoss.toFixed(2)}.`,
+    ];
+    if (insights.length > 0) {
+      answerParts.push('Here is what I found:');
+      insights.forEach((ins, i) => answerParts.push(`${i + 1}. ${ins}`));
+    }
+
+    if (actions.length === 0) {
+      actions.push('Review your stop-loss placement for recent losing trades');
+      actions.push(
+        'Consider reducing position size until win rate improves',
+      );
+    }
+
+    return {
+      answer: answerParts.join(' '),
+      confidence: 0.75,
+      relatedInsights:
+        insights.length > 0
+          ? insights
+          : ['No clear pattern detected in losses'],
+      suggestedActions: actions,
+    };
+  }
+
+  private summarizePerformance(context: Record<string, any>): AIResponse {
+    const stats = context.stats ?? {};
+    const totalTrades = stats.total_trades ?? 0;
+    const winRate = stats.win_rate ?? 0;
+    const totalPnl = stats.total_pnl ?? 0;
+    const openPositions = stats.open_positions ?? 0;
+
+    if (totalTrades === 0) {
+      return {
+        answer:
+          'You have not closed any trades recently. Start trading to get personalized performance analysis and insights from the AI advisor.',
+        confidence: 0.9,
+        relatedInsights: ['No recent trading data available'],
+        suggestedActions: ['Begin trading to enable AI analysis'],
+      };
+    }
+
+    const insights: string[] = [];
+    const actions: string[] = [];
+
+    const pnlStr = totalPnl >= 0 ? `+${totalPnl.toFixed(2)}` : totalPnl.toFixed(2);
+    const rating =
+      winRate > 65 ? 'Excellent' : winRate > 50 ? 'Good' : 'Needs Work';
+
+    const answerParts = [
+      'Here is your recent performance overview:',
+      '',
+      `**Trades:** ${totalTrades} closed | **Win Rate:** ${winRate}% | **P&L:** ${pnlStr}`,
+      `**Open Positions:** ${openPositions} | **Rating:** ${rating}`,
+    ];
+
+    if (winRate >= 60) {
+      insights.push(`Strong win rate of ${winRate}% — you are trading well`);
+      actions.push('Consider slightly increasing position sizes');
+    } else if (winRate >= 45) {
+      insights.push(`Decent win rate of ${winRate}% — room for improvement`);
+      actions.push('Focus on filtering out low-confidence signals');
+    } else {
+      insights.push(
+        `Win rate of ${winRate}% is below target — review your setup criteria`,
+      );
+      actions.push('Reduce position sizes and trade only A+ setups');
+    }
+
+    if (totalPnl >= 0) {
+      insights.push(`Net profitable with ${pnlStr}`);
+    } else {
+      insights.push(`Currently in drawdown: ${pnlStr}`);
+      actions.push('Review risk management rules');
+    }
+
+    const dailyPerf: any[] = context.daily_performance ?? [];
+    if (dailyPerf.length > 0) {
+      const profitDays = dailyPerf.filter((d: any) => (d.pnl ?? 0) > 0).length;
+      const lossDays = dailyPerf.filter((d: any) => (d.pnl ?? 0) < 0).length;
+      answerParts.push(
+        `**Trading Days:** ${dailyPerf.length} | **Green Days:** ${profitDays} | **Red Days:** ${lossDays}`,
+      );
+    }
+
+    return {
+      answer: answerParts.join('\n'),
+      confidence: 0.85,
+      relatedInsights: insights,
+      suggestedActions: actions,
+    };
+  }
+
+  private suggestImprovements(context: Record<string, any>): AIResponse {
+    const trades: any[] = context.recent_trades ?? [];
+    const strategies: string[] = context.active_strategies ?? [];
+    const closedTrades = trades.filter((t: any) => t.status === 'CLOSED');
+
+    if (closedTrades.length < 3) {
+      return {
+        answer:
+          'I need more trade data to provide meaningful improvement suggestions. ' +
+          'Keep logging your trades and I will analyze patterns as they emerge.',
+        confidence: 0.5,
+        relatedInsights: ['Insufficient data for pattern analysis'],
+        suggestedActions: ['Continue trading to build analysis dataset'],
+      };
+    }
+
+    const insights: string[] = [];
+    const actions: string[] = [];
+
+    // Per-strategy stats
+    const stratStats: Record<
+      string,
+      { wins: number; losses: number; pnl: number }
+    > = {};
+    for (const t of closedTrades) {
+      const strat = t.strategy ?? 'unknown';
+      if (!stratStats[strat]) stratStats[strat] = { wins: 0, losses: 0, pnl: 0 };
+      if ((t.pnl ?? 0) > 0) stratStats[strat].wins++;
+      else stratStats[strat].losses++;
+      stratStats[strat].pnl += t.pnl ?? 0;
+    }
+
+    let bestStrat: string | null = null;
+    let bestWr = -1;
+    let worstStrat: string | null = null;
+    let worstWr = 101;
+
+    for (const [name, s] of Object.entries(stratStats)) {
+      const total = s.wins + s.losses;
+      if (total >= 3) {
+        const wr = (s.wins / total) * 100;
+        if (wr > bestWr) { bestWr = wr; bestStrat = name; }
+        if (wr < worstWr) { worstWr = wr; worstStrat = name; }
+      }
+    }
+
+    const answerParts = ['Here are my suggestions to improve your trading:'];
+
+    if (bestStrat) {
+      answerParts.push(
+        `\n**Best Strategy:** ${bestStrat} (${bestWr.toFixed(0)}% win rate) — consider allocating more capital here.`,
+      );
+      insights.push(`"${bestStrat}" is your strongest strategy`);
+      actions.push(`Increase allocation to "${bestStrat}"`);
+    }
+    if (worstStrat && worstStrat !== bestStrat && worstWr < 40) {
+      answerParts.push(
+        `\n**Weakest Strategy:** ${worstStrat} (${worstWr.toFixed(0)}% win rate) — review parameters or reduce usage.`,
+      );
+      insights.push(`"${worstStrat}" is underperforming`);
+      actions.push(`Review or pause "${worstStrat}"`);
+    }
+
+    // Risk-reward ratio
+    const winningTrades = closedTrades.filter((t: any) => (t.pnl ?? 0) > 0);
+    const losingTrades = closedTrades.filter((t: any) => (t.pnl ?? 0) < 0);
+    if (winningTrades.length > 0 && losingTrades.length > 0) {
+      const avgWin =
+        winningTrades.reduce((s: number, t: any) => s + (t.pnl ?? 0), 0) /
+        winningTrades.length;
+      const avgLoss = Math.abs(
+        losingTrades.reduce((s: number, t: any) => s + (t.pnl ?? 0), 0) /
+          losingTrades.length,
+      );
+      const rrRatio = avgLoss > 0 ? avgWin / avgLoss : 0;
+
+      if (rrRatio < 1.0) {
+        answerParts.push(
+          `\n**Risk-Reward:** Your average win (${avgWin.toFixed(2)}) is smaller than your average loss (${avgLoss.toFixed(2)}). Aim for at least 1:2 risk-reward.`,
+        );
+        insights.push('Risk-reward ratio is below 1:1');
+        actions.push('Set wider targets or tighter stop-losses');
+      } else if (rrRatio >= 2.0) {
+        answerParts.push(
+          `\n**Risk-Reward:** Excellent ratio of ${rrRatio.toFixed(1)}:1. Your winners are significantly larger than losers.`,
+        );
+        insights.push(`Strong risk-reward ratio of ${rrRatio.toFixed(1)}:1`);
+      }
+    }
+
+    // Unused strategies
+    const usedStrats = new Set(Object.keys(stratStats));
+    const unused = strategies.filter((s) => !usedStrats.has(s));
+    if (unused.length > 0) {
+      answerParts.push(
+        `\n**Unused Strategies:** ${unused.join(', ')} — consider testing them to diversify your approach.`,
+      );
+      actions.push(`Paper-trade ${unused[0]} to evaluate its performance`);
+    }
+
+    if (actions.length === 0) {
+      actions.push('Maintain current discipline and continue logging trades');
+    }
+
+    return {
+      answer: answerParts.join('\n'),
+      confidence: 0.8,
+      relatedInsights:
+        insights.length > 0
+          ? insights
+          : ['Trading patterns look reasonable overall'],
+      suggestedActions: actions,
+    };
+  }
+
+  private handleGeneralQuestion(
+    question: string,
+    context: Record<string, any>,
+  ): AIResponse {
+    const stats = context.stats ?? {};
+    const recentTrades: any[] = context.recent_trades ?? [];
+    const strategies: string[] = context.active_strategies ?? [];
+
+    const totalTrades = stats.total_trades ?? 0;
+    const winRate = stats.win_rate ?? 0;
+    const totalPnl = stats.total_pnl ?? 0;
+
+    const q = question.toLowerCase();
+    const insights: string[] = [];
+    const actions: string[] = [];
+    let answer: string;
+
+    if (/risk|stop|stoploss/.test(q)) {
+      answer =
+        'Risk management is the most important factor in long-term trading success. ' +
+        'Here are key principles:\n\n' +
+        '1. Never risk more than 1-2% of your capital on a single trade\n' +
+        '2. Always place stop-losses before entering a trade\n' +
+        '3. Maintain a minimum risk-reward ratio of 1:2\n' +
+        '4. Set a daily loss limit and stop trading when hit\n' +
+        '5. Reduce position sizes during losing streaks';
+      insights.push(
+        'Risk management is the foundation of consistent profits',
+      );
+      actions.push('Review your current stop-loss placement strategy');
+    } else if (/strateg(y|ies)/.test(q)) {
+      const active =
+        strategies.length > 0 ? strategies.join(', ') : 'none configured';
+      answer = `Your active strategies: ${active}.\n\nRecent performance: ${totalTrades} trades with ${winRate}% win rate.`;
+      if (totalTrades > 0) {
+        answer +=
+          ' I recommend focusing on strategies that show consistent results in the current market regime and reducing exposure to underperformers.';
+      }
+      insights.push(`Active strategies: ${active}`);
+      actions.push('Review strategy performance in the Portfolio tab');
+    } else if (/market|trend|direction/.test(q)) {
+      answer =
+        'I analyze your trading data and patterns rather than predicting market direction. ' +
+        'Based on your recent trades, I can tell you:\n\n';
+      if (recentTrades.length > 0) {
+        const buyCount = recentTrades.filter(
+          (t: any) => t.side === 'BUY',
+        ).length;
+        const sellCount = recentTrades.filter(
+          (t: any) => t.side === 'SELL',
+        ).length;
+        const pnlLabel = totalPnl >= 0 ? '+' : '';
+        answer +=
+          `- Recent trade bias: ${buyCount} BUY vs ${sellCount} SELL\n` +
+          `- Win rate: ${winRate}%\n` +
+          `- P&L: ${pnlLabel}${totalPnl.toFixed(2)}\n\n` +
+          'Align your trade direction with market structure for better results.';
+      } else {
+        answer += 'No recent trade data available to analyze bias.';
+      }
+      insights.push(
+        'Trade direction should align with market structure',
+      );
+      actions.push(
+        'Check signal confidence before entering directional trades',
+      );
+    } else {
+      answer =
+        'I am your AI trading advisor. Here is what I can help with:\n\n' +
+        '- **"How am I doing?"** — Performance summary\n' +
+        '- **"Why did I lose?"** — Loss pattern analysis\n' +
+        '- **"Should I take this trade?"** — Trade assessment\n' +
+        '- **"What should I improve?"** — Improvement suggestions\n\n' +
+        'You can also ask about risk management, strategies, or specific trades.';
+      if (totalTrades > 0) {
+        const pnlLabel = totalPnl >= 0 ? '+' : '';
+        answer += `\n\nQuick stats: ${totalTrades} trades | ${winRate}% win rate | P&L: ${pnlLabel}${totalPnl.toFixed(2)}`;
+      }
+      insights.push('Try asking specific questions for better insights');
+      actions.push('Ask about your performance or recent losses');
+    }
+
+    return {
+      answer,
+      confidence: 0.6,
+      relatedInsights: insights,
+      suggestedActions: actions,
+    };
   }
 
   /**
@@ -246,7 +770,7 @@ export class AIAdvisorService {
 
     try {
       const response = await firstValueFrom(
-        this.httpService.post(
+        this.httpService.post<any>(
           `${this.aiEngineUrl}/api/analyze-trade`,
           { trade: tradeInput, market_context: marketContext },
           { timeout: 30000 },

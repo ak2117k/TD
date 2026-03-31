@@ -3,9 +3,21 @@ Market regime detection for the TD Automation AI Engine.
 Determines whether the market is trending or ranging using ATR and directional analysis.
 """
 
-import numpy as np
+import logging
 from typing import List, Dict
-from .indicators import calculate_atr
+
+from .indicators import calculate_atr, _py_mean, _py_isnan
+
+_logger = logging.getLogger(__name__)
+
+try:
+    import numpy as np
+
+    _HAS_NUMPY = True
+except ImportError:
+    np = None  # type: ignore[assignment]
+    _HAS_NUMPY = False
+    _logger.warning("numpy is not available in market_regime — using pure-Python fallbacks")
 
 
 def detect_regime(candles: List[dict]) -> Dict:
@@ -30,7 +42,7 @@ def detect_regime(candles: List[dict]) -> Dict:
 
     atr_values = calculate_atr(candles, period=14)
     # Get the latest valid ATR
-    valid_atrs = [v for v in atr_values if not np.isnan(v)]
+    valid_atrs = [v for v in atr_values if not _py_isnan(v)]
     current_atr = valid_atrs[-1] if valid_atrs else 0.0
 
     closes = [c["close"] for c in candles]
@@ -46,7 +58,7 @@ def detect_regime(candles: List[dict]) -> Dict:
         efficiency_ratio = net_displacement / total_path  # 0 = choppy, 1 = perfectly directional
 
     # ATR relative to price (normalized volatility)
-    avg_price = np.mean(recent_closes)
+    avg_price = _py_mean(recent_closes)
     if avg_price == 0:
         normalized_atr = 0.0
     else:

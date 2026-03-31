@@ -5,10 +5,6 @@ import { ScheduleModule } from '@nestjs/schedule';
 import configuration from './config/configuration';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { MarketDataModule } from './modules/market-data/market-data.module';
-import { AngelOneAdapterService } from './modules/market-data/services/angel-one-adapter.service';
-import { AngelOneAuthService } from './modules/market-data/services/angel-one-auth.service';
-import { AngelOneWebSocketService } from './modules/market-data/services/angel-one-websocket.service';
-import { BROKER_ADAPTER_TOKEN } from './modules/market-data/services/market-feed.service';
 import { SettingsModule } from './modules/settings/settings.module';
 import { AlertsModule } from './modules/alerts/alerts.module';
 import { SignalGeneratorModule } from './modules/signal-generator/signal-generator.module';
@@ -77,17 +73,6 @@ import { AutoTradeModule } from './modules/auto-trade/auto-trade.module';
     // Auto-trade — signal-to-trade automation with approval workflow
     AutoTradeModule,
   ],
-  providers: [
-    // Angel One broker services
-    AngelOneAuthService,
-    AngelOneWebSocketService,
-    AngelOneAdapterService,
-
-    // Wire Angel One adapter as the broker adapter for MarketFeedService
-    {
-      provide: BROKER_ADAPTER_TOKEN,
-      useExisting: AngelOneAdapterService,
-    },
-  ],
+  providers: [],
 })
 export class AppModule {}

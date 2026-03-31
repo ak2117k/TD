@@ -1,4 +1,4 @@
-import { TrendingUp, TrendingDown, Target, Activity, Zap } from 'lucide-react';
+import { TrendingUp, Target, Activity, Zap } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import type { TradingSuggestion } from '@/stores/advisor-store';
 

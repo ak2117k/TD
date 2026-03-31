@@ -64,8 +64,8 @@ export class RsiReversalStrategy implements TradingStrategy {
       return null;
     }
 
-    // Guard against zero volume / flat market
-    if (ltp <= 0 || candles.every((c) => c.volume === 0)) {
+    // Guard against invalid price
+    if (ltp <= 0) {
       return null;
     }
 
@@ -227,7 +227,9 @@ export class RsiReversalStrategy implements TradingStrategy {
           }
         }
 
-        const qty = Math.floor(positionSize / entryPrice);
+        // positionSize = number of lots, each lot = 1 unit for backtest
+        // For indices like NIFTY, 1 lot = 50 qty; we use positionSize directly as qty
+        const qty = positionSize;
         const pnl =
           signal.side === 'BUY'
             ? (exitPrice - entryPrice) * qty

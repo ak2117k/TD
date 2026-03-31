@@ -10,7 +10,7 @@ import {
 import { BacktestService } from '../services/backtest.service';
 import { RunBacktestDto, CompareStrategiesDto } from '../dto/backtest.dto';
 
-@Controller('backtest')
+@Controller('api/backtest')
 export class BacktestController {
   constructor(private readonly backtestService: BacktestService) {}
 

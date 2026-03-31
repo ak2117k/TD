@@ -6,12 +6,29 @@ import {
 } from '@nestjs/common';
 import { StrategyRegistryService } from '../../signal-generator/services/strategy-registry.service';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
+import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { BacktestRepository } from '../repositories/backtest.repository';
 import { RunBacktestDto } from '../dto/backtest.dto';
 import type {
   BacktestResult,
   CandleData,
 } from '../../../common/interfaces/trading-strategy.interface';
+
+/**
+ * Token lookup map for common instruments so backtests can run even when the
+ * local instrument DB is empty.  Maps uppercase symbol → Angel One token/exchange.
+ */
+const TOKEN_MAP: Record<string, { token: string; exchange: string }> = {
+  'NIFTY': { token: '99926000', exchange: 'NSE' },
+  'BANKNIFTY': { token: '99926009', exchange: 'NSE' },
+  'FINNIFTY': { token: '99926037', exchange: 'NSE' },
+  'SENSEX': { token: '99919000', exchange: 'BSE' },
+  'RELIANCE': { token: '2885', exchange: 'NSE' },
+  'TCS': { token: '11536', exchange: 'NSE' },
+  'HDFCBANK': { token: '1333', exchange: 'NSE' },
+  'INFY': { token: '1594', exchange: 'NSE' },
+  'ICICIBANK': { token: '4963', exchange: 'NSE' },
+};
 
 export interface ComparisonResult {
   configs: RunBacktestDto[];
@@ -25,6 +42,7 @@ export class BacktestService {
   constructor(
     private readonly strategyRegistry: StrategyRegistryService,
     private readonly marketDataRepo: MarketDataRepository,
+    private readonly angelOneAdapter: AngelOneAdapterService,
     private readonly backtestRepo: BacktestRepository,
   ) {}
 
@@ -40,54 +58,119 @@ export class BacktestService {
       );
     }
 
-    // 2. Find the instrument to get instrumentId
+    // 2. Resolve instrument token and exchange for data fetching
+    let instrumentId: string | null = null;
+    let token: string = config.symbol;
+    let exchange: string = config.exchange;
+
     const instruments = await this.marketDataRepo.searchInstruments(
       config.symbol,
       config.exchange,
     );
 
-    if (instruments.length === 0) {
-      throw new NotFoundException(
-        `Instrument "${config.symbol}" not found on ${config.exchange}`,
-      );
+    if (instruments.length > 0) {
+      const instrument = instruments[0];
+      instrumentId = instrument.id;
+      token = instrument.token ?? token;
+      exchange = instrument.exchange ?? exchange;
+    } else {
+      // Instrument not in local DB — resolve from TOKEN_MAP
+      const mapped = TOKEN_MAP[config.symbol.toUpperCase()];
+      if (mapped) {
+        token = mapped.token;
+        exchange = mapped.exchange;
+        this.logger.warn(
+          `Instrument "${config.symbol}" not in DB, using TOKEN_MAP: token=${token} exchange=${exchange}`,
+        );
+      } else {
+        this.logger.warn(
+          `Instrument "${config.symbol}" not in DB or TOKEN_MAP, using symbol as token`,
+        );
+      }
     }
 
-    const instrument = instruments[0];
+    // 3. Fetch historical candles — try local DB first, fall back to Angel One
+    let candles: CandleData[] = [];
 
-    // 3. Fetch historical candles for the date range
-    const rawCandles = await this.marketDataRepo.getCandles(
-      instrument.id,
-      config.timeframe,
-      config.startDate,
-      config.endDate,
-    );
+    if (instrumentId) {
+      const rawCandles = await this.marketDataRepo.getCandles(
+        instrumentId,
+        config.timeframe,
+        config.startDate,
+        config.endDate,
+      );
 
-    if (rawCandles.length === 0) {
+      candles = rawCandles.map((c) => ({
+        timestamp: c.timestamp,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        volume: Number(c.volume),
+      }));
+    }
+
+    // Fall back to Angel One API when local DB has no data
+    if (candles.length === 0) {
+      this.logger.log(
+        `No local candle data for ${config.symbol}, fetching from Angel One (token=${token}, exchange=${exchange})`,
+      );
+
+      try {
+        const angelCandles = await this.angelOneAdapter.getHistoricalData(
+          token,
+          exchange,
+          config.timeframe,
+          config.startDate,
+          config.endDate,
+        );
+
+        candles = angelCandles.map((c) => ({
+          timestamp: c.timestamp instanceof Date ? c.timestamp : new Date(c.timestamp),
+          open: Number(c.open),
+          high: Number(c.high),
+          low: Number(c.low),
+          close: Number(c.close),
+          volume: Number(c.volume),
+        }));
+
+        this.logger.log(
+          `Fetched ${candles.length} candles from Angel One for ${config.symbol}`,
+        );
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        this.logger.error(`Angel One historical data fetch failed: ${msg}`);
+      }
+    }
+
+    if (candles.length === 0) {
       throw new BadRequestException(
-        `No candle data available for ${config.symbol} (${config.timeframe}) between ${config.startDate.toISOString()} and ${config.endDate.toISOString()}`,
+        `No candle data available for ${config.symbol} (${config.timeframe}) between ${config.startDate.toISOString()} and ${config.endDate.toISOString()}. ` +
+        `Checked local DB${instrumentId ? ` (instrumentId=${instrumentId})` : ''} and Angel One API (token=${token}).`,
       );
     }
-
-    // Convert DB candles to CandleData interface
-    const candles: CandleData[] = rawCandles.map((c) => ({
-      timestamp: c.timestamp,
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-      volume: Number(c.volume),
-    }));
 
     this.logger.log(
       `Running backtest: ${config.strategy} on ${config.symbol} (${candles.length} candles)`,
     );
 
-    // 4. Run the strategy backtest
+    // 4. Apply custom parameters if provided, then run backtest, then restore
+    const originalParams = strategy.getParameters();
+    if (config.parameters && Object.keys(config.parameters).length > 0) {
+      strategy.setParameters(config.parameters);
+      this.logger.log(
+        `Applied custom parameters: ${JSON.stringify(config.parameters)}`,
+      );
+    }
+
     const result = strategy.backtest({
       candles,
       initialCapital: config.initialCapital,
       positionSize: config.positionSize,
     });
+
+    // Restore original parameters so other backtests aren't affected
+    strategy.setParameters(originalParams);
 
     // 5. Save to DB
     await this.backtestRepo.saveBacktestRun({

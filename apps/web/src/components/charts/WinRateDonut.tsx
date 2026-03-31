@@ -1,4 +1,4 @@
-import { ResponsiveContainer, PieChart, Pie, Cell, Legend, Tooltip } from 'recharts';
+import { ResponsiveContainer, PieChart, Pie, Cell, Tooltip } from 'recharts';
 
 interface WinRateDonutProps {
   wins: number;
@@ -81,7 +81,7 @@ export default function WinRateDonut({ wins, losses }: WinRateDonutProps) {
             dataKey="value"
             strokeWidth={0}
           >
-            {data.map((entry, index) => (
+            {data.map((_entry, index) => (
               <Cell
                 key={`cell-${index}`}
                 fill={index === 0 ? COLORS.wins : COLORS.losses}

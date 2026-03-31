@@ -67,19 +67,53 @@ export class AngelOneWebSocketService extends EventEmitter implements OnModuleDe
     }
 
     try {
+      // Guard: ensure auth service is ready before attempting WebSocket connection
+      if (!this.authService.isAuthenticated()) {
+        throw new Error(
+          'Cannot connect WebSocket: auth service is not authenticated. ' +
+            'Ensure login() completes before calling connect().',
+        );
+      }
+
       // Dynamic import — the smartapi-javascript package exports WebSocketV2
+      // @ts-ignore — smartapi-javascript has no type declarations
       const { WebSocketV2 } = await import('smartapi-javascript');
 
+      const jwtToken = this.authService.getAuthToken();
       const feedToken = this.authService.getFeedToken();
       const clientId = this.authService.getClientId();
       const apiKey = this.authService.getApiKey();
 
+      // Diagnostic logging — show whether each credential is present (never log actual values)
+      this.logger.log(
+        `WebSocket auth check — jwtToken: ${jwtToken ? 'SET' : 'MISSING'}, ` +
+          `feedToken: ${feedToken ? 'SET' : 'MISSING'}, ` +
+          `clientId: ${clientId ? 'SET' : 'MISSING'}, ` +
+          `apiKey: ${apiKey ? 'SET' : 'MISSING'}`,
+      );
+
+      if (!jwtToken || !feedToken || !clientId || !apiKey) {
+        throw new Error(
+          'One or more auth tokens are undefined. ' +
+            `Missing: ${[
+              !jwtToken && 'jwtToken',
+              !feedToken && 'feedToken',
+              !clientId && 'clientId',
+              !apiKey && 'apiKey',
+            ]
+              .filter(Boolean)
+              .join(', ')}`,
+        );
+      }
+
       this.ws = new WebSocketV2({
-        client_code: clientId,
-        feed_token: feedToken,
-        api_key: apiKey,
+        jwttoken: jwtToken,
+        clientcode: clientId,
+        feedtoken: feedToken,
+        apikey: apiKey,
       });
 
+      this.logger.log('WebSocketV2 instance created, initiating connection...');
       await this.ws.connect();
       this.connected = true;
       this.reconnectAttempts = 0;

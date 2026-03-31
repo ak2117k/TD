@@ -41,6 +41,7 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
     const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
     const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
     const prevCandlesLenRef = useRef(0);
+    const prevFirstCandleTimeRef = useRef<number | null>(null);
 
     useImperativeHandle(ref, () => ({
       get chart() {
@@ -117,7 +118,6 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
 
       chart.priceScale('volume').applyOptions({
         scaleMargins: { top: 0.8, bottom: 0 },
-        drawTicks: false,
         borderVisible: false,
       });
 
@@ -154,16 +154,26 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
         candleSeriesRef.current = null;
         volumeSeriesRef.current = null;
         prevCandlesLenRef.current = 0;
+        prevFirstCandleTimeRef.current = null;
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     // Update candle data
     const updateData = useCallback(() => {
-      if (!candleSeriesRef.current || !volumeSeriesRef.current || candles.length === 0) return;
+      if (!candleSeriesRef.current || !volumeSeriesRef.current) return;
+
+      // Clear chart when candles are empty (e.g. symbol just changed)
+      if (candles.length === 0) {
+        candleSeriesRef.current.setData([]);
+        volumeSeriesRef.current.setData([]);
+        prevCandlesLenRef.current = 0;
+        prevFirstCandleTimeRef.current = null;
+        return;
+      }
 
       const candleData = candles.map((c) => ({
-        time: c.time as Time,
+        time: Math.floor(c.time) as Time,
         open: c.open,
         high: c.high,
         low: c.low,
@@ -171,16 +181,36 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
       }));
 
       const volumeData = candles.map((c) => ({
-        time: c.time as Time,
+        time: Math.floor(c.time) as Time,
         value: c.volume,
         color: c.close >= c.open ? 'rgba(0, 207, 132, 0.35)' : 'rgba(239, 68, 68, 0.35)',
       }));
 
-      // If data length changed significantly, do a full setData; otherwise just update the last candle
-      if (
-        prevCandlesLenRef.current === 0 ||
-        Math.abs(candles.length - prevCandlesLenRef.current) > 1
-      ) {
+      // Detect a symbol/dataset change: if the first candle's timestamp differs
+      // from what we saw before, this is a completely new dataset — force a full
+      // setData() by resetting the incremental counter.
+      const newFirstTime = candles[0].time;
+      if (prevFirstCandleTimeRef.current !== null && prevFirstCandleTimeRef.current !== newFirstTime) {
+        prevCandlesLenRef.current = 0;
+      }
+
+      const isIncremental =
+        prevCandlesLenRef.current > 0 &&
+        Math.abs(candles.length - prevCandlesLenRef.current) <= 1;
+
+      if (isIncremental) {
+        // Real-time update: try to update/append the last candle
+        try {
+          const lastCandle = candleData[candleData.length - 1];
+          const lastVolume = volumeData[volumeData.length - 1];
+          candleSeriesRef.current.update(lastCandle);
+          volumeSeriesRef.current.update(lastVolume);
+        } catch {
+          // Fallback to full setData if update fails (e.g. time out of order)
+          candleSeriesRef.current.setData(candleData);
+          volumeSeriesRef.current.setData(volumeData);
+        }
+      } else {
         candleSeriesRef.current.setData(candleData);
         volumeSeriesRef.current.setData(volumeData);
 
@@ -188,15 +218,10 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
         if (prevCandlesLenRef.current === 0) {
           chartRef.current?.timeScale().fitContent();
         }
-      } else {
-        // Real-time update: update or append the last candle
-        const lastCandle = candleData[candleData.length - 1];
-        const lastVolume = volumeData[volumeData.length - 1];
-        candleSeriesRef.current.update(lastCandle);
-        volumeSeriesRef.current.update(lastVolume);
       }
 
       prevCandlesLenRef.current = candles.length;
+      prevFirstCandleTimeRef.current = newFirstTime;
     }, [candles]);
 
     useEffect(() => {

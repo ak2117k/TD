@@ -340,7 +340,7 @@ export class PositionManagerService implements OnModuleInit {
 
   private subscribeToTicks(token: string): void {
     try {
-      this.marketFeedService.subscribeToFeed?.(
+      (this.marketFeedService as any).subscribeToFeed?.(
         [token],
         (tick: TickData) => this.updatePositionPnL(tick),
       );

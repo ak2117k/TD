@@ -38,9 +38,12 @@ export class RunBacktestDto {
 
   @IsOptional()
   @IsNumber()
-  @Min(0.01)
+  @Min(1)
   @Max(100)
   positionSize: number = 1;
+
+  @IsOptional()
+  parameters?: Record<string, any>;
 }
 
 export class CompareStrategiesDto {

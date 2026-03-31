@@ -4,11 +4,18 @@ Weighted ensemble calculation with 6 factors.
 """
 
 import logging
-import numpy as np
 from typing import Dict, Any, List, Optional
 
-from ..utils.indicators import calculate_sma
+from ..utils.indicators import calculate_sma, _py_mean, _py_isnan
 from ..utils.market_regime import detect_regime, regime_score_for_strategy
+
+try:
+    import numpy as np
+
+    _HAS_NUMPY = True
+except ImportError:
+    np = None  # type: ignore[assignment]
+    _HAS_NUMPY = False
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +88,7 @@ def _score_volume_confirmation(candles: List[dict], current_volume: Optional[flo
     if period < 1:
         return 50
 
-    avg_volume = np.mean(volumes[-period - 1:-1]) if len(volumes) > period else np.mean(volumes[:-1])
+    avg_volume = _py_mean(volumes[-period - 1:-1]) if len(volumes) > period else _py_mean(volumes[:-1])
     if avg_volume <= 0:
         return 50
 

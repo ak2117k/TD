@@ -1,15 +1,28 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { TradingStrategy } from '../../../common/interfaces/trading-strategy.interface';
 import { SettingsService } from '../../settings/services/settings.service';
+import { RsiReversalStrategy } from '../strategies/rsi-reversal.strategy';
+import { EmaCrossoverStrategy } from '../strategies/ema-crossover.strategy';
+import { VwapDeviationStrategy } from '../strategies/vwap-deviation.strategy';
 
 @Injectable()
 export class StrategyRegistryService implements OnModuleInit {
   private readonly logger = new Logger(StrategyRegistryService.name);
   private readonly strategies = new Map<string, TradingStrategy>();
 
-  constructor(private readonly settingsService: SettingsService) {}
+  constructor(
+    private readonly settingsService: SettingsService,
+    private readonly rsiReversalStrategy: RsiReversalStrategy,
+    private readonly emaCrossoverStrategy: EmaCrossoverStrategy,
+    private readonly vwapDeviationStrategy: VwapDeviationStrategy,
+  ) {}
 
   async onModuleInit(): Promise<void> {
+    // Register built-in strategies
+    this.register(this.rsiReversalStrategy);
+    this.register(this.emaCrossoverStrategy);
+    this.register(this.vwapDeviationStrategy);
+
     this.logger.log(
       `Strategy registry initialized with ${this.strategies.size} strategies`,
     );

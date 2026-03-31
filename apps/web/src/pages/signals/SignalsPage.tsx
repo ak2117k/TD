@@ -295,8 +295,8 @@ export default function SignalsPage() {
       ) : signals.length === 0 ? (
         <EmptyState
           icon={<Zap size={48} />}
-          title="No signals found"
-          description="Adjust your filters or run a new scan to discover trade opportunities."
+          title="No signals yet"
+          description="No trade signals have been generated. Click 'Scan Now' to run strategies against live market data, or check Settings to ensure at least one strategy is active."
           action={{ label: 'Scan Now', onClick: triggerScan }}
         />
       ) : viewMode === 'grid' ? (

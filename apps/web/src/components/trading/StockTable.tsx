@@ -1,8 +1,9 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowUpDown, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useMarketStore } from '@/stores/market-store';
 import type { Quote } from '@/types';
+import type { InstrumentResult } from '@/hooks/useInstrumentSearch';
 import PriceCell from './PriceCell';
 
 type SortField = 'symbol' | 'ltp' | 'change' | 'changePercent' | 'open' | 'high' | 'low' | 'volume';
@@ -12,11 +13,24 @@ interface StockTableProps {
   filter: string;
   exchangeFilter?: string;
   watchlistSymbols?: string[];
+  showCommoditiesPlaceholder?: boolean;
+  /** Instrument search results from API — shown when user is searching */
+  searchResults?: InstrumentResult[];
+  /** Whether the API search is in progress */
+  searchLoading?: boolean;
+  /** Called when user clicks a search result row to subscribe it to live feed */
+  onSubscribeToken?: (token: string, exchange: string, symbol: string) => void;
 }
 
 const PAGE_SIZE = 25;
 
-export default function StockTable({ filter, exchangeFilter, watchlistSymbols }: StockTableProps) {
+// F&O-relevant symbols — major indices and stocks with active F&O contracts
+const FNO_SYMBOLS = new Set([
+  'NIFTY', 'BANKNIFTY', 'FINNIFTY',
+  'RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'ICICIBANK',
+]);
+
+export default function StockTable({ filter, exchangeFilter, watchlistSymbols, showCommoditiesPlaceholder, searchResults, searchLoading, onSubscribeToken }: StockTableProps) {
   const quotes = useMarketStore((s) => s.quotes);
   const navigate = useNavigate();
   const [sortField, setSortField] = useState<SortField>('symbol');
@@ -32,7 +46,54 @@ export default function StockTable({ filter, exchangeFilter, watchlistSymbols }:
     }
   };
 
+  // When there are API search results, merge them with any live quotes we have
+  const isSearchActive = !!filter && filter.trim().length >= 2 && searchResults && searchResults.length > 0;
+
+  // Reset to page 0 when filter or search results change
+  useEffect(() => { setPage(0); }, [filter, searchResults]);
+
   const filtered = useMemo(() => {
+    // If we have API search results, build rows from those (merged with live quote data if available)
+    if (isSearchActive && searchResults) {
+      const quotesMap = quotes;
+      const rows: Quote[] = searchResults.map((inst) => {
+        // Check if we already have a live quote for this symbol
+        const liveQuote = quotesMap.get(inst.symbol);
+        if (liveQuote) return liveQuote;
+
+        // Return a placeholder row for instruments not yet in the live feed
+        return {
+          symbol: inst.symbol,
+          token: inst.token,
+          exchange: inst.exchange,
+          ltp: 0,
+          open: 0,
+          high: 0,
+          low: 0,
+          close: 0,
+          change: 0,
+          changePercent: 0,
+          volume: 0,
+          timestamp: new Date(),
+        } as Quote;
+      });
+
+      // Apply exchange filter if present
+      let list = rows;
+      if (exchangeFilter && exchangeFilter !== 'ALL') {
+        if (exchangeFilter === 'NFO') {
+          list = list.filter((q) => FNO_SYMBOLS.has(q.symbol));
+        } else if (exchangeFilter === 'MCX') {
+          list = list.filter((q) => q.exchange === 'MCX');
+        } else {
+          list = list.filter((q) => q.exchange === exchangeFilter);
+        }
+      }
+
+      return list;
+    }
+
+    // Default behavior: filter local quote cache
     let list = Array.from(quotes.values()) as Quote[];
 
     if (filter) {
@@ -40,7 +101,15 @@ export default function StockTable({ filter, exchangeFilter, watchlistSymbols }:
       list = list.filter((q) => q.symbol.toLowerCase().includes(lc));
     }
     if (exchangeFilter && exchangeFilter !== 'ALL') {
-      list = list.filter((q) => q.exchange === exchangeFilter);
+      if (exchangeFilter === 'NFO') {
+        // For F&O tab, show instruments whose symbols are in the F&O set
+        list = list.filter((q) => FNO_SYMBOLS.has(q.symbol));
+      } else if (exchangeFilter === 'MCX') {
+        // Commodities — no data yet, will be empty (handled by placeholder)
+        list = list.filter((q) => q.exchange === 'MCX');
+      } else {
+        list = list.filter((q) => q.exchange === exchangeFilter);
+      }
     }
     if (watchlistSymbols) {
       const set = new Set(watchlistSymbols);
@@ -58,7 +127,7 @@ export default function StockTable({ filter, exchangeFilter, watchlistSymbols }:
     });
 
     return list;
-  }, [quotes, filter, exchangeFilter, watchlistSymbols, sortField, sortDir]);
+  }, [quotes, filter, exchangeFilter, watchlistSymbols, sortField, sortDir, isSearchActive, searchResults]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const paged = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
@@ -95,16 +164,31 @@ export default function StockTable({ filter, exchangeFilter, watchlistSymbols }:
             {paged.length === 0 ? (
               <tr>
                 <td colSpan={8} className="py-8 text-center text-[var(--color-text-muted)]">
-                  {quotes.size === 0 ? 'Waiting for market data...' : 'No matching instruments'}
+                  {searchLoading
+                    ? 'Searching instruments...'
+                    : showCommoditiesPlaceholder
+                      ? 'No commodity data available'
+                      : quotes.size === 0
+                        ? 'Waiting for market data...'
+                        : isSearchActive
+                          ? `No matching instruments for "${filter}"`
+                          : 'No matching instruments'}
                 </td>
               </tr>
             ) : (
               paged.map((q) => {
                 const isPos = q.change >= 0;
+                const hasLiveData = q.ltp > 0;
                 return (
                   <tr
                     key={`${q.exchange}-${q.symbol}`}
-                    onClick={() => navigate(`/charts?symbol=${q.symbol}&exchange=${q.exchange}`)}
+                    onClick={() => {
+                      // If this is a search result without live data, subscribe it to the feed
+                      if (!hasLiveData && onSubscribeToken && q.token) {
+                        onSubscribeToken(q.token, q.exchange, q.symbol);
+                      }
+                      navigate(`/charts?symbol=${q.symbol}&exchange=${q.exchange}&token=${q.token ?? ''}`);
+                    }}
                     className="cursor-pointer border-b border-[var(--color-border-subtle)]/50 transition-colors hover:bg-[var(--color-bg-tertiary)]"
                   >
                     <td className="whitespace-nowrap px-3 py-2 text-left font-medium text-[var(--color-text-primary)]">
@@ -114,25 +198,25 @@ export default function StockTable({ filter, exchangeFilter, watchlistSymbols }:
                       </div>
                     </td>
                     <td className="whitespace-nowrap px-3 py-2 text-right font-mono text-[var(--color-text-primary)]">
-                      <PriceCell price={q.ltp} />
+                      {hasLiveData ? <PriceCell price={q.ltp} /> : <span className="text-[var(--color-text-muted)]">--</span>}
                     </td>
-                    <td className={`whitespace-nowrap px-3 py-2 text-right font-mono ${isPos ? 'text-[var(--color-accent-green)]' : 'text-[var(--color-accent-red)]'}`}>
-                      {isPos ? '+' : ''}{q.change.toFixed(2)}
+                    <td className={`whitespace-nowrap px-3 py-2 text-right font-mono ${hasLiveData ? (isPos ? 'text-[var(--color-accent-green)]' : 'text-[var(--color-accent-red)]') : 'text-[var(--color-text-muted)]'}`}>
+                      {hasLiveData ? `${isPos ? '+' : ''}${q.change.toFixed(2)}` : '--'}
                     </td>
-                    <td className={`whitespace-nowrap px-3 py-2 text-right font-mono ${isPos ? 'text-[var(--color-accent-green)]' : 'text-[var(--color-accent-red)]'}`}>
-                      {isPos ? '+' : ''}{q.changePercent.toFixed(2)}%
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-2 text-right font-mono text-[var(--color-text-secondary)]">
-                      {q.open.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    <td className={`whitespace-nowrap px-3 py-2 text-right font-mono ${hasLiveData ? (isPos ? 'text-[var(--color-accent-green)]' : 'text-[var(--color-accent-red)]') : 'text-[var(--color-text-muted)]'}`}>
+                      {hasLiveData ? `${isPos ? '+' : ''}${q.changePercent.toFixed(2)}%` : '--'}
                     </td>
                     <td className="whitespace-nowrap px-3 py-2 text-right font-mono text-[var(--color-text-secondary)]">
-                      {q.high.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                      {hasLiveData ? q.open.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '--'}
                     </td>
                     <td className="whitespace-nowrap px-3 py-2 text-right font-mono text-[var(--color-text-secondary)]">
-                      {q.low.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                      {hasLiveData ? q.high.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '--'}
                     </td>
                     <td className="whitespace-nowrap px-3 py-2 text-right font-mono text-[var(--color-text-secondary)]">
-                      {q.volume.toLocaleString('en-IN')}
+                      {hasLiveData ? q.low.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '--'}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-2 text-right font-mono text-[var(--color-text-secondary)]">
+                      {hasLiveData ? q.volume.toLocaleString('en-IN') : '--'}
                     </td>
                   </tr>
                 );

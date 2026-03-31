@@ -41,7 +41,6 @@ export default function VolumeChart({ data, height = 120, mainChart }: VolumeCha
       },
       rightPriceScale: {
         borderColor: '#1e293b',
-        drawTicks: false,
       },
       timeScale: {
         borderColor: '#1e293b',

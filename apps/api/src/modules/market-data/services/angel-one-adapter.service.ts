@@ -48,7 +48,7 @@ export class AngelOneAdapterService implements BrokerAdapter {
   private readonly logger = new Logger(AngelOneAdapterService.name);
 
   constructor(
-    private readonly authService: AngelOneAuthService,
+    public readonly authService: AngelOneAuthService,
     private readonly wsService: AngelOneWebSocketService,
   ) {}
 
@@ -58,7 +58,9 @@ export class AngelOneAdapterService implements BrokerAdapter {
 
   async connect(): Promise<void> {
     this.logger.log('Connecting to Angel One SmartAPI');
-    await this.authService.login();
+    if (!this.authService.isAuthenticated()) {
+      await this.authService.login();
+    }
     await this.wsService.connect();
     this.logger.log('Angel One adapter connected');
   }
@@ -260,37 +262,41 @@ export class AngelOneAdapterService implements BrokerAdapter {
   // Market data — REST
   // ─────────────────────────────────────────────────────
 
-  async getLiveQuote(symbol: string, exchange: string): Promise<TickData> {
+  async getLiveQuote(token: string, exchange: string): Promise<TickData> {
     try {
       const smartApi = this.authService.getSmartApi();
 
-      const response = await smartApi.ltpData(exchange, symbol, symbol);
+      const response = await smartApi.marketData({
+        mode: 'FULL',
+        exchangeTokens: { [exchange]: [token] },
+      });
 
-      if (!response?.data) {
-        throw new Error(response?.message ?? 'LTP fetch failed');
+      if (!response?.data?.fetched?.length) {
+        throw new Error(response?.message ?? 'Market data fetch failed');
       }
 
-      const d = response.data;
+      const d = response.data.fetched[0];
       return {
-        token: String(d.symboltoken ?? d.symbolToken ?? ''),
-        symbol: d.tradingsymbol ?? d.tradingSymbol ?? symbol,
+        token: String(d.symbolToken ?? d.symboltoken ?? token),
+        symbol: d.tradingSymbol ?? d.tradingsymbol ?? '',
         ltp: Number(d.ltp ?? 0),
         open: Number(d.open ?? 0),
         high: Number(d.high ?? 0),
         low: Number(d.low ?? 0),
         close: Number(d.close ?? 0),
-        volume: Number(d.volume ?? 0),
+        volume: Number(d.tradeVolume ?? d.volume ?? 0),
+        oi: d.opnInterest != null ? Number(d.opnInterest) : undefined,
         timestamp: new Date(),
       };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      this.logger.error(`Failed to get live quote for ${symbol}: ${msg}`);
+      this.logger.error(`Failed to get live quote for ${token}: ${msg}`);
       throw new Error(`Get live quote failed: ${msg}`);
     }
   }
 
   async getHistoricalData(
-    symbol: string,
+    token: string,
     exchange: string,
     timeframe: string,
     from: Date,
@@ -304,12 +310,12 @@ export class AngelOneAdapterService implements BrokerAdapter {
       const toStr = this.formatDateTime(to);
 
       this.logger.log(
-        `Fetching historical data: ${symbol} ${exchange} ${interval} ${fromStr} to ${toStr}`,
+        `Fetching historical data: token=${token} exchange=${exchange} interval=${interval} ${fromStr} to ${toStr}`,
       );
 
       const response = await smartApi.getCandleData({
         exchange,
-        symboltoken: symbol,
+        symboltoken: token,
         interval,
         fromdate: fromStr,
         todate: toStr,
@@ -335,21 +341,24 @@ export class AngelOneAdapterService implements BrokerAdapter {
     }
   }
 
-  async searchInstruments(query: string): Promise<any[]> {
+  async searchInstruments(query: string, exchange = 'NFO'): Promise<any[]> {
     try {
       const smartApi = this.authService.getSmartApi();
 
-      const response = await smartApi.searchScrip(query);
+      // SmartAPI searchScrip returns data.data directly (already extracted by SDK)
+      const result = await smartApi.searchScrip({
+        exchange,
+        searchscrip: query,
+      });
 
-      if (!response?.data) {
-        return [];
-      }
-
-      return Array.isArray(response.data) ? response.data : [];
+      // The SDK may return the array directly, or wrapped in { data: [...] }
+      if (Array.isArray(result)) return result;
+      if (result?.data && Array.isArray(result.data)) return result.data;
+      return [];
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      this.logger.error(`Instrument search failed for "${query}": ${msg}`);
-      throw new Error(`Search instruments failed: ${msg}`);
+      this.logger.error(`Instrument search failed for "${query}" on ${exchange}: ${msg}`);
+      return [];
     }
   }
 
@@ -377,6 +386,145 @@ export class AngelOneAdapterService implements BrokerAdapter {
         `Feed unsubscription failed: ${error instanceof Error ? error.message : error}`,
       );
     });
+  }
+
+  // ─────────────────────────────────────────────────────
+  // Instrument master (OpenAPI ScripMaster)
+  // ─────────────────────────────────────────────────────
+
+  /**
+   * Download the full Angel One instrument master list from the public CDN.
+   * Returns raw records for the requested exchange/segment.
+   *
+   * The file at this URL is a JSON array of objects like:
+   * { token, symbol, name, expiry, strike, lotsize, instrumenttype,
+   *   exch_seg, tick_size, ... }
+   *
+   * instrumenttype for options: "OPTIDX" (index options) or "OPTSTK" (stock options)
+   * exch_seg: "NFO" for F&O segment
+   */
+  async fetchInstrumentMaster(
+    exchange: string = 'NFO',
+  ): Promise<any[]> {
+    const url =
+      'https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json';
+
+    this.logger.log(`Downloading instrument master from Angel One CDN`);
+
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(
+        `Failed to download instrument master: HTTP ${response.status}`,
+      );
+    }
+
+    const allInstruments: any[] = await response.json();
+    this.logger.log(
+      `Downloaded ${allInstruments.length} total instruments from Angel One`,
+    );
+
+    // Filter to requested exchange segment
+    const filtered = allInstruments.filter(
+      (i: any) => i.exch_seg === exchange,
+    );
+    this.logger.log(
+      `Filtered to ${filtered.length} instruments for ${exchange}`,
+    );
+
+    return filtered;
+  }
+
+  /**
+   * Get option contracts for a specific underlying from the Angel One master list.
+   * Filters by underlying name and returns option-specific fields.
+   */
+  async getOptionContracts(
+    underlying: string,
+    instrumentMaster?: any[],
+  ): Promise<
+    Array<{
+      token: string;
+      symbol: string;
+      name: string;
+      exchange: string;
+      expiry: Date;
+      strike: number;
+      optionType: 'CE' | 'PE';
+      lotSize: number;
+    }>
+  > {
+    const master = instrumentMaster ?? (await this.fetchInstrumentMaster('NFO'));
+
+    // Angel One uses "OPTIDX" for index options and "OPTSTK" for stock options
+    const instrumentTypes =
+      ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'].includes(
+        underlying.toUpperCase(),
+      )
+        ? ['OPTIDX']
+        : ['OPTSTK'];
+
+    const upperUnderlying = underlying.toUpperCase();
+
+    const options = master
+      .filter((i: any) => {
+        if (!instrumentTypes.includes(i.instrumenttype)) return false;
+        // The "name" field in the master contains the underlying name
+        // e.g., "NIFTY", "BANKNIFTY"
+        if ((i.name ?? '').toUpperCase() !== upperUnderlying) return false;
+        // Must have strike and expiry
+        if (!i.strike || !i.expiry) return false;
+        return true;
+      })
+      .map((i: any) => {
+        // Parse expiry: format is "DDMMMYYYY" e.g., "27MAR2026"
+        // or sometimes "27Mar2026"
+        const expiryStr = String(i.expiry).trim();
+        let expiry: Date;
+        try {
+          expiry = new Date(expiryStr);
+          if (isNaN(expiry.getTime())) {
+            // Try manual parsing: DDMMMYYYY
+            const months: Record<string, number> = {
+              JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5,
+              JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11,
+            };
+            const day = parseInt(expiryStr.substring(0, 2));
+            const mon = months[expiryStr.substring(2, 5).toUpperCase()];
+            const year = parseInt(expiryStr.substring(5));
+            expiry = new Date(year, mon, day);
+          }
+        } catch {
+          expiry = new Date(expiryStr);
+        }
+
+        // Strike in the master is a string like "22500.000000" or "22500"
+        const strike = parseFloat(String(i.strike));
+
+        // Determine option type from the symbol suffix
+        // Symbols end with CE or PE, e.g., "NIFTY27MAR2622500CE"
+        const sym = String(i.symbol).toUpperCase();
+        const optionType = sym.endsWith('PE') ? 'PE' : 'CE';
+
+        return {
+          token: String(i.token),
+          symbol: String(i.symbol),
+          name: String(i.name ?? underlying),
+          exchange: 'NFO',
+          expiry,
+          strike,
+          optionType: optionType as 'CE' | 'PE',
+          lotSize: parseInt(String(i.lotsize ?? '1')) || 1,
+        };
+      })
+      .filter(
+        (o: { expiry: Date }) => !isNaN(o.expiry.getTime()) && o.expiry >= new Date(),
+      );
+
+    this.logger.log(
+      `Found ${options.length} active option contracts for ${underlying}`,
+    );
+
+    return options;
   }
 
   // ─────────────────────────────────────────────────────

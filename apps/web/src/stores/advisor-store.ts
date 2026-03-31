@@ -140,7 +140,7 @@ export const useAdvisorStore = create<AdvisorState>((set, get) => ({
 
   fetchPerformanceSummary: async () => {
     try {
-      const res = await api.get('/advisor/suggestions');
+      await api.get('/advisor/suggestions');
       // We use the suggestions endpoint; performance summary comes from a
       // dedicated call but we can also build it from the /insights data.
     } catch (err) {

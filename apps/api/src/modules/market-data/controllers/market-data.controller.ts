@@ -14,6 +14,7 @@ import { MarketFeedService } from '../services/market-feed.service';
 import { InstrumentService } from '../services/instrument.service';
 import { CandleAggregatorService } from '../services/candle-aggregator.service';
 import { MarketDataRepository } from '../repositories/market-data.repository';
+import { AngelOneAdapterService } from '../services/angel-one-adapter.service';
 import {
   SubscribeDto,
   UnsubscribeDto,
@@ -32,6 +33,7 @@ export class MarketDataController {
     private readonly instrumentService: InstrumentService,
     private readonly candleAggregator: CandleAggregatorService,
     private readonly repository: MarketDataRepository,
+    private readonly angelOneAdapter: AngelOneAdapterService,
   ) {}
 
   /**
@@ -54,15 +56,80 @@ export class MarketDataController {
         return { instruments: [], count: 0 };
       }
 
-      const instruments = await this.instrumentService.search(
-        search.trim(),
+      const trimmed = search.trim();
+
+      // First search the local DB / in-memory cache
+      const localResults = await this.instrumentService.search(
+        trimmed,
         exchange,
         segment,
       );
 
+      // If local results are sufficient, return them directly
+      if (localResults.length >= 10) {
+        return {
+          instruments: localResults,
+          count: localResults.length,
+          source: 'local',
+        };
+      }
+
+      // Fall back to Angel One searchScrip API for broader results.
+      // Search across multiple exchanges unless a specific one was requested.
+      const exchanges = exchange ? [exchange] : ['NSE', 'BSE', 'NFO'];
+      const brokerResults: Array<{
+        symbol: string;
+        token: string;
+        name: string;
+        exchange: string;
+        segment: string;
+        lotSize: number;
+        tickSize: number;
+        expiry: null;
+        strike: null;
+        optionType: null;
+      }> = [];
+
+      const seenTokens = new Set(localResults.map((r) => r.token));
+
+      for (const exch of exchanges) {
+        try {
+          const raw = await this.angelOneAdapter.searchInstruments(
+            trimmed,
+            exch,
+          );
+
+          for (const item of raw) {
+            const token = String(item.symboltoken ?? item.token ?? '');
+            if (!token || seenTokens.has(token)) continue;
+            seenTokens.add(token);
+
+            brokerResults.push({
+              symbol: String(item.tradingsymbol ?? item.symbol ?? ''),
+              token,
+              name: String(item.symbolname ?? item.name ?? item.tradingsymbol ?? ''),
+              exchange: String(item.exchange ?? exch),
+              segment: String(item.exch_seg ?? exch),
+              lotSize: parseInt(String(item.lotsize ?? '1')) || 1,
+              tickSize: parseFloat(String(item.tick_size ?? '0.05')) || 0.05,
+              expiry: null,
+              strike: null,
+              optionType: null,
+            });
+          }
+        } catch (err) {
+          this.logger.warn(
+            `Angel One search on ${exch} failed: ${err instanceof Error ? err.message : err}`,
+          );
+        }
+      }
+
+      const combined = [...localResults, ...brokerResults].slice(0, 50);
+
       return {
-        instruments,
-        count: instruments.length,
+        instruments: combined,
+        count: combined.length,
+        source: brokerResults.length > 0 ? 'local+angel_one' : 'local',
       };
     } catch (error) {
       this.logger.error(
@@ -88,12 +155,6 @@ export class MarketDataController {
   ) {
     try {
       const instrument = await this.instrumentService.getByToken(token);
-      if (!instrument) {
-        throw new HttpException(
-          `Instrument not found for token: ${token}`,
-          HttpStatus.NOT_FOUND,
-        );
-      }
 
       const from = new Date(query.from);
       const to = new Date(query.to);
@@ -105,8 +166,53 @@ export class MarketDataController {
         );
       }
 
-      const candles = await this.repository.getCandles(
-        instrument.id,
+      // When the instrument exists in the DB, attempt the DB candle lookup first.
+      if (instrument) {
+        const dbCandles = await this.repository.getCandles(
+          instrument.id,
+          query.timeframe,
+          from,
+          to,
+        );
+
+        if (dbCandles.length > 0) {
+          return {
+            token,
+            symbol: instrument.symbol,
+            timeframe: query.timeframe,
+            candles: dbCandles.map((c) => ({
+              timestamp: c.timestamp,
+              open: c.open,
+              high: c.high,
+              low: c.low,
+              close: c.close,
+              volume: Number(c.volume),
+            })),
+            count: dbCandles.length,
+            source: 'database',
+          };
+        }
+      }
+
+      // Determine which exchange to use for the Angel One API call.
+      // Priority: query param > instrument record > default (NSE).
+      const exchange =
+        query.exchange ??
+        instrument?.exchange ??
+        'NSE';
+
+      const symbol = instrument?.symbol ?? token;
+
+      // Fetch from Angel One historical API (works for both known and unknown
+      // instruments — e.g., MCX commodity tokens not yet in the local DB).
+      this.logger.log(
+        `Fetching candles from Angel One for token=${token} exchange=${exchange}` +
+          (instrument ? '' : ' (instrument not in local DB)'),
+      );
+
+      const liveCandles = await this.angelOneAdapter.getHistoricalData(
+        token,
+        exchange,
         query.timeframe,
         from,
         to,
@@ -114,9 +220,9 @@ export class MarketDataController {
 
       return {
         token,
-        symbol: instrument.symbol,
+        symbol,
         timeframe: query.timeframe,
-        candles: candles.map((c) => ({
+        candles: liveCandles.map((c) => ({
           timestamp: c.timestamp,
           open: c.open,
           high: c.high,
@@ -124,7 +230,8 @@ export class MarketDataController {
           close: c.close,
           volume: Number(c.volume),
         })),
-        count: candles.length,
+        count: liveCandles.length,
+        source: 'angel_one',
       };
     } catch (error) {
       if (error instanceof HttpException) throw error;
@@ -183,10 +290,7 @@ export class MarketDataController {
     try {
       const instrument = await this.instrumentService.getByToken(token);
       if (!instrument) {
-        throw new HttpException(
-          `Instrument not found for token: ${token}`,
-          HttpStatus.NOT_FOUND,
-        );
+        return { token, symbol: '', oiHistory: [], count: 0 };
       }
 
       // Default to last 24 hours if no range specified
@@ -240,6 +344,28 @@ export class MarketDataController {
         exchange: idx.exchange,
         quote: this.marketFeedService.getQuote(idx.token),
       })),
+    };
+  }
+
+  /**
+   * GET /api/market-data/breadth
+   * Get market breadth (advances, declines, unchanged) from cached quotes.
+   */
+  @Get('breadth')
+  @ApiOperation({ summary: 'Get market breadth from cached quotes' })
+  getBreadth() {
+    return this.marketFeedService.getBreadth();
+  }
+
+  /**
+   * GET /api/market-data/sector-performance
+   * Get sector index performance from cached quotes.
+   */
+  @Get('sector-performance')
+  @ApiOperation({ summary: 'Get sector index performance' })
+  getSectorPerformance() {
+    return {
+      sectors: this.marketFeedService.getSectorPerformance(),
     };
   }
 
@@ -298,12 +424,39 @@ export class MarketDataController {
   }
 
   /**
+   * POST /api/market-data/feed/start
+   * Manually start the market data feed.
+   * Tries WebSocket first, falls back to REST polling (5s interval).
+   */
+  @Post('feed/start')
+  @ApiOperation({
+    summary: 'Manually start market data feed (WebSocket or REST polling fallback)',
+  })
+  async startFeed() {
+    try {
+      const result = await this.marketFeedService.manualStartFeed();
+      return result;
+    } catch (error) {
+      this.logger.error(
+        `Failed to start feed: ${error instanceof Error ? error.message : error}`,
+      );
+      throw new HttpException(
+        'Failed to start market data feed',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
    * GET /api/market-data/status
    * Get feed connection status and active subscription counts.
    */
   @Get('status')
   @ApiOperation({ summary: 'Get feed connection status' })
   getStatus() {
-    return this.marketFeedService.getStatus();
+    return {
+      ...this.marketFeedService.getStatus(),
+      marketOpen: this.marketFeedService.isMarketOpen(),
+    };
   }
 }

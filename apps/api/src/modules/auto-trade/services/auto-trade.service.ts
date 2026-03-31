@@ -9,7 +9,7 @@ import { TradeGateway } from '../../trade-engine/gateways/trade.gateway';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { ExecuteTradeDto } from '../../trade-engine/dto/trade.dto';
 
-interface PendingApproval {
+export interface PendingApproval {
   signal: any;
   tradeRequest: ExecuteTradeDto;
   timestamp: Date;
@@ -24,7 +24,7 @@ interface ScanStats {
   timestamp: Date;
 }
 
-interface AutoTradeStatus {
+export interface AutoTradeStatus {
   mode: string;
   isRunning: boolean;
   pendingApprovals: number;

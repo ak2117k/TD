@@ -254,7 +254,7 @@ export class SignalScoringService {
   ): Promise<number | null> {
     try {
       const response = await firstValueFrom(
-        this.httpService.post(
+        this.httpService.post<any>(
           AI_SCORE_ENDPOINT,
           {
             signal: {

@@ -10,6 +10,7 @@ import NewsPage from '@/pages/news/NewsPage';
 import JournalPage from '@/pages/journal/JournalPage';
 import AdvisorPage from '@/pages/advisor/AdvisorPage';
 import BacktestPage from '@/pages/backtest/BacktestPage';
+import StrategyBuilderPage from '@/pages/strategy-builder/StrategyBuilderPage';
 import SettingsPage from '@/pages/settings/SettingsPage';
 
 export default function App() {
@@ -26,6 +27,7 @@ export default function App() {
         <Route path="journal" element={<JournalPage />} />
         <Route path="advisor" element={<AdvisorPage />} />
         <Route path="backtest" element={<BacktestPage />} />
+        <Route path="strategy-builder" element={<StrategyBuilderPage />} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>
     </Routes>

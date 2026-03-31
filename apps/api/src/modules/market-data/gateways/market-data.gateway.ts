@@ -36,6 +36,7 @@ export interface ConnectionStatusPayload {
     origin: 'http://localhost:3000',
     credentials: true,
   },
+  transports: ['polling', 'websocket'],
 })
 export class MarketDataGateway
   implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
@@ -120,17 +121,27 @@ export class MarketDataGateway
   // ------------------------------------------------------------------
 
   /**
-   * Emit a tick (live price update) to all clients subscribed to that token.
+   * Emit a tick (live price update) to all connected clients.
+   *
+   * We broadcast to all clients because the frontend subscribes to
+   * multiple instruments (watchlist, dashboard, charts) and filters
+   * by token on the client side. Using room-based targeting would
+   * require the frontend to explicitly join/leave rooms on every
+   * symbol change, which adds complexity. The tick payload is small
+   * and the client-side token filter is reliable.
+   *
+   * The token field on the quote is the authoritative identifier;
+   * symbol names are normalized server-side before reaching here.
    */
   emitTick(quote: Quote): void {
-    this.server.to(`token:${quote.token}`).emit('tick', quote);
+    this.server.emit('tick', quote);
   }
 
   /**
    * Emit a closed candle to all clients subscribed to that token.
    */
   emitCandle(candle: CandlePayload): void {
-    this.server.to(`token:${candle.token}`).emit('candle', candle);
+    this.server.emit('candle', candle);
   }
 
   /**

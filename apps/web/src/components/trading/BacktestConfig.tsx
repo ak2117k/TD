@@ -247,22 +247,22 @@ export default function BacktestConfig({
                 onConfigChange({ initialCapital: Number(e.target.value) })
               }
               min={1000}
-              step={10000}
+              step={1000}
               className={cn(inputClass, 'pl-11')}
             />
           </div>
         </div>
         <div>
-          <label className={labelClass}>Position Size</label>
+          <label className={labelClass}>Position Size (Lots)</label>
           <input
             type="number"
             value={config.positionSize}
             onChange={(e) =>
-              onConfigChange({ positionSize: Number(e.target.value) })
+              onConfigChange({ positionSize: Math.max(1, Math.floor(Number(e.target.value))) })
             }
-            min={0.01}
+            min={1}
             max={100}
-            step={0.1}
+            step={1}
             className={inputClass}
           />
         </div>

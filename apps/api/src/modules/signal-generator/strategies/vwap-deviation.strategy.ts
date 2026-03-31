@@ -72,7 +72,7 @@ export class VwapDeviationStrategy implements TradingStrategy {
       return null;
     }
 
-    if (ltp <= 0 || candles.every((c) => c.volume === 0)) {
+    if (ltp <= 0) {
       return null;
     }
 
@@ -261,7 +261,7 @@ export class VwapDeviationStrategy implements TradingStrategy {
           }
         }
 
-        const qty = Math.floor(positionSize / entryPrice);
+        const qty = positionSize;
         const pnl =
           signal.side === 'BUY'
             ? (exitPrice - entryPrice) * qty

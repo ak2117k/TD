@@ -112,7 +112,7 @@ export default function WatchlistPanel() {
                 <div
                   className="flex flex-1 cursor-pointer flex-col"
                   onClick={() =>
-                    navigate(`/charts?symbol=${entry.symbol}&exchange=${entry.exchange}`)
+                    navigate(`/charts?symbol=${entry.symbol}&exchange=${entry.exchange}&token=${entry.token}`)
                   }
                 >
                   <span className="text-xs font-semibold text-[var(--color-text-primary)]">

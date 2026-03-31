@@ -1,4 +1,5 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import clsx from 'clsx';
 import { CandlestickChart, ChartToolbar, IndicatorPanel, OIOverlay } from '@/components/charts';
 import type { CandlestickChartHandle } from '@/components/charts';
@@ -26,11 +27,27 @@ export default function ChartsPage() {
   const chartRef = useRef<CandlestickChartHandle>(null);
   const [showIndicators, setShowIndicators] = useState(false);
   const [crosshairData, setCrosshairData] = useState<CrosshairData | null>(null);
+  const [searchParams] = useSearchParams();
 
   const selectedSymbol = useChartStore((s) => s.selectedSymbol);
   const setSymbol = useChartStore((s) => s.setSymbol);
   const indicators = useChartStore((s) => s.indicators);
   const isFullscreen = useChartStore((s) => s.isFullscreen);
+
+  // Sync chart store with URL query params (e.g. navigating from Market page)
+  useEffect(() => {
+    const symbol = searchParams.get('symbol');
+    const exchange = searchParams.get('exchange');
+    const token = searchParams.get('token');
+    if (symbol) {
+      setSymbol({
+        symbol,
+        token: token ?? '',
+        exchange: exchange ?? 'NSE',
+        name: symbol,
+      });
+    }
+  }, [searchParams, setSymbol]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const { candles, oiData, isLoading, error, currentPrice, priceChange, priceChangePercent } =
     useChartData();
@@ -148,6 +165,7 @@ export default function ChartsPage() {
           )}
 
           <CandlestickChart
+            key={selectedSymbol.token}
             ref={chartRef}
             candles={candles}
             onCrosshairMove={handleCrosshairMove}

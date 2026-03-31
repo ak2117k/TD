@@ -1,6 +1,6 @@
 import { io, Socket } from 'socket.io-client';
 
-export type WSEventName = 'tick' | 'signal' | 'alert' | 'connection-status';
+export type WSEventName = 'tick' | 'signal' | 'alert' | 'connection-status' | 'candle';
 
 type EventCallback = (data: unknown) => void;
 
@@ -11,9 +11,9 @@ class WebSocketService {
   connect(): void {
     if (this.socket?.connected) return;
 
-    this.socket = io('/', {
-      path: '/ws',
-      transports: ['websocket', 'polling'],
+    this.socket = io('/ws', {
+      path: '/socket.io',
+      transports: ['polling', 'websocket'],
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
@@ -30,7 +30,7 @@ class WebSocketService {
       this.emit('connection-status', { connected: false });
     });
 
-    const events: WSEventName[] = ['tick', 'signal', 'alert'];
+    const events: WSEventName[] = ['tick', 'signal', 'alert', 'candle', 'connection-status'];
     for (const event of events) {
       this.socket.on(event, (data: unknown) => {
         this.emit(event, data);

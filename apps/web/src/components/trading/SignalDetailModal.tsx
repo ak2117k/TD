@@ -2,7 +2,6 @@ import {
   TrendingUp,
   TrendingDown,
   Target,
-  Shield,
   Clock,
   Zap,
   Info,

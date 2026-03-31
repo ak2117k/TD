@@ -1,13 +1,26 @@
-import { Controller, Get, Param, Query } from '@nestjs/common';
+import { Controller, Get, Param, Query, Inject, Optional } from '@nestjs/common';
 import { OptionsChainService } from '../services/options-chain.service';
 import { GreeksCalculatorService } from '../services/greeks-calculator.service';
 import { GetChainDto, GreeksQueryDto } from '../dto/options-chain.dto';
+import { BrokerAdapter } from '../../../common/interfaces/broker-adapter.interface';
+import { BROKER_ADAPTER_TOKEN } from '../../market-data/services/market-feed.service';
 
-@Controller('options')
+/** Index token map for spot price lookups. */
+const INDEX_TOKENS: Record<string, { token: string; exchange: string }> = {
+  NIFTY: { token: '99926000', exchange: 'NSE' },
+  BANKNIFTY: { token: '99926009', exchange: 'NSE' },
+  FINNIFTY: { token: '99926037', exchange: 'NSE' },
+  MIDCPNIFTY: { token: '99926074', exchange: 'NSE' },
+};
+
+@Controller('api/options')
 export class OptionsChainController {
   constructor(
     private readonly optionsChainService: OptionsChainService,
     private readonly greeksCalculator: GreeksCalculatorService,
+    @Optional()
+    @Inject(BROKER_ADAPTER_TOKEN)
+    private readonly brokerAdapter: BrokerAdapter | null,
   ) {}
 
   /**
@@ -35,9 +48,39 @@ export class OptionsChainController {
       expiry,
     );
 
+    // Fetch spot price for the underlying
+    let spotPrice = 0;
+    const indexInfo = INDEX_TOKENS[underlying.toUpperCase()];
+    if (indexInfo && this.brokerAdapter) {
+      try {
+        const quote = await this.brokerAdapter.getLiveQuote(
+          indexInfo.token,
+          indexInfo.exchange,
+        );
+        spotPrice = quote.ltp;
+      } catch {
+        // Estimate from chain if live quote fails
+      }
+    }
+
+    // Fallback: estimate spot from chain (where CE ltp ~ PE ltp)
+    if (spotPrice === 0 && chain.length > 0) {
+      let closestDiff = Infinity;
+      for (const entry of chain) {
+        if (entry.ceData && entry.peData && entry.ceData.ltp > 0 && entry.peData.ltp > 0) {
+          const diff = Math.abs(entry.ceData.ltp - entry.peData.ltp);
+          if (diff < closestDiff) {
+            closestDiff = diff;
+            spotPrice = entry.strikePrice;
+          }
+        }
+      }
+    }
+
     return {
       chain,
       expiry,
+      spotPrice,
       underlying: underlying.toUpperCase(),
     };
   }

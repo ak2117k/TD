@@ -69,7 +69,8 @@ function candleToChart(c: Candle): ChartCandle {
 }
 
 export function useChartData(): UseChartDataReturn {
-  const { selectedSymbol, timeframe } = useChartStore();
+  const selectedSymbol = useChartStore((s) => s.selectedSymbol);
+  const timeframe = useChartStore((s) => s.timeframe);
   const [candles, setCandles] = useState<ChartCandle[]>([]);
   const [oiData, setOiData] = useState<ChartOIData[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -91,10 +92,10 @@ export function useChartData(): UseChartDataReturn {
 
       const response = await api.get(
         `/market-data/instruments/${selectedSymbol.token}/candles`,
-        { params: { timeframe, from, to } },
+        { params: { timeframe, from, to, exchange: selectedSymbol.exchange } },
       );
 
-      const rawCandles: Candle[] = response.data?.data ?? response.data ?? [];
+      const rawCandles: Candle[] = response.data?.candles ?? response.data?.data ?? [];
       const chartCandles = rawCandles
         .map(candleToChart)
         .sort((a, b) => a.time - b.time);
@@ -122,18 +123,8 @@ export function useChartData(): UseChartDataReturn {
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to fetch candles';
       setError(msg);
-      // Provide demo data so the chart is not empty
-      const demoCandles = generateDemoCandles(timeframe);
-      setCandles(demoCandles);
-      candlesRef.current = demoCandles;
-      if (demoCandles.length > 0) {
-        const last = demoCandles[demoCandles.length - 1];
-        setCurrentPrice(last.close);
-        setPriceChange(last.close - demoCandles[0].open);
-        setPriceChangePercent(
-          ((last.close - demoCandles[0].open) / demoCandles[0].open) * 100,
-        );
-      }
+      setCandles([]);
+      candlesRef.current = [];
     } finally {
       setIsLoading(false);
     }
@@ -163,11 +154,13 @@ export function useChartData(): UseChartDataReturn {
     fetchOI();
   }, [fetchCandles, fetchOI, timeframe]);
 
-  // Subscribe to WebSocket tick updates
+  // Subscribe to WebSocket tick updates for real-time candle building
   useEffect(() => {
-    const unsub = wsService.subscribe('tick', (data) => {
+    const unsubTick = wsService.subscribe('tick', (data) => {
       const quote = data as Quote;
-      if (quote.symbol !== selectedSymbol.symbol) return;
+      // Filter by token (reliable unique identifier) instead of symbol name
+      // which can vary between data sources (WebSocket vs REST, broker formats)
+      if (quote.token !== selectedSymbol.token) return;
 
       const price = quote.ltp;
       setCurrentPrice(price);
@@ -214,43 +207,53 @@ export function useChartData(): UseChartDataReturn {
       });
     });
 
-    return unsub;
-  }, [selectedSymbol.symbol]);
+    // Subscribe to server-side closed candle events (emitted by CandleAggregator)
+    const unsubCandle = wsService.subscribe('candle', (data) => {
+      const candle = data as {
+        token: string;
+        timeframe: string;
+        timestamp: string;
+        open: number;
+        high: number;
+        low: number;
+        close: number;
+        volume: number;
+      };
+      if (candle.token !== selectedSymbol.token) return;
+      if (candle.timeframe !== timeframe) return;
 
-  return { candles, oiData, isLoading, error, currentPrice, priceChange, priceChangePercent };
-}
+      const chartCandle: ChartCandle = {
+        time: new Date(candle.timestamp).getTime() / 1000,
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+        volume: candle.volume,
+      };
 
-// Generate realistic demo candle data when API is unavailable
-function generateDemoCandles(timeframe: string): ChartCandle[] {
-  const count = 200;
-  const tfMs = getTimeframeDurationMs(timeframe);
-  const now = Math.floor(Date.now() / 1000);
-  const tfSec = tfMs / 1000;
-  const startTime = now - count * tfSec;
-
-  let price = 22500; // Starting around NIFTY levels
-  const candles: ChartCandle[] = [];
-
-  for (let i = 0; i < count; i++) {
-    const volatility = price * 0.003;
-    const change = (Math.random() - 0.48) * volatility;
-    const open = price;
-    const close = open + change;
-    const high = Math.max(open, close) + Math.random() * volatility * 0.5;
-    const low = Math.min(open, close) - Math.random() * volatility * 0.5;
-    const volume = Math.floor(100000 + Math.random() * 500000);
-
-    candles.push({
-      time: startTime + i * tfSec,
-      open: Math.round(open * 100) / 100,
-      high: Math.round(high * 100) / 100,
-      low: Math.round(low * 100) / 100,
-      close: Math.round(close * 100) / 100,
-      volume,
+      setCandles((prev) => {
+        // Replace if same timestamp, or append if new
+        const existing = prev.findIndex((c) => c.time === chartCandle.time);
+        if (existing >= 0) {
+          const next = [...prev];
+          next[existing] = chartCandle;
+          candlesRef.current = next;
+          return next;
+        }
+        if (prev.length === 0 || chartCandle.time > prev[prev.length - 1].time) {
+          const next = [...prev, chartCandle];
+          candlesRef.current = next;
+          return next;
+        }
+        return prev;
+      });
     });
 
-    price = close;
-  }
+    return () => {
+      unsubTick();
+      unsubCandle();
+    };
+  }, [selectedSymbol.symbol, selectedSymbol.token, timeframe]);
 
-  return candles;
+  return { candles, oiData, isLoading, error, currentPrice, priceChange, priceChangePercent };
 }
