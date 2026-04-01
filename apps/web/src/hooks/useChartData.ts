@@ -128,7 +128,7 @@ export function useChartData(): UseChartDataReturn {
     } finally {
       setIsLoading(false);
     }
-  }, [selectedSymbol.token, timeframe]);
+  }, [selectedSymbol.token, selectedSymbol.exchange, timeframe]);
 
   // Fetch OI data
   const fetchOI = useCallback(async () => {

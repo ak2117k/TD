@@ -20,6 +20,10 @@ import {
   MARKET_OPEN_MINUTE,
   MARKET_CLOSE_HOUR,
   MARKET_CLOSE_MINUTE,
+  MCX_OPEN_HOUR,
+  MCX_OPEN_MINUTE,
+  MCX_CLOSE_HOUR,
+  MCX_CLOSE_MINUTE,
   ANGEL_ONE_WEBSOCKET_MAX_TOKENS,
   INDICES,
   SECTOR_INDICES,
@@ -167,8 +171,8 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
         ...(Object.values(MAJOR_STOCKS) as Array<{ token: string }>).map((s) => s.token),
         ...(Object.values(COMMODITIES) as Array<{ token: string }>).map((c) => c.token),
       ];
-      // Deduplicate
-      const uniqueTokens = [...new Set(allDefaultTokens)];
+      // Deduplicate and filter out unresolved placeholder tokens ('0')
+      const uniqueTokens = [...new Set(allDefaultTokens)].filter((t) => t !== '0');
       await this.subscribe(uniqueTokens);
 
       this.feedActive = true;
@@ -484,9 +488,18 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
     const hours = Number(istParts.find((p) => p.type === 'hour')?.value ?? 0);
     const minutes = Number(istParts.find((p) => p.type === 'minute')?.value ?? 0);
     const totalMinutes = hours * 60 + minutes;
-    const marketOpen = MARKET_OPEN_HOUR * 60 + MARKET_OPEN_MINUTE;
-    const marketClose = MARKET_CLOSE_HOUR * 60 + MARKET_CLOSE_MINUTE;
-    return totalMinutes >= marketOpen && totalMinutes <= marketClose;
+
+    // NSE/BSE hours
+    const nseOpen = MARKET_OPEN_HOUR * 60 + MARKET_OPEN_MINUTE;
+    const nseClose = MARKET_CLOSE_HOUR * 60 + MARKET_CLOSE_MINUTE;
+    const nseIsOpen = totalMinutes >= nseOpen && totalMinutes <= nseClose;
+
+    // MCX hours (9:00 AM – 11:30 PM IST)
+    const mcxOpen = MCX_OPEN_HOUR * 60 + MCX_OPEN_MINUTE;
+    const mcxClose = MCX_CLOSE_HOUR * 60 + MCX_CLOSE_MINUTE;
+    const mcxIsOpen = totalMinutes >= mcxOpen && totalMinutes <= mcxClose;
+
+    return nseIsOpen || mcxIsOpen;
   }
 
   // ------------------------------------------------------------------
@@ -583,6 +596,101 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
   // ------------------------------------------------------------------
 
   /**
+   * Resolve dynamic MCX commodity tokens by searching for the nearest-expiry
+   * active futures contract via the broker's searchScrip API.
+   *
+   * MCX futures tokens change every month when contracts expire, so we cannot
+   * hardcode them. This method looks up each commodity symbol, picks the
+   * contract with the nearest expiry date, and updates the COMMODITIES
+   * constant in-place so the rest of the system uses the correct token.
+   */
+  private async resolveCommodityTokens(): Promise<void> {
+    if (!this.brokerAdapter) return;
+
+    this.logger.log('Resolving dynamic MCX commodity tokens...');
+
+    for (const [key, commodity] of Object.entries(COMMODITIES)) {
+      // Skip commodities that already have a resolved (non-placeholder) token
+      if (commodity.token !== '0') {
+        this.logger.log(
+          `Skipping ${commodity.symbol} — already has token ${commodity.token}`,
+        );
+        continue;
+      }
+
+      try {
+        // Try multiple search patterns to find futures contracts.
+        // Angel One searchScrip for "NATURALGAS" returns mostly options (50 cap).
+        // Searching for "GOLDM" or commodity + month abbreviation finds futures.
+        const searchQueries = [
+          `${commodity.symbol}M`,   // e.g., "GOLDM", "SILVERM" (mini contracts)
+          commodity.symbol,          // e.g., "GOLD", "NATURALGAS"
+        ];
+
+        let allResults: any[] = [];
+        for (const query of searchQueries) {
+          const results = await this.brokerAdapter!.searchInstruments(query, 'MCX');
+          if (Array.isArray(results)) {
+            allResults = allResults.concat(results);
+          }
+        }
+
+        if (allResults.length === 0) {
+          this.logger.warn(
+            `No MCX contracts found for ${commodity.symbol} — token remains unresolved`,
+          );
+          continue;
+        }
+
+        // Filter for futures contracts (symbol contains "FUT").
+        const futuresContracts = allResults
+          .filter((r: any) => {
+            const sym = (r.tradingsymbol ?? r.symbol ?? '').toUpperCase();
+            return sym.includes('FUT') && sym.startsWith(commodity.symbol.toUpperCase());
+          })
+          .map((r: any) => ({
+            token: String(r.symboltoken ?? r.token ?? ''),
+            tradingsymbol: r.tradingsymbol ?? r.symbol ?? '',
+            expiry: r.expiry ? new Date(r.expiry) : null,
+          }))
+          .filter((c) => c.token && c.token !== '0');
+
+        if (futuresContracts.length === 0) {
+          this.logger.warn(
+            `No FUT contracts found for ${commodity.symbol} in search results`,
+          );
+          continue;
+        }
+
+        // Sort by expiry ascending — nearest expiry first
+        futuresContracts.sort((a, b) => {
+          if (!a.expiry && !b.expiry) return 0;
+          if (!a.expiry) return 1;
+          if (!b.expiry) return -1;
+          return a.expiry.getTime() - b.expiry.getTime();
+        });
+
+        // Pick the nearest-expiry contract that hasn't already expired
+        const now = new Date();
+        const activeContract =
+          futuresContracts.find((c) => c.expiry && c.expiry >= now) ??
+          futuresContracts[0];
+
+        // Update the mutable COMMODITIES constant in-place
+        COMMODITIES[key].token = activeContract.token;
+
+        this.logger.log(
+          `Resolved ${commodity.symbol} → token ${activeContract.token} (${activeContract.tradingsymbol})`,
+        );
+      } catch (error) {
+        this.logger.warn(
+          `Failed to resolve token for ${commodity.symbol}: ${error instanceof Error ? error.message : error}`,
+        );
+      }
+    }
+  }
+
+  /**
    * Wait for the auth service to become authenticated, then seed the
    * quote cache and start the WebSocket feed.
    */
@@ -611,6 +719,9 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
       );
       return;
     }
+
+    // Resolve dynamic MCX commodity tokens before seeding
+    await this.resolveCommodityTokens();
 
     // Always seed the quote cache from REST first
     await this.seedQuoteCacheFromRest();
@@ -724,9 +835,9 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
         ...(Object.values(MAJOR_STOCKS) as Array<{ token: string }>).map((s) => s.token),
         ...(Object.values(COMMODITIES) as Array<{ token: string }>).map((c) => c.token),
       ];
-      // Deduplicate (some sector tokens overlap with INDICES)
+      // Deduplicate (some sector tokens overlap with INDICES) and skip unresolved ('0')
       for (const token of new Set(defaultTokens)) {
-        this.primaryTokens.add(token);
+        if (token !== '0') this.primaryTokens.add(token);
       }
     }
 
@@ -870,7 +981,7 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
       // Skip sector tokens that overlap with INDICES (e.g. NIFTY IT, NIFTY BANK)
       .filter((s) => !indexEntries.some((idx) => idx.token === s.token));
     const stockEntries = Object.values(MAJOR_STOCKS);
-    const commodityEntries = Object.values(COMMODITIES);
+    const commodityEntries = Object.values(COMMODITIES).filter((c) => c.token !== '0');
     const allEntries = [
       ...indexEntries.map((e) => ({ ...e, type: 'index' as const })),
       ...sectorEntries.map((e) => ({ ...e, type: 'sector' as const })),
@@ -957,6 +1068,26 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * Resolve the exchange for a given token by checking all known constant maps.
+   * Returns the matching Exchange enum value, or Exchange.NSE as a last resort.
+   */
+  private getExchangeForToken(token: string): Exchange {
+    const indexEntry = Object.values(INDICES).find((idx) => idx.token === token);
+    if (indexEntry) return indexEntry.exchange as Exchange;
+
+    const sectorEntry = Object.values(SECTOR_INDICES).find((s) => s.token === token);
+    if (sectorEntry) return sectorEntry.exchange as Exchange;
+
+    const stockEntry = Object.values(MAJOR_STOCKS).find((s) => s.token === token);
+    if (stockEntry) return stockEntry.exchange as Exchange;
+
+    const commodityEntry = Object.values(COMMODITIES).find((c) => c.token === token);
+    if (commodityEntry) return commodityEntry.exchange as Exchange;
+
+    return Exchange.NSE;
+  }
+
   private tickToQuote(tick: TickData): Quote {
     const previousQuote = this.quoteCache.get(tick.token);
     const prevClose = previousQuote?.close ?? tick.close;
@@ -966,7 +1097,7 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
     return {
       symbol: tick.symbol,
       token: tick.token,
-      exchange: (tick as any).exchange ?? Exchange.NSE,
+      exchange: (tick as any).exchange ?? this.getExchangeForToken(tick.token),
       ltp: tick.ltp,
       open: tick.open,
       high: tick.high,

@@ -21,6 +21,8 @@ const DEFAULT_WATCHLIST: WatchlistItem[] = [
   { symbol: 'RELIANCE', token: '2885', exchange: 'NSE', name: 'Reliance Industries' },
   { symbol: 'TCS', token: '11536', exchange: 'NSE', name: 'Tata Consultancy Services' },
   { symbol: 'HDFCBANK', token: '1333', exchange: 'NSE', name: 'HDFC Bank' },
+  { symbol: 'GOLD', token: '477904', exchange: 'MCX', name: 'Gold' },
+  { symbol: 'NATURALGAS', token: '538685', exchange: 'MCX', name: 'Natural Gas' },
 ];
 
 export const useWatchlistStore = create<WatchlistState>()(

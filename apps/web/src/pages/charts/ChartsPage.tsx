@@ -13,6 +13,9 @@ const WATCHLIST_ITEMS: SelectedSymbol[] = [
   { symbol: 'SENSEX', token: '99919000', exchange: 'BSE', name: 'SENSEX' },
   { symbol: 'NIFTY MIDCAP 50', token: '99926025', exchange: 'NSE', name: 'NIFTY MIDCAP' },
   { symbol: 'NIFTY IT', token: '99926013', exchange: 'NSE', name: 'NIFTY IT' },
+  { symbol: 'GOLD', token: '477904', exchange: 'MCX', name: 'GOLD' },
+  { symbol: 'SILVER', token: '457532', exchange: 'MCX', name: 'SILVER' },
+  { symbol: 'NATURALGAS', token: '538685', exchange: 'MCX', name: 'NATURAL GAS' },
 ];
 
 interface CrosshairData {

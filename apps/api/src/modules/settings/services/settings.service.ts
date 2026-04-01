@@ -15,7 +15,7 @@ const DEFAULT_SETTINGS = {
   maxConcurrentPositions: 5,
   defaultRiskReward: 2.0,
   autoTradeMode: 'OFF',
-  activeStrategies: ['gamma-blast'],
+  activeStrategies: ['rsi-reversal', 'ema-crossover', 'vwap-deviation'],
   preferredSegments: ['OPTIONS', 'EQUITY'],
   tradingHoursOnly: true,
   notificationsEnabled: true,

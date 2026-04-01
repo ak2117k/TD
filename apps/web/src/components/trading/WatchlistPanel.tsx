@@ -16,6 +16,9 @@ const SEARCH_SUGGESTIONS: WatchlistItem[] = [
   { symbol: 'LT', token: '11483', exchange: 'NSE', name: 'Larsen & Toubro' },
   { symbol: 'BHARTIARTL', token: '10604', exchange: 'NSE', name: 'Bharti Airtel' },
   { symbol: 'MARUTI', token: '10999', exchange: 'NSE', name: 'Maruti Suzuki' },
+  { symbol: 'GOLD', token: '477904', exchange: 'MCX', name: 'Gold' },
+  { symbol: 'SILVER', token: '457532', exchange: 'MCX', name: 'Silver' },
+  { symbol: 'NATURALGAS', token: '538685', exchange: 'MCX', name: 'Natural Gas' },
 ];
 
 export default function WatchlistPanel() {

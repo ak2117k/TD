@@ -3,6 +3,7 @@ import { wsService } from '@/services/websocket';
 import api from '@/services/api';
 import { useMarketStore } from '@/stores/market-store';
 import { Exchange, type Quote, type MarketStatus } from '@/types';
+import { COMMODITIES } from '@td/shared';
 
 /**
  * Compute current Indian market status using IST time.
@@ -28,11 +29,20 @@ function computeMarketStatus(): MarketStatus {
   if (weekday === 'Sat' || weekday === 'Sun') return 'closed';
 
   const totalMinutes = hour * 60 + minute;
+
+  // NSE/BSE hours
   const preMarketOpen = 9 * 60;       // 09:00
   const marketOpen = 9 * 60 + 15;     // 09:15
   const marketClose = 15 * 60 + 30;   // 15:30
 
-  if (totalMinutes >= marketOpen && totalMinutes <= marketClose) return 'open';
+  // MCX hours (9:00 AM – 11:30 PM IST)
+  const mcxOpen = 9 * 60;             // 09:00
+  const mcxClose = 23 * 60 + 30;      // 23:30
+
+  const nseOpen = totalMinutes >= marketOpen && totalMinutes <= marketClose;
+  const mcxOpen_ = totalMinutes >= mcxOpen && totalMinutes <= mcxClose;
+
+  if (nseOpen || mcxOpen_) return 'open';
   if (totalMinutes >= preMarketOpen && totalMinutes < marketOpen) return 'pre-market';
   return 'closed';
 }
@@ -47,13 +57,13 @@ const DEMO_INDEX_QUOTES: Quote[] = [
   { symbol: 'NIFTY IT', token: '99926013', exchange: Exchange.NSE, ltp: 34_210.90, open: 34_150.40, high: 34_310.25, low: 34_080.15, close: 34_150.40, change: 60.50, changePercent: 0.18, volume: 0, timestamp: new Date() },
 ];
 
-/** Demo commodity quotes — seeded so the Commodities tab has data. */
+/** Demo commodity quotes — seeded so the Commodities tab has data.
+ *  Tokens sourced from @td/shared COMMODITIES constants.
+ *  CRUDEOIL and COPPER are excluded because their tokens are '0' (unresolved). */
 const DEMO_COMMODITY_QUOTES: Quote[] = [
-  { symbol: 'GOLD', token: '66745', exchange: Exchange.MCX, ltp: 72_450.00, open: 72_180.00, high: 72_620.00, low: 72_050.00, close: 72_180.00, change: 270.00, changePercent: 0.37, volume: 12_540, timestamp: new Date() },
-  { symbol: 'SILVER', token: '66754', exchange: Exchange.MCX, ltp: 84_320.00, open: 83_950.00, high: 84_580.00, low: 83_710.00, close: 83_950.00, change: 370.00, changePercent: 0.44, volume: 18_230, timestamp: new Date() },
-  { symbol: 'CRUDEOIL', token: '66767', exchange: Exchange.MCX, ltp: 5_834.00, open: 5_810.00, high: 5_862.00, low: 5_788.00, close: 5_810.00, change: 24.00, changePercent: 0.41, volume: 34_670, timestamp: new Date() },
-  { symbol: 'NATURALGAS', token: '66781', exchange: Exchange.MCX, ltp: 248.50, open: 246.80, high: 250.10, low: 245.30, close: 246.80, change: 1.70, changePercent: 0.69, volume: 28_910, timestamp: new Date() },
-  { symbol: 'COPPER', token: '66799', exchange: Exchange.MCX, ltp: 832.60, open: 828.40, high: 836.20, low: 825.50, close: 828.40, change: 4.20, changePercent: 0.51, volume: 9_870, timestamp: new Date() },
+  { symbol: 'GOLD', token: COMMODITIES.GOLD.token, exchange: Exchange.MCX, ltp: 72_450.00, open: 72_180.00, high: 72_620.00, low: 72_050.00, close: 72_180.00, change: 270.00, changePercent: 0.37, volume: 12_540, timestamp: new Date() },
+  { symbol: 'SILVER', token: COMMODITIES.SILVER.token, exchange: Exchange.MCX, ltp: 84_320.00, open: 83_950.00, high: 84_580.00, low: 83_710.00, close: 83_950.00, change: 370.00, changePercent: 0.44, volume: 18_230, timestamp: new Date() },
+  { symbol: 'NATURALGAS', token: COMMODITIES.NATURALGAS.token, exchange: Exchange.MCX, ltp: 248.50, open: 246.80, high: 250.10, low: 245.30, close: 246.80, change: 1.70, changePercent: 0.69, volume: 28_910, timestamp: new Date() },
 ];
 
 /** Demo stock quotes — always seeded so watchlist and F&O tab have data. */

@@ -5,6 +5,7 @@ import {
   TickData,
 } from '../../../common/interfaces/broker-adapter.interface';
 import { BROKER_ADAPTER_TOKEN } from '../../market-data/services/market-feed.service';
+import { AngelOneAuthService } from '../../market-data/services/angel-one-auth.service';
 import { GreeksCalculatorService } from './greeks-calculator.service';
 import { OptionsChainEntry, OptionData, OptionType } from '@td/shared/types';
 
@@ -56,6 +57,7 @@ export class OptionsChainService {
     @Optional()
     @Inject(BROKER_ADAPTER_TOKEN)
     private readonly brokerAdapter: BrokerAdapter | null,
+    private readonly authService: AngelOneAuthService,
   ) {}
 
   /**
@@ -421,7 +423,11 @@ export class OptionsChainService {
 
     try {
       // Use Angel One's optionGreek API — returns full chain in one call
-      const smartApi = (this.brokerAdapter as any)?.authService?.getSmartApi?.();
+      if (!this.authService.isAuthenticated()) {
+        this.logger.warn('AngelOneAuthService not available or not authenticated — cannot call optionGreek');
+        return this.buildSyntheticChain(underlying, expiry, spotPrice);
+      }
+      const smartApi = this.authService.getSmartApi();
       if (!smartApi?.optionGreek) {
         this.logger.warn('optionGreek API not available on SmartAPI instance');
         return this.buildSyntheticChain(underlying, expiry, spotPrice);
@@ -432,25 +438,38 @@ export class OptionsChainService {
         expirydate: expiryTag,
       });
 
-      if (!response?.data || !Array.isArray(response.data)) {
-        this.logger.warn(`optionGreek returned no data for ${underlying} ${expiryTag}`);
+      this.logger.debug(`optionGreek raw response status: ${response?.status}, message: ${response?.message}`);
+
+      // Angel One may return data directly or nested under response.data
+      const rawData = response?.data;
+      if (!rawData || !Array.isArray(rawData) || rawData.length === 0) {
+        this.logger.warn(
+          `optionGreek returned no data for ${underlying} ${expiryTag}. ` +
+          `Response: ${JSON.stringify({ status: response?.status, message: response?.message, dataType: typeof rawData, dataIsArray: Array.isArray(rawData) })}`,
+        );
         return this.buildSyntheticChain(underlying, expiry, spotPrice);
       }
 
-      this.logger.log(`optionGreek returned ${response.data.length} contracts`);
+      // Log first contract keys for debugging field names
+      this.logger.debug(`optionGreek sample contract keys: ${Object.keys(rawData[0]).join(', ')}`);
+      this.logger.log(`optionGreek returned ${rawData.length} contracts`);
 
       // Group by strike price
       const strikeMap = new Map<number, { ce: any; pe: any }>();
 
-      for (const contract of response.data) {
-        const strike = Number(contract.strikePrice ?? contract.strikeprice ?? 0);
+      for (const contract of rawData) {
+        const strike = Number(
+          contract.strikePrice ?? contract.strikeprice ?? contract.strike_price ?? 0,
+        );
         if (strike <= 0) continue;
 
         if (!strikeMap.has(strike)) {
           strikeMap.set(strike, { ce: null, pe: null });
         }
         const entry = strikeMap.get(strike)!;
-        const optType = (contract.optionType ?? contract.option_type ?? '').toUpperCase();
+        const optType = (
+          contract.optionType ?? contract.option_type ?? contract.opttype ?? ''
+        ).toUpperCase();
         if (optType === 'CE') entry.ce = contract;
         else if (optType === 'PE') entry.pe = contract;
       }

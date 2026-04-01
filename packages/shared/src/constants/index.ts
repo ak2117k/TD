@@ -56,14 +56,17 @@ export const MAJOR_STOCKS = {
   ICICIBANK: { symbol: 'ICICIBANK', token: '4963', exchange: 'NSE' },
 } as const;
 
-// Major MCX commodity tokens (Angel One — placeholder tokens, may change with expiry)
-export const COMMODITIES = {
-  GOLD: { symbol: 'GOLD', token: '66745', exchange: 'MCX', sector: 'Gold' },
-  SILVER: { symbol: 'SILVER', token: '66754', exchange: 'MCX', sector: 'Silver' },
-  CRUDEOIL: { symbol: 'CRUDEOIL', token: '66767', exchange: 'MCX', sector: 'Crude Oil' },
-  NATURALGAS: { symbol: 'NATURALGAS', token: '66781', exchange: 'MCX', sector: 'Natural Gas' },
-  COPPER: { symbol: 'COPPER', token: '66799', exchange: 'MCX', sector: 'Copper' },
-} as const;
+// Major MCX commodity futures tokens (Angel One)
+// These are current front-month contract tokens. MCX futures tokens change
+// every month with contract expiry — the backend also tries to resolve them
+// dynamically at startup. Update these when contracts roll over.
+export const COMMODITIES: Record<string, { symbol: string; token: string; exchange: string; sector: string }> = {
+  GOLD: { symbol: 'GOLD', token: '477904', exchange: 'MCX', sector: 'Gold' },         // GOLDM03APR26FUT
+  SILVER: { symbol: 'SILVER', token: '457532', exchange: 'MCX', sector: 'Silver' },    // SILVER05MAY26FUT
+  CRUDEOIL: { symbol: 'CRUDEOIL', token: '0', exchange: 'MCX', sector: 'Crude Oil' },  // Resolve dynamically
+  NATURALGAS: { symbol: 'NATURALGAS', token: '538685', exchange: 'MCX', sector: 'Natural Gas' }, // NATURALGAS28JUL26FUT
+  COPPER: { symbol: 'COPPER', token: '0', exchange: 'MCX', sector: 'Copper' },         // Resolve dynamically
+};
 
 // Candle timeframes
 export const TIMEFRAMES = {

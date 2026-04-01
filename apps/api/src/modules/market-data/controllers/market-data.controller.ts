@@ -22,6 +22,34 @@ import {
   GetCandlesQueryDto,
   GetOIQueryDto,
 } from '../dto/market-data.dto';
+import {
+  INDICES,
+  SECTOR_INDICES,
+  MAJOR_STOCKS,
+  COMMODITIES,
+} from '@td/shared/constants';
+
+/**
+ * Look up a symbol and exchange for a token from the known constant maps.
+ * Returns `{ symbol, exchange }` if found, or `null` if the token is unknown.
+ */
+function resolveTokenFromConstants(
+  token: string,
+): { symbol: string; exchange: string } | null {
+  for (const entry of Object.values(INDICES)) {
+    if (entry.token === token) return { symbol: entry.symbol, exchange: entry.exchange };
+  }
+  for (const entry of Object.values(SECTOR_INDICES)) {
+    if (entry.token === token) return { symbol: entry.symbol, exchange: entry.exchange };
+  }
+  for (const entry of Object.values(MAJOR_STOCKS)) {
+    if (entry.token === token) return { symbol: entry.symbol, exchange: entry.exchange };
+  }
+  for (const entry of Object.values(COMMODITIES)) {
+    if (entry.token === token) return { symbol: entry.symbol, exchange: entry.exchange };
+  }
+  return null;
+}
 
 @ApiTags('Market Data')
 @Controller('api/market-data')
@@ -76,7 +104,7 @@ export class MarketDataController {
 
       // Fall back to Angel One searchScrip API for broader results.
       // Search across multiple exchanges unless a specific one was requested.
-      const exchanges = exchange ? [exchange] : ['NSE', 'BSE', 'NFO'];
+      const exchanges = exchange ? [exchange] : ['NSE', 'BSE', 'NFO', 'MCX'];
       const brokerResults: Array<{
         symbol: string;
         token: string;
@@ -194,14 +222,17 @@ export class MarketDataController {
         }
       }
 
-      // Determine which exchange to use for the Angel One API call.
-      // Priority: query param > instrument record > default (NSE).
+      // Determine which exchange and symbol to use for the Angel One API call.
+      // Priority: query param > instrument record > constants lookup > default (NSE).
+      const constantEntry = resolveTokenFromConstants(token);
+
       const exchange =
         query.exchange ??
         instrument?.exchange ??
+        constantEntry?.exchange ??
         'NSE';
 
-      const symbol = instrument?.symbol ?? token;
+      const symbol = instrument?.symbol ?? constantEntry?.symbol ?? token;
 
       // Fetch from Angel One historical API (works for both known and unknown
       // instruments — e.g., MCX commodity tokens not yet in the local DB).

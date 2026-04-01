@@ -63,10 +63,19 @@ export class StrategyRegistryService implements OnModuleInit {
 
   /**
    * Get all strategies that are in the user's activeStrategies setting.
+   * Falls back to ALL registered strategies when activeStrategies is empty
+   * or none of the listed names match a registered strategy.
    */
   async getActiveStrategies(): Promise<TradingStrategy[]> {
     const settings = await this.settingsService.getSettings();
     const activeNames: string[] = settings.activeStrategies ?? [];
+
+    if (activeNames.length === 0) {
+      this.logger.debug(
+        'No activeStrategies configured — falling back to all registered strategies',
+      );
+      return Array.from(this.strategies.values());
+    }
 
     const active: TradingStrategy[] = [];
     for (const name of activeNames) {
@@ -78,6 +87,13 @@ export class StrategyRegistryService implements OnModuleInit {
           `Active strategy "${name}" is not registered in the registry`,
         );
       }
+    }
+
+    if (active.length === 0 && this.strategies.size > 0) {
+      this.logger.warn(
+        `None of the activeStrategies [${activeNames.join(', ')}] matched registered strategies — falling back to all registered`,
+      );
+      return Array.from(this.strategies.values());
     }
 
     return active;

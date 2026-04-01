@@ -4,6 +4,7 @@ import { Job } from 'bull';
 import { SignalGeneratorService } from '../services/signal-generator.service';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
+import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { TIMEFRAMES } from '@td/shared/constants';
 
 interface SignalScanJobPayload {
@@ -20,6 +21,7 @@ export class SignalScanProcessor {
     private readonly signalGeneratorService: SignalGeneratorService,
     private readonly marketFeedService: MarketFeedService,
     private readonly marketDataRepository: MarketDataRepository,
+    private readonly angelOneAdapter: AngelOneAdapterService,
   ) {}
 
   @Process({ concurrency: 1 })
@@ -115,6 +117,28 @@ export class SignalScanProcessor {
       }
     } catch {
       // Continue with empty candles
+    }
+
+    // If DB has insufficient candles, fetch from Angel One REST API
+    if (candles.length < 52) {
+      try {
+        const apiCandles = await this.angelOneAdapter.getHistoricalData(
+          token,
+          quote.exchange,
+          timeframe,
+          lookback,
+          now,
+        );
+
+        if (apiCandles && apiCandles.length > candles.length) {
+          candles = apiCandles;
+          this.logger.debug(
+            `Fetched ${apiCandles.length} candles from API for ${quote.symbol}`,
+          );
+        }
+      } catch {
+        // Continue with whatever candles we have
+      }
     }
 
     return {

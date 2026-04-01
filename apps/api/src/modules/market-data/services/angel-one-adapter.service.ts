@@ -271,7 +271,18 @@ export class AngelOneAdapterService implements BrokerAdapter {
         exchangeTokens: { [exchange]: [token] },
       });
 
+      // Debug: log raw response structure for first few calls
       if (!response?.data?.fetched?.length) {
+        this.logger.debug(
+          `marketData raw for ${token}/${exchange}: ${JSON.stringify({
+            status: response?.status,
+            message: response?.message,
+            hasData: !!response?.data,
+            dataKeys: response?.data ? Object.keys(response.data) : [],
+            fetched: response?.data?.fetched?.length ?? 0,
+            unfetched: response?.data?.unfetched?.length ?? 0,
+          })}`,
+        );
         throw new Error(response?.message ?? 'Market data fetch failed');
       }
 
