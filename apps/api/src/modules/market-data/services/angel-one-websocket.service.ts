@@ -109,7 +109,7 @@ export class AngelOneWebSocketService extends EventEmitter implements OnModuleDe
       this.ws = new WebSocketV2({
         jwttoken: jwtToken,
         clientcode: clientId,
-        feedtoken: feedToken,
+        feedtype: feedToken,
         apikey: apiKey,
       });
 
@@ -264,9 +264,12 @@ export class AngelOneWebSocketService extends EventEmitter implements OnModuleDe
 
     this.ws.on('tick', (data: any) => {
       try {
+        this.logger.debug(`WS tick: ${JSON.stringify(data).substring(0, 300)}`);
         const tick = this.parseTickData(data);
         if (tick) {
           this.emit('tick', tick);
+        } else {
+          this.logger.debug('parseTickData returned null');
         }
       } catch (error) {
         this.logger.warn(
@@ -313,18 +316,26 @@ export class AngelOneWebSocketService extends EventEmitter implements OnModuleDe
   private mapSingleTick(tick: any): TickData | null {
     if (!tick) return null;
 
+    // Angel One WebSocket returns:
+    // - token with extra quotes: "\"99926013\"" → strip them
+    // - prices in paise (multiply by 100): 6195760 → 61957.60
+    const rawToken = String(tick.token ?? tick.symbolToken ?? tick.tk ?? '');
+    const token = rawToken.replace(/"/g, ''); // Remove any extra quotes
+
+    const divisor = 100; // Angel One WebSocket sends prices in paise
+
     return {
-      token: String(tick.token ?? tick.symbolToken ?? tick.tk ?? ''),
+      token,
       symbol: String(tick.symbol ?? tick.tradingSymbol ?? tick.name ?? ''),
-      ltp: this.toNumber(tick.last_traded_price ?? tick.ltp ?? tick.lp ?? 0),
-      open: this.toNumber(tick.open_price_of_the_day ?? tick.open ?? tick.op ?? 0),
-      high: this.toNumber(tick.high_price_of_the_day ?? tick.high ?? tick.hp ?? 0),
-      low: this.toNumber(tick.low_price_of_the_day ?? tick.low ?? tick.lop ?? 0),
-      close: this.toNumber(tick.closed_price ?? tick.close ?? tick.cp ?? 0),
+      ltp: this.toNumber(tick.last_traded_price ?? tick.ltp ?? tick.lp ?? 0) / divisor,
+      open: this.toNumber(tick.open_price_of_the_day ?? tick.open ?? tick.op ?? 0) / divisor,
+      high: this.toNumber(tick.high_price_of_the_day ?? tick.high ?? tick.hp ?? 0) / divisor,
+      low: this.toNumber(tick.low_price_of_the_day ?? tick.low ?? tick.lop ?? 0) / divisor,
+      close: this.toNumber(tick.closed_price ?? tick.close ?? tick.cp ?? 0) / divisor,
       volume: this.toNumber(tick.volume_trade_for_the_day ?? tick.volume ?? tick.v ?? 0),
       oi: tick.open_interest ? this.toNumber(tick.open_interest) : undefined,
       timestamp: tick.exchange_timestamp
-        ? new Date(tick.exchange_timestamp)
+        ? new Date(Number(tick.exchange_timestamp))
         : new Date(),
     };
   }

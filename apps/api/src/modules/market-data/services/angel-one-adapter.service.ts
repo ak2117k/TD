@@ -8,7 +8,8 @@ import {
   TickData,
 } from '../../../common/interfaces/broker-adapter.interface';
 import { AngelOneAuthService } from './angel-one-auth.service';
-import { AngelOneWebSocketService, WsFeedMode } from './angel-one-websocket.service';
+import { AngelOneWebSocketService, WsFeedMode, ExchangeType } from './angel-one-websocket.service';
+import { COMMODITIES } from '@td/shared/constants';
 
 /**
  * Map our generic order types to Angel One SmartAPI order type strings.
@@ -381,14 +382,36 @@ export class AngelOneAdapterService implements BrokerAdapter {
     // Register the callback for tick events
     this.wsService.on('tick', callback);
 
-    // Subscribe via WebSocket
-    this.wsService
-      .subscribe(tokens, WsFeedMode.SNAP_QUOTE)
-      .catch((error) => {
-        this.logger.error(
-          `Feed subscription failed: ${error instanceof Error ? error.message : error}`,
-        );
-      });
+    // Separate tokens by exchange — MCX tokens need MCX_FO exchange type
+    const mcxTokens = new Set<string>();
+    for (const c of Object.values(COMMODITIES)) {
+      if (c.token && c.token !== '0') mcxTokens.add(c.token);
+    }
+
+    const nseTokenList = tokens.filter((t) => !mcxTokens.has(t));
+    const mcxTokenList = tokens.filter((t) => mcxTokens.has(t));
+
+    // Subscribe NSE tokens
+    if (nseTokenList.length > 0) {
+      this.wsService
+        .subscribe(nseTokenList, WsFeedMode.SNAP_QUOTE, ExchangeType.NSE_CM)
+        .catch((error) => {
+          this.logger.error(
+            `NSE feed subscription failed: ${error instanceof Error ? error.message : error}`,
+          );
+        });
+    }
+
+    // Subscribe MCX tokens
+    if (mcxTokenList.length > 0) {
+      this.wsService
+        .subscribe(mcxTokenList, WsFeedMode.SNAP_QUOTE, ExchangeType.MCX_FO)
+        .catch((error) => {
+          this.logger.error(
+            `MCX feed subscription failed: ${error instanceof Error ? error.message : error}`,
+          );
+        });
+    }
   }
 
   unsubscribeFromFeed(tokens: string[]): void {

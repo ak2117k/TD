@@ -21,6 +21,9 @@ const DEFAULT_SETTINGS = {
   notificationsEnabled: true,
 };
 
+/** Known valid strategy names that exist in the strategy registry. */
+const VALID_STRATEGY_NAMES = ['rsi-reversal', 'ema-crossover', 'vwap-deviation'];
+
 @Injectable()
 export class SettingsService {
   private readonly logger = new Logger(SettingsService.name);
@@ -34,6 +37,29 @@ export class SettingsService {
       this.logger.log('No settings found, creating defaults');
       settings = await this.prisma.userSettings.create({
         data: DEFAULT_SETTINGS,
+      });
+    }
+
+    // Sanitize activeStrategies: if the DB has strategy names not in the
+    // registry (e.g. stale "gamma-blast"), replace with defaults.
+    const activeStrategies: string[] = settings.activeStrategies ?? [];
+    const validActive = activeStrategies.filter((name) =>
+      VALID_STRATEGY_NAMES.includes(name),
+    );
+
+    if (validActive.length !== activeStrategies.length) {
+      const invalid = activeStrategies.filter(
+        (name) => !VALID_STRATEGY_NAMES.includes(name),
+      );
+      this.logger.warn(
+        `activeStrategies contains unknown strategies [${invalid.join(', ')}] — replacing with defaults`,
+      );
+
+      settings = await this.prisma.userSettings.update({
+        where: { id: settings.id },
+        data: {
+          activeStrategies: DEFAULT_SETTINGS.activeStrategies,
+        },
       });
     }
 

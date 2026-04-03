@@ -13,7 +13,18 @@ import { SignalScoringService } from './signal-scoring.service';
 import { SignalRepository, CreateSignalInput } from '../repositories/signal.repository';
 import { SignalGateway } from '../gateways/signal.gateway';
 import { SignalFilterDto } from '../dto/signal.dto';
-import { TIMEFRAMES } from '@td/shared/constants';
+import {
+  TIMEFRAMES,
+  MARKET_OPEN_HOUR,
+  MARKET_OPEN_MINUTE,
+  MARKET_CLOSE_HOUR,
+  MARKET_CLOSE_MINUTE,
+  MCX_OPEN_HOUR,
+  MCX_OPEN_MINUTE,
+  MCX_CLOSE_HOUR,
+  MCX_CLOSE_MINUTE,
+} from '@td/shared/constants';
+import { Exchange } from '@td/shared/types';
 
 /** Default signal expiry for intraday in minutes. */
 const DEFAULT_EXPIRY_MINUTES = 30;
@@ -56,6 +67,13 @@ export class SignalGeneratorService {
         const signal = strategy.analyze(snapshot);
         if (signal) {
           rawSignals.push({ signal, strategyName: strategy.name });
+          this.logger.debug(
+            `[${strategy.name}] ${snapshot.symbol}: SIGNAL ${signal.side} @ ${signal.entryPrice} (candles: ${snapshot.candles.length})`,
+          );
+        } else {
+          this.logger.debug(
+            `[${strategy.name}] ${snapshot.symbol}: no signal (candles: ${snapshot.candles.length}, ltp: ${snapshot.ltp})`,
+          );
         }
       } catch (error) {
         this.logger.error(
@@ -137,19 +155,55 @@ export class SignalGeneratorService {
       return;
     }
 
-    this.logger.log(`Scanning ${tokens.length} instruments for signals`);
+    // Determine which exchanges are currently open so we skip stale data
+    const nseOpen = this.isExchangeOpen('NSE');
+    const mcxOpen = this.isExchangeOpen('MCX');
+
+    this.logger.log(
+      `Scanning ${tokens.length} instruments for signals (NSE: ${nseOpen ? 'OPEN' : 'CLOSED'}, MCX: ${mcxOpen ? 'OPEN' : 'CLOSED'})`,
+    );
+
+    let scanned = 0;
+    let skipped = 0;
 
     for (const token of tokens) {
       try {
+        // Check if the token's exchange is currently open
+        const quote = this.marketFeedService.getQuote(token);
+        if (quote) {
+          const exchange = quote.exchange;
+          const isMcx = exchange === Exchange.MCX;
+          const isNseOrBse =
+            exchange === Exchange.NSE ||
+            exchange === Exchange.BSE ||
+            exchange === Exchange.NFO;
+
+          if (isMcx && !mcxOpen) {
+            skipped++;
+            continue;
+          }
+          if (isNseOrBse && !nseOpen) {
+            skipped++;
+            continue;
+          }
+        }
+
         const snapshot = await this.buildSnapshotForToken(token);
         if (snapshot) {
           await this.scanForSignals(snapshot);
+          scanned++;
         }
       } catch (error) {
         this.logger.error(
           `Error scanning token ${token}: ${error instanceof Error ? error.message : error}`,
         );
       }
+    }
+
+    if (skipped > 0) {
+      this.logger.debug(
+        `Skipped ${skipped} tokens (exchange closed), scanned ${scanned}`,
+      );
     }
   }
 
@@ -207,6 +261,42 @@ export class SignalGeneratorService {
   // ------------------------------------------------------------------
 
   /**
+   * Check whether a specific exchange is currently open (IST-based).
+   * NSE/BSE/NFO: 9:15 – 15:30, Mon–Fri
+   * MCX: 9:00 – 23:30, Mon–Fri
+   */
+  private isExchangeOpen(exchange: 'NSE' | 'MCX'): boolean {
+    const now = new Date();
+    const istParts = new Intl.DateTimeFormat('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      hour: 'numeric',
+      minute: 'numeric',
+      weekday: 'short',
+      hour12: false,
+    }).formatToParts(now);
+
+    const weekday = istParts.find((p) => p.type === 'weekday')?.value ?? '';
+    if (weekday === 'Sat' || weekday === 'Sun') return false;
+
+    const hours = Number(istParts.find((p) => p.type === 'hour')?.value ?? 0);
+    const minutes = Number(
+      istParts.find((p) => p.type === 'minute')?.value ?? 0,
+    );
+    const totalMinutes = hours * 60 + minutes;
+
+    if (exchange === 'MCX') {
+      const mcxOpen = MCX_OPEN_HOUR * 60 + MCX_OPEN_MINUTE;
+      const mcxClose = MCX_CLOSE_HOUR * 60 + MCX_CLOSE_MINUTE;
+      return totalMinutes >= mcxOpen && totalMinutes <= mcxClose;
+    }
+
+    // NSE/BSE/NFO
+    const nseOpen = MARKET_OPEN_HOUR * 60 + MARKET_OPEN_MINUTE;
+    const nseClose = MARKET_CLOSE_HOUR * 60 + MARKET_CLOSE_MINUTE;
+    return totalMinutes >= nseOpen && totalMinutes <= nseClose;
+  }
+
+  /**
    * Build a MarketSnapshot from a token's cached quote and recent candles.
    * Tries the DB first, then falls back to fetching historical data from the
    * Angel One REST API so that strategies have enough candles for indicator
@@ -222,9 +312,10 @@ export class SignalGeneratorService {
 
     // We need enough candles for the most demanding strategy.
     // EMA crossover needs signalPeriod(50) + 2 = 52 candles minimum.
-    // Use 6 hours of 5-min candles (~72 candles) to be safe.
+    // RSI needs 26+ candles. Use 5 days of 15-min candles (~125 candles)
+    // to ensure sufficient data even for commodities with limited intraday history.
     const now = new Date();
-    const sixHoursAgo = new Date(now.getTime() - 6 * 60 * 60 * 1000);
+    const fiveDaysAgo = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
 
     let candles: Array<{
       timestamp: Date;
@@ -241,8 +332,8 @@ export class SignalGeneratorService {
       if (instrument) {
         const dbCandles = await this.marketDataRepository.getCandles(
           instrument.id,
-          TIMEFRAMES.FIVE_MIN,
-          sixHoursAgo,
+          TIMEFRAMES.FIFTEEN_MIN,
+          fiveDaysAgo,
           now,
         );
         candles = dbCandles;
@@ -259,8 +350,8 @@ export class SignalGeneratorService {
         const apiCandles = await this.angelOneAdapter.getHistoricalData(
           token,
           quote.exchange,
-          TIMEFRAMES.FIVE_MIN,
-          sixHoursAgo,
+          TIMEFRAMES.FIFTEEN_MIN,
+          fiveDaysAgo,
           now,
         );
 

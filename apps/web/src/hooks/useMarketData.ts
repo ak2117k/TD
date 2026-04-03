@@ -58,12 +58,13 @@ const DEMO_INDEX_QUOTES: Quote[] = [
 ];
 
 /** Demo commodity quotes — seeded so the Commodities tab has data.
- *  Tokens sourced from @td/shared COMMODITIES constants.
- *  CRUDEOIL and COPPER are excluded because their tokens are '0' (unresolved). */
+ *  Tokens sourced from @td/shared COMMODITIES constants. */
 const DEMO_COMMODITY_QUOTES: Quote[] = [
   { symbol: 'GOLD', token: COMMODITIES.GOLD.token, exchange: Exchange.MCX, ltp: 72_450.00, open: 72_180.00, high: 72_620.00, low: 72_050.00, close: 72_180.00, change: 270.00, changePercent: 0.37, volume: 12_540, timestamp: new Date() },
   { symbol: 'SILVER', token: COMMODITIES.SILVER.token, exchange: Exchange.MCX, ltp: 84_320.00, open: 83_950.00, high: 84_580.00, low: 83_710.00, close: 83_950.00, change: 370.00, changePercent: 0.44, volume: 18_230, timestamp: new Date() },
+  { symbol: 'CRUDEOIL', token: COMMODITIES.CRUDEOIL.token, exchange: Exchange.MCX, ltp: 5_420.00, open: 5_380.00, high: 5_450.00, low: 5_360.00, close: 5_380.00, change: 40.00, changePercent: 0.74, volume: 15_600, timestamp: new Date() },
   { symbol: 'NATURALGAS', token: COMMODITIES.NATURALGAS.token, exchange: Exchange.MCX, ltp: 248.50, open: 246.80, high: 250.10, low: 245.30, close: 246.80, change: 1.70, changePercent: 0.69, volume: 28_910, timestamp: new Date() },
+  { symbol: 'COPPER', token: COMMODITIES.COPPER.token, exchange: Exchange.MCX, ltp: 845.50, open: 842.00, high: 848.00, low: 840.00, close: 842.00, change: 3.50, changePercent: 0.42, volume: 8_200, timestamp: new Date() },
 ];
 
 /** Demo stock quotes — always seeded so watchlist and F&O tab have data. */
