@@ -15,6 +15,7 @@ import { BacktestModule } from './modules/backtest/backtest.module';
 import { OptionsChainModule } from './modules/options-chain/options-chain.module';
 import { AIAdvisorModule } from './modules/ai-advisor/ai-advisor.module';
 import { AutoTradeModule } from './modules/auto-trade/auto-trade.module';
+import { InsightsModule } from './modules/insights/insights.module';
 
 @Module({
   imports: [
@@ -69,6 +70,9 @@ import { AutoTradeModule } from './modules/auto-trade/auto-trade.module';
 
     // AI-powered trading advisor — insights, chat, weekly reports
     AIAdvisorModule,
+
+    // AI Insights — section-level Claude analysis via MCP
+    InsightsModule,
 
     // Auto-trade — signal-to-trade automation with approval workflow
     AutoTradeModule,
