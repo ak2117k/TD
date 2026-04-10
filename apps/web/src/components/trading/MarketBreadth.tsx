@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { TrendingUp, TrendingDown, Minus, RefreshCw } from 'lucide-react';
 import api from '@/services/api';
+import AIInsightCard from '@/components/ai/AIInsightCard';
 
 interface BreadthData {
   advances: number;
@@ -47,6 +48,7 @@ export default function MarketBreadth() {
   const adRatio = breadth.declines > 0 ? (breadth.advances / breadth.declines).toFixed(2) : '--';
 
   return (
+    <div className="flex flex-col gap-3">
     <div className="rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)] p-4">
       <div className="mb-3 flex items-center justify-between">
         <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">Market Breadth</h3>
@@ -100,6 +102,16 @@ export default function MarketBreadth() {
           A/D Ratio: {adRatio}
         </span>
       </div>
+    </div>
+    <AIInsightCard
+      sectionKey="market-breadth"
+      contextKey="default"
+      contextData={{
+        breadth,
+        adRatio: parseFloat(adRatio === '--' ? '0' : adRatio),
+        capturedAt: new Date().toISOString(),
+      }}
+    />
     </div>
   );
 }
