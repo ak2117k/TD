@@ -8,6 +8,7 @@ import ExpirySelector from '@/components/trading/ExpirySelector';
 import StrikeSelector from '@/components/trading/StrikeSelector';
 import OIAnalysis from '@/components/trading/OIAnalysis';
 import OptionPayoffChart from '@/components/trading/OptionPayoffChart';
+import AIInsightCard from '@/components/ai/AIInsightCard';
 
 const UNDERLYING_OPTIONS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY'];
 
@@ -50,6 +51,30 @@ export default function OptionsPage() {
     }
     return closest;
   }, [chain, spotPrice]);
+
+  const pcr = useMemo(() => {
+    if (chain.length === 0) return 0;
+    let totalCallOI = 0;
+    let totalPutOI = 0;
+    for (const entry of chain) {
+      totalCallOI += entry.ceData?.oi ?? 0;
+      totalPutOI += entry.peData?.oi ?? 0;
+    }
+    return totalCallOI > 0 ? totalPutOI / totalCallOI : 0;
+  }, [chain]);
+
+  const optionsContextData = useMemo(
+    () => ({
+      underlying,
+      expiry,
+      spotPrice,
+      atmStrike,
+      pcr,
+      chain: chain.slice(0, 30), // cap to avoid huge payloads
+      capturedAt: new Date().toISOString(),
+    }),
+    [underlying, expiry, spotPrice, atmStrike, pcr, chain],
+  );
 
   // Filter chain by strike range
   const filteredChain = useMemo(() => {
@@ -165,6 +190,15 @@ export default function OptionsPage() {
         <OIAnalysis chain={chain} spotPrice={spotPrice} />
         <OptionPayoffChart positions={payoffPositions} spotPrice={spotPrice} />
       </div>
+
+      {expiry && chain.length > 0 && (
+        <AIInsightCard
+          sectionKey="options-chain"
+          contextKey={`${underlying}:${expiry}`}
+          contextData={optionsContextData}
+          title="AI Strike Recommendation"
+        />
+      )}
     </div>
   );
 }
