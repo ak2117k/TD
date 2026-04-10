@@ -272,3 +272,25 @@ model BacktestRun {
   @@index([strategy, createdAt])
   @@map("backtest_runs")
 }
+
+// ============================================
+// AI Insights — Section-level Claude analysis
+// ============================================
+
+model AIInsight {
+  id            String    @id @default(cuid())
+  sectionKey    String    // "market-breadth" | "options-chain"
+  contextKey    String    // "default" | "NIFTY:2026-04-24"
+  status        String    // "pending" | "in_progress" | "completed" | "failed"
+  contextData   Json      // Snapshot of inputs at request time
+  insight       String?   // Claude's analysis as markdown
+  confidence    Int?      // 1-100
+  errorMessage  String?
+  requestedAt   DateTime  @default(now())
+  startedAt     DateTime?
+  completedAt   DateTime?
+
+  @@index([sectionKey, contextKey, status])
+  @@index([status, requestedAt])
+  @@map("ai_insights")
+}
