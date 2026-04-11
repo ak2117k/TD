@@ -7,6 +7,30 @@ import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters';
 import { LoggingInterceptor } from './common/interceptors';
 
+/**
+ * Narrow safety net for the smartapi-javascript WebSocket heartbeat bug:
+ * its internal setTimeout calls `ws.send()` without checking readyState,
+ * and when the socket is still in CONNECTING the throw escapes unhandled
+ * and kills the whole process. Swallow only THAT specific error; rethrow
+ * everything else so real bugs still crash loudly.
+ */
+process.on('uncaughtException', (err: Error) => {
+  const msg = err?.message ?? '';
+  const stack = err?.stack ?? '';
+  if (
+    msg.includes('WebSocket is not open: readyState 0') &&
+    stack.includes('smartapi-javascript')
+  ) {
+    // eslint-disable-next-line no-console
+    console.warn('[uncaughtException] smartapi WS heartbeat on CONNECTING socket — swallowed:', msg);
+    return;
+  }
+  // Unknown error — preserve default behaviour.
+  // eslint-disable-next-line no-console
+  console.error('[uncaughtException]', err);
+  throw err;
+});
+
 async function bootstrap(): Promise<void> {
   const logger = new Logger('Bootstrap');
   const app = await NestFactory.create(AppModule);
