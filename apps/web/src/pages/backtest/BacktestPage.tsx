@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import {
   FlaskConical,
   History,
@@ -6,6 +6,7 @@ import {
   GitCompareArrows,
   X,
   ChevronRight,
+  MessageSquare,
 } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { useBacktest } from '@/hooks/useBacktest';
@@ -14,7 +15,27 @@ import BacktestResults from '@/components/trading/BacktestResults';
 import BacktestTradeList from '@/components/trading/BacktestTradeList';
 import BacktestEquityCurve from '@/components/charts/BacktestEquityCurve';
 import { LoadingSkeleton } from '@/components/common';
+import AIInsightCard from '@/components/ai/AIInsightCard';
+import { StrategyChat } from '@/components/strategy/StrategyChat';
 import type { BacktestConfig as BacktestConfigType } from '@/stores/backtest-store';
+
+/**
+ * Stable fingerprint of a backtest run — used as the insight contextKey
+ * so re-asking for a review on the same (config, result) returns the
+ * cached markdown instead of re-queueing.
+ */
+function fingerprintRun(
+  config: BacktestConfigType,
+  totalTrades: number,
+  totalReturn: number,
+): string {
+  const core = `${config.strategy}|${config.symbol}|${config.timeframe}|${config.startDate}|${config.endDate}|${totalTrades}|${totalReturn.toFixed(0)}`;
+  let h = 5381;
+  for (let i = 0; i < core.length; i++) {
+    h = ((h << 5) + h + core.charCodeAt(i)) | 0;
+  }
+  return `bt-${Math.abs(h).toString(36)}`;
+}
 
 function formatINR(value: number): string {
   return new Intl.NumberFormat('en-IN', {
@@ -53,6 +74,61 @@ export default function BacktestPage() {
   } = useBacktest();
 
   const [showHistory, setShowHistory] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
+
+  // Snapshot for the chat drawer — covers current config + any active
+  // results/comparison so Claude can answer questions in full context.
+  const chatSnapshot = useMemo(
+    () => ({
+      page: 'backtest',
+      config,
+      results: results
+        ? {
+            totalTrades: results.totalTrades,
+            winRate: results.winRate,
+            totalReturn: results.totalReturn,
+            totalReturnPercent: results.totalReturnPercent,
+            maxDrawdown: results.maxDrawdown,
+            sharpeRatio: results.sharpeRatio,
+            // Cap trades list to avoid huge payloads.
+            sampleTrades: results.trades.slice(0, 20),
+          }
+        : null,
+      comparison: comparison
+        ? {
+            strategies: comparison.results.map((r) => ({
+              strategy: r.strategy,
+              totalTrades: r.totalTrades,
+              winRate: r.winRate,
+              totalReturn: r.totalReturn,
+              totalReturnPercent: r.totalReturnPercent,
+              maxDrawdown: r.maxDrawdown,
+              sharpeRatio: r.sharpeRatio,
+            })),
+          }
+        : null,
+    }),
+    [config, results, comparison],
+  );
+
+  // Context for the AI review card — only meaningful after a run completes.
+  const reviewContext = useMemo(() => {
+    if (!results) return null;
+    const contextKey = fingerprintRun(config, results.totalTrades, results.totalReturn);
+    const contextData = {
+      config,
+      results: {
+        totalTrades: results.totalTrades,
+        winRate: results.winRate,
+        totalReturn: results.totalReturn,
+        totalReturnPercent: results.totalReturnPercent,
+        maxDrawdown: results.maxDrawdown,
+        sharpeRatio: results.sharpeRatio,
+        sampleTrades: results.trades.slice(0, 30),
+      },
+    };
+    return { contextKey, contextData };
+  }, [config, results]);
 
   function handleSubmit(_cfg: BacktestConfigType) {
     runBacktest();
@@ -99,6 +175,14 @@ export default function BacktestPage() {
           >
             <History size={14} />
             History
+          </button>
+          <button
+            onClick={() => setChatOpen(true)}
+            className="flex items-center gap-1.5 rounded-lg border border-[var(--color-accent-purple,#a78bfa)]/40 bg-[var(--color-accent-purple,#a78bfa)]/10 px-3 py-2 text-xs font-medium text-[var(--color-accent-purple,#a78bfa)] hover:bg-[var(--color-accent-purple,#a78bfa)]/20 transition-colors"
+            title="Open chat with Claude"
+          >
+            <MessageSquare size={14} />
+            Ask Claude
           </button>
         </div>
       </div>
@@ -190,6 +274,15 @@ export default function BacktestPage() {
             <div className="rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)] p-5">
               <BacktestResults results={results} />
             </div>
+          )}
+
+          {!isRunning && hasResults && !hasComparison && reviewContext && (
+            <AIInsightCard
+              sectionKey="backtest-review"
+              contextKey={reviewContext.contextKey}
+              contextData={reviewContext.contextData}
+              title="Claude's Backtest Review"
+            />
           )}
 
           {!isRunning && !hasResults && !hasComparison && (
@@ -340,6 +433,16 @@ export default function BacktestPage() {
           )}
         </div>
       )}
+
+      {/* Chat drawer for backtest-specific questions */}
+      <StrategyChat
+        open={chatOpen}
+        onClose={() => setChatOpen(false)}
+        sectionKey="backtest-chat"
+        title="Backtest Chat"
+        placeholder="Ask about this backtest — config, results, what to tune..."
+        snapshot={chatSnapshot}
+      />
     </div>
   );
 }

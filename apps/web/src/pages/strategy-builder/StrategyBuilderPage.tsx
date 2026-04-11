@@ -1,4 +1,5 @@
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Code2,
   Blocks,
@@ -7,23 +8,63 @@ import {
   FlaskConical,
   Trash2,
   FolderOpen,
+  MessageSquare,
 } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import {
   useStrategyBuilderStore,
   type IndicatorDef,
 } from '@/stores/strategy-builder-store';
+import { useBacktestStore } from '@/stores/backtest-store';
 import { StrategyCodeEditor } from '@/components/strategy/StrategyCodeEditor';
 import { IndicatorPalette } from '@/components/strategy/IndicatorPalette';
 import { VisualRuleBuilder } from '@/components/strategy/VisualRuleBuilder';
 import { ValidationPanel } from '@/components/strategy/ValidationPanel';
 import { StrategyTemplates } from '@/components/strategy/StrategyTemplates';
+import { AIStrategyReview } from '@/components/strategy/AIStrategyReview';
+import { StrategyChat } from '@/components/strategy/StrategyChat';
 
 const TIMEFRAMES = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d'];
 const SEGMENTS = ['OPTIONS', 'EQUITY', 'FUTURES', 'COMMODITY'];
 
 export default function StrategyBuilderPage() {
   const store = useStrategyBuilderStore();
+  const navigate = useNavigate();
+  const updateBacktestConfig = useBacktestStore((s) => s.updateConfig);
+  const [chatOpen, setChatOpen] = useState(false);
+
+  /**
+   * Quick Backtest pre-fills the backtest page with whatever we know from
+   * the builder (name, timeframe, segment-derived exchange, last-30-days
+   * date range) and navigates there. The backtest engine only executes
+   * *registered* strategies (rsi-reversal, ema-crossover, vwap-deviation),
+   * so if the builder's strategy name doesn't match one, the /backtest
+   * page will show that error when the user clicks Run. It's the most
+   * honest behaviour we can offer without a Pine-script runtime on the
+   * backend.
+   */
+  const handleQuickBacktest = useCallback(() => {
+    const segmentToExchange: Record<string, string> = {
+      OPTIONS: 'NFO',
+      EQUITY: 'NSE',
+      FUTURES: 'NFO',
+      COMMODITY: 'MCX',
+    };
+    const end = new Date();
+    const start = new Date();
+    start.setDate(start.getDate() - 30);
+    const isoDate = (d: Date) => d.toISOString().slice(0, 10);
+
+    updateBacktestConfig({
+      strategy: store.name.trim() || 'rsi-reversal',
+      symbol: store.segment === 'OPTIONS' ? 'NIFTY' : '',
+      exchange: segmentToExchange[store.segment] ?? 'NSE',
+      timeframe: store.timeframe,
+      startDate: isoDate(start),
+      endDate: isoDate(end),
+    });
+    navigate('/backtest');
+  }, [store.name, store.timeframe, store.segment, updateBacktestConfig, navigate]);
 
   useEffect(() => {
     store.fetchSavedStrategies();
@@ -71,31 +112,43 @@ export default function StrategyBuilderPage() {
           </h1>
         </div>
 
-        {/* Mode toggle */}
-        <div className="flex items-center gap-1 rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)] p-1">
+        <div className="flex items-center gap-2">
+          {/* Mode toggle */}
+          <div className="flex items-center gap-1 rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)] p-1">
+            <button
+              onClick={() => store.setMode('script')}
+              className={cn(
+                'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all',
+                store.mode === 'script'
+                  ? 'bg-blue-500/20 text-blue-400 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-300',
+              )}
+            >
+              <Code2 size={14} />
+              Script
+            </button>
+            <button
+              onClick={() => store.setMode('visual')}
+              className={cn(
+                'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all',
+                store.mode === 'visual'
+                  ? 'bg-blue-500/20 text-blue-400 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-300',
+              )}
+            >
+              <Blocks size={14} />
+              Visual
+            </button>
+          </div>
+
+          {/* Chat toggle */}
           <button
-            onClick={() => store.setMode('script')}
-            className={cn(
-              'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all',
-              store.mode === 'script'
-                ? 'bg-blue-500/20 text-blue-400 shadow-sm'
-                : 'text-gray-500 hover:text-gray-300',
-            )}
+            onClick={() => setChatOpen(true)}
+            className="flex items-center gap-1.5 rounded-lg border border-[var(--color-accent-purple,#a78bfa)]/40 bg-[var(--color-accent-purple,#a78bfa)]/10 px-3 py-1.5 text-xs font-medium text-[var(--color-accent-purple,#a78bfa)] hover:bg-[var(--color-accent-purple,#a78bfa)]/20 transition-colors"
+            title="Open chat with Claude"
           >
-            <Code2 size={14} />
-            Script
-          </button>
-          <button
-            onClick={() => store.setMode('visual')}
-            className={cn(
-              'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all',
-              store.mode === 'visual'
-                ? 'bg-blue-500/20 text-blue-400 shadow-sm'
-                : 'text-gray-500 hover:text-gray-300',
-            )}
-          >
-            <Blocks size={14} />
-            Visual
+            <MessageSquare size={14} />
+            Ask Claude
           </button>
         </div>
       </div>
@@ -127,7 +180,10 @@ export default function StrategyBuilderPage() {
             </div>
           )}
 
-          {/* Validation panel */}
+          {/* Claude's semantic review — logic, risk, missing exits, etc. */}
+          <AIStrategyReview />
+
+          {/* Rule-based validation — syntax errors, fast and precise */}
           <ValidationPanel
             result={store.validationResult}
             isValidating={store.isValidating}
@@ -153,8 +209,10 @@ export default function StrategyBuilderPage() {
               {store.isSaving ? 'Saving...' : 'Save Strategy'}
             </button>
             <button
+              onClick={handleQuickBacktest}
               disabled={!store.code && store.mode === 'script'}
               className="flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-xs font-medium text-emerald-400 hover:bg-emerald-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Pre-fills the backtest page with this strategy and opens it"
             >
               <FlaskConical size={14} />
               Quick Backtest
@@ -276,6 +334,26 @@ export default function StrategyBuilderPage() {
           )}
         </div>
       </div>
+
+      {/* Chat drawer (slides in from the right) */}
+      <StrategyChat
+        open={chatOpen}
+        onClose={() => setChatOpen(false)}
+        sectionKey="strategy-chat"
+        title="Strategy Chat"
+        placeholder="Ask about your strategy..."
+        snapshot={{
+          mode: store.mode,
+          name: store.name || '(untitled)',
+          description: store.description || '',
+          timeframe: store.timeframe,
+          segment: store.segment,
+          code: store.mode === 'script' ? store.code : '',
+          indicators: store.mode === 'visual' ? store.indicators : [],
+          entryRules: store.mode === 'visual' ? store.entryRules : [],
+          exitRules: store.mode === 'visual' ? store.exitRules : [],
+        }}
+      />
     </div>
   );
 }

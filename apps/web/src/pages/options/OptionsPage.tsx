@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback } from 'react';
 import { Grid3X3, ChevronDown, Activity } from 'lucide-react';
 import { cn } from '@/utils/cn';
+import { PageLoadingOverlay } from '@/components/common';
 import { useOptionsStore } from '@/stores/options-store';
 import { useOptionsChain } from '@/hooks/useOptionsChain';
 import OptionsChainTable from '@/components/trading/OptionsChainTable';
@@ -63,18 +64,23 @@ export default function OptionsPage() {
     return totalCallOI > 0 ? totalPutOI / totalCallOI : 0;
   }, [chain]);
 
-  const optionsContextData = useMemo(
-    () => ({
+  const optionsContextData = useMemo(() => {
+    // Send strikes centered on ATM (±15) so the analysis sees the body of
+    // the chain, not the deep-ITM/OTM tail. For a 122-strike NIFTY chain,
+    // chain.slice(0, 30) would cover only strikes ~4000 points below spot.
+    const atmIdx = atmStrike > 0 ? chain.findIndex((e) => e.strikePrice === atmStrike) : -1;
+    const start = atmIdx >= 0 ? Math.max(0, atmIdx - 15) : 0;
+    const end = atmIdx >= 0 ? Math.min(chain.length, atmIdx + 16) : Math.min(30, chain.length);
+    return {
       underlying,
       expiry,
       spotPrice,
       atmStrike,
       pcr,
-      chain: chain.slice(0, 30), // cap to avoid huge payloads
+      chain: chain.slice(start, end),
       capturedAt: new Date().toISOString(),
-    }),
-    [underlying, expiry, spotPrice, atmStrike, pcr, chain],
-  );
+    };
+  }, [underlying, expiry, spotPrice, atmStrike, pcr, chain]);
 
   // Filter chain by strike range
   const filteredChain = useMemo(() => {
@@ -164,40 +170,46 @@ export default function OptionsPage() {
         )}
       </div>
 
-      {/* Expiry tabs */}
-      <ExpirySelector
-        expiries={expiries}
-        selected={expiry}
-        onChange={setExpiry}
-      />
+      <PageLoadingOverlay isLoading={isLoading && chain.length === 0} message="Loading options chain..." />
 
-      {/* Strike range selector */}
-      <StrikeSelector
-        range={strikeRange}
-        onChange={setStrikeRange}
-        atmStrike={atmStrike}
-      />
+      {!(isLoading && chain.length === 0) && (
+        <>
+          {/* Expiry tabs */}
+          <ExpirySelector
+            expiries={expiries}
+            selected={expiry}
+            onChange={setExpiry}
+          />
 
-      {/* Options Chain Table */}
-      <OptionsChainTable
-        chain={filteredChain}
-        spotPrice={spotPrice}
-        onTradeClick={handleTradeClick}
-      />
+          {/* Strike range selector */}
+          <StrikeSelector
+            range={strikeRange}
+            onChange={setStrikeRange}
+            atmStrike={atmStrike}
+          />
 
-      {/* Bottom panels: OI Analysis + Payoff Chart */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <OIAnalysis chain={chain} spotPrice={spotPrice} />
-        <OptionPayoffChart positions={payoffPositions} spotPrice={spotPrice} />
-      </div>
+          {/* Options Chain Table */}
+          <OptionsChainTable
+            chain={filteredChain}
+            spotPrice={spotPrice}
+            onTradeClick={handleTradeClick}
+          />
 
-      {expiry && chain.length > 0 && (
-        <AIInsightCard
-          sectionKey="options-chain"
-          contextKey={`${underlying}:${expiry}`}
-          contextData={optionsContextData}
-          title="AI Strike Recommendation"
-        />
+          {/* Bottom panels: OI Analysis + Payoff Chart */}
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <OIAnalysis chain={chain} spotPrice={spotPrice} />
+            <OptionPayoffChart positions={payoffPositions} spotPrice={spotPrice} />
+          </div>
+
+          {expiry && chain.length > 0 && (
+            <AIInsightCard
+              sectionKey="options-chain"
+              contextKey={`${underlying}:${expiry}`}
+              contextData={optionsContextData}
+              title="AI Strike Recommendation"
+            />
+          )}
+        </>
       )}
     </div>
   );

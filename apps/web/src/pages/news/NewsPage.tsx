@@ -1,6 +1,8 @@
+import { useMemo } from 'react';
 import { Newspaper, RefreshCw, TrendingUp, TrendingDown, Minus } from 'lucide-react';
 import { useNews } from '@/hooks/useNews';
 import { NewsFeed, NewsFilters } from '@/components/news';
+import AIInsightCard from '@/components/ai/AIInsightCard';
 import { cn } from '@/utils/cn';
 
 function formatTime(date: Date | null): string {
@@ -29,6 +31,36 @@ export default function NewsPage() {
   } = useNews();
 
   const totalSentiment = sentimentCounts.bullish + sentimentCounts.bearish + sentimentCounts.neutral;
+
+  // Batch-analysis context for the feed: send the top 20 filtered articles
+  // to Claude (via MCP /insights pipeline) so the analysis sees a full
+  // cross-section of today's headlines rather than one article at a time.
+  // contextKey hashes the article IDs so re-renders with the same feed share
+  // a completed insight (idempotent on the backend); a feed refresh that
+  // brings in new top articles produces a new key → fresh analysis.
+  const newsInsight = useMemo(() => {
+    const top = articles.slice(0, 20);
+    const contextKey = top.length > 0
+      ? top.map((a) => a.id).join(',').slice(0, 200)
+      : 'empty';
+    const contextData = {
+      filter: filters.source ?? 'all',
+      articleCount: top.length,
+      capturedAt: new Date().toISOString(),
+      sentimentCounts,
+      articles: top.map((a) => ({
+        title: a.title,
+        summary: (a.summary ?? '').slice(0, 400),
+        source: a.source,
+        category: a.category,
+        relatedSymbols: a.relatedSymbols,
+        publishedAt: a.publishedAt,
+        // The current keyword-based label — Claude can override or agree.
+        keywordSentiment: a.sentiment,
+      })),
+    };
+    return { contextKey, contextData, hasArticles: top.length > 0 };
+  }, [articles, filters.source, sentimentCounts]);
 
   return (
     <div className="space-y-4">
@@ -74,6 +106,16 @@ export default function NewsPage() {
         sources={sources}
         onUpdate={updateFilters}
       />
+
+      {/* AI batch analysis of the visible feed */}
+      {newsInsight.hasArticles && (
+        <AIInsightCard
+          sectionKey="news-feed"
+          contextKey={newsInsight.contextKey}
+          contextData={newsInsight.contextData}
+          title="AI Feed Analysis"
+        />
+      )}
 
       {/* Two column layout */}
       <div className="flex gap-4">
