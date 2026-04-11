@@ -1,4 +1,6 @@
 import { Injectable, Logger, Inject, Optional } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
   BrokerAdapter,
@@ -7,6 +9,7 @@ import {
 import { BROKER_ADAPTER_TOKEN } from '../../market-data/services/market-feed.service';
 import { AngelOneAuthService } from '../../market-data/services/angel-one-auth.service';
 import { GreeksCalculatorService } from './greeks-calculator.service';
+import { NseOptionsChainService } from './nse-options-chain.service';
 import { OptionsChainEntry, OptionData, OptionType } from '@td/shared/types';
 
 const DEFAULT_RISK_FREE_RATE = 0.065;
@@ -54,6 +57,7 @@ export class OptionsChainService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly greeksCalculator: GreeksCalculatorService,
+    private readonly nseChain: NseOptionsChainService,
     @Optional()
     @Inject(BROKER_ADAPTER_TOKEN)
     private readonly brokerAdapter: BrokerAdapter | null,
@@ -65,7 +69,17 @@ export class OptionsChainService {
    * Tries DB first, falls back to fetching from Angel One instrument master.
    */
   async getExpiries(underlying: string): Promise<string[]> {
-    // 1. Try database first
+    // 1. Snapshots are the ground truth — they only exist for expiries we
+    // actually have data for, so the expiry list matches what the chain
+    // fetch can serve. This also dodges the local-time→UTC off-by-one in
+    // the instrument-master path (where a Monday expiry stored in local
+    // midnight becomes the prior Sunday after `.toISOString()`).
+    const snapshotExpiries = await this.getExpiriesFromSnapshots(underlying);
+    if (snapshotExpiries.length > 0) {
+      return snapshotExpiries;
+    }
+
+    // 2. Try the instrument DB
     const dbExpiries = await this.getExpiriesFromDB(underlying);
     if (dbExpiries.length > 0) {
       return dbExpiries;
@@ -104,14 +118,251 @@ export class OptionsChainService {
     underlying: string,
     expiry: string,
   ): Promise<OptionsChainEntry[]> {
-    // 1. Try database instruments first
-    const dbChain = await this.getChainFromDB(underlying, expiry);
-    if (dbChain.length > 0) {
-      return dbChain;
+    const { chain } = await this.getOptionsChainWithSpot(underlying, expiry);
+    return chain;
+  }
+
+  async getOptionsChainWithSpot(
+    underlying: string,
+    expiry: string,
+  ): Promise<{ chain: OptionsChainEntry[]; spotPrice: number }> {
+    // 1. Fresh snapshot captured today → serve instantly. During market hours
+    // a background refresh worker overwrites these; on weekends the bootstrap
+    // script holds Friday-close data. Either way, the DB is the fast path.
+    const todaysSnapshot = await this.loadTodaysSnapshot(underlying, expiry);
+    if (todaysSnapshot) {
+      this.logger.log(
+        `Serving today's snapshot for ${underlying} ${expiry} (source=${todaysSnapshot.source})`,
+      );
+      return {
+        chain: this.enrichGreeks(todaysSnapshot.chain, todaysSnapshot.spotPrice, expiry),
+        spotPrice: todaysSnapshot.spotPrice,
+      };
     }
 
-    // 2. Fall back to Angel One instrument master
-    return this.getChainFromMaster(underlying, expiry);
+    // 2. NSE public chain API — authoritative OI/volume/IV in one call.
+    // Guarded by a short timeout so a slow/blocked NSE response doesn't
+    // stall the request path for ~70 s (Akamai TLS-fingerprint block).
+    const nseResult = await this.withTimeout(
+      this.nseChain.getChain(underlying, expiry),
+      3000,
+      'NSE direct fetch',
+    );
+    if (nseResult && nseResult.chain.length > 0) {
+      const enriched = this.enrichGreeks(nseResult.chain, nseResult.spotPrice, expiry);
+      void this.persistSnapshot(underlying, expiry, enriched, nseResult.spotPrice, 'NSE');
+      return { chain: enriched, spotPrice: nseResult.spotPrice };
+    }
+
+    // 3. Angel One live via broker adapter (market-hours path).
+    const dbChain = await this.getChainFromDB(underlying, expiry);
+    if (dbChain.length > 0 && this.chainHasRealData(dbChain)) {
+      const dbSpot = this.spotFromChain(dbChain);
+      void this.persistSnapshot(underlying, expiry, dbChain, dbSpot, 'ANGEL_ONE');
+      return { chain: dbChain, spotPrice: dbSpot };
+    }
+
+    // 4. Read-fallback: any snapshot within 7 days. Covers the case where
+    // no fresh snapshot exists for today but last week's is still relevant.
+    const snapshot = await this.loadLatestSnapshot(underlying, expiry);
+    if (snapshot) {
+      this.logger.log(
+        `Serving persisted snapshot for ${underlying} ${expiry} from ${snapshot.capturedAt.toISOString()} (source=${snapshot.source})`,
+      );
+      return {
+        chain: this.enrichGreeks(snapshot.chain, snapshot.spotPrice, expiry),
+        spotPrice: snapshot.spotPrice,
+      };
+    }
+
+    // 5. Last resort: synthetic chain from instrument master.
+    const fallbackChain = dbChain.length > 0 ? dbChain : await this.getChainFromMaster(underlying, expiry);
+    return { chain: fallbackChain, spotPrice: 0 };
+  }
+
+  private async withTimeout<T>(
+    promise: Promise<T>,
+    ms: number,
+    label: string,
+  ): Promise<T | null> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => {
+        this.logger.warn(`${label} timed out after ${ms}ms`);
+        resolve(null);
+      }, ms);
+    });
+    try {
+      return await Promise.race([promise, timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async loadTodaysSnapshot(
+    underlying: string,
+    expiry: string,
+  ): Promise<{ chain: OptionsChainEntry[]; spotPrice: number; source: string } | null> {
+    const dayStart = new Date();
+    dayStart.setHours(0, 0, 0, 0);
+    const row = await this.prisma.optionChainSnapshot.findFirst({
+      where: {
+        underlying: underlying.toUpperCase(),
+        expiryDate: new Date(expiry),
+        capturedAt: { gte: dayStart },
+      },
+      orderBy: { capturedAt: 'desc' },
+    });
+    if (!row) return null;
+    return {
+      chain: row.chainJson as unknown as OptionsChainEntry[],
+      spotPrice: Number(row.spotPrice),
+      source: row.source,
+    };
+  }
+
+  /**
+   * A chain has "real" data when at least one leg carries non-zero OI or LTP.
+   * On weekends / pre-market, the Angel One adapter returns all-zero rows;
+   * those are worth showing as a scaffold but not worth persisting.
+   */
+  private chainHasRealData(chain: OptionsChainEntry[]): boolean {
+    for (const entry of chain) {
+      if ((entry.ceData?.oi ?? 0) > 0 || (entry.peData?.oi ?? 0) > 0) return true;
+      if ((entry.ceData?.ltp ?? 0) > 0 || (entry.peData?.ltp ?? 0) > 0) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Estimate spot from a chain: strike whose combined CE+PE LTP is closest to
+   * the classical intrinsic-value minimum (put-call parity heuristic). Good
+   * enough for persistence metadata; exact value isn't load-bearing.
+   */
+  private spotFromChain(chain: OptionsChainEntry[]): number {
+    if (chain.length === 0) return 0;
+    let best = chain[0];
+    let bestGap = Infinity;
+    for (const entry of chain) {
+      const ce = entry.ceData?.ltp ?? 0;
+      const pe = entry.peData?.ltp ?? 0;
+      const gap = Math.abs(ce - pe);
+      if (gap < bestGap && (ce > 0 || pe > 0)) {
+        bestGap = gap;
+        best = entry;
+      }
+    }
+    return best.strikePrice;
+  }
+
+  private async persistSnapshot(
+    underlying: string,
+    expiry: string,
+    chain: OptionsChainEntry[],
+    spotPrice: number,
+    source: 'NSE' | 'ANGEL_ONE' | 'ANGEL_ONE_WS',
+  ): Promise<void> {
+    try {
+      await this.prisma.optionChainSnapshot.create({
+        data: {
+          underlying: underlying.toUpperCase(),
+          expiryDate: new Date(expiry),
+          spotPrice,
+          source,
+          strikeCount: chain.length,
+          chainJson: chain as unknown as Prisma.InputJsonValue,
+        },
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Failed to persist chain snapshot for ${underlying} ${expiry}: ${
+          error instanceof Error ? error.message : error
+        }`,
+      );
+    }
+  }
+
+  private async loadLatestSnapshot(
+    underlying: string,
+    expiry: string,
+  ): Promise<{ chain: OptionsChainEntry[]; capturedAt: Date; source: string; spotPrice: number } | null> {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const row = await this.prisma.optionChainSnapshot.findFirst({
+      where: {
+        underlying: underlying.toUpperCase(),
+        expiryDate: new Date(expiry),
+        capturedAt: { gte: sevenDaysAgo },
+      },
+      orderBy: { capturedAt: 'desc' },
+    });
+    if (!row) return null;
+    return {
+      chain: row.chainJson as unknown as OptionsChainEntry[],
+      capturedAt: row.capturedAt,
+      source: row.source,
+      spotPrice: Number(row.spotPrice),
+    };
+  }
+
+  /**
+   * Daily at 02:00 IST: prune snapshots older than 30 days. The 7-day read-
+   * fallback window means anything older than a week is never read; we keep
+   * an extra 23 days as a buffer for historical review / debugging.
+   */
+  @Cron('0 2 * * *', { timeZone: 'Asia/Kolkata' })
+  async cleanupOldSnapshots(): Promise<void> {
+    const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    try {
+      const { count } = await this.prisma.optionChainSnapshot.deleteMany({
+        where: { capturedAt: { lt: cutoff } },
+      });
+      if (count > 0) {
+        this.logger.log(`Pruned ${count} option-chain snapshots older than 30 days`);
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Snapshot cleanup failed: ${error instanceof Error ? error.message : error}`,
+      );
+    }
+  }
+
+  /**
+   * NSE gives us real OI/volume/IV/LTP but no Greeks. Compute delta/gamma/
+   * theta/vega from Black-Scholes using the NSE-provided IV so the frontend
+   * keeps rendering a full chain without a second data source.
+   */
+  private enrichGreeks(
+    chain: OptionsChainEntry[],
+    spotPrice: number,
+    expiry: string,
+  ): OptionsChainEntry[] {
+    const expiryEnd = new Date(expiry);
+    expiryEnd.setHours(15, 30, 0, 0);
+    const timeToExpiry = this.greeksCalculator.getTimeToExpiry(expiryEnd);
+
+    for (const entry of chain) {
+      if (entry.ceData) {
+        const iv = (entry.ceData.iv || 15) / 100;
+        const greeks = this.greeksCalculator.calculateGreeks(
+          spotPrice, entry.strikePrice, timeToExpiry, DEFAULT_RISK_FREE_RATE, iv, 'CE',
+        );
+        entry.ceData.delta = greeks.delta;
+        entry.ceData.gamma = greeks.gamma;
+        entry.ceData.theta = greeks.theta;
+        entry.ceData.vega = greeks.vega;
+      }
+      if (entry.peData) {
+        const iv = (entry.peData.iv || 15) / 100;
+        const greeks = this.greeksCalculator.calculateGreeks(
+          spotPrice, entry.strikePrice, timeToExpiry, DEFAULT_RISK_FREE_RATE, iv, 'PE',
+        );
+        entry.peData.delta = greeks.delta;
+        entry.peData.gamma = greeks.gamma;
+        entry.peData.theta = greeks.theta;
+        entry.peData.vega = greeks.vega;
+      }
+    }
+    return chain;
   }
 
   /**
@@ -212,6 +463,27 @@ export class OptionsChainService {
   // ─────────────────────────────────────────────────────
   // Private: DB-backed methods (original approach)
   // ─────────────────────────────────────────────────────
+
+  private async getExpiriesFromSnapshots(underlying: string): Promise<string[]> {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const todayUtcMidnight = new Date();
+    todayUtcMidnight.setUTCHours(0, 0, 0, 0);
+
+    const rows = await this.prisma.optionChainSnapshot.findMany({
+      where: {
+        underlying: underlying.toUpperCase(),
+        capturedAt: { gte: sevenDaysAgo },
+        expiryDate: { gte: todayUtcMidnight },
+      },
+      select: { expiryDate: true },
+      distinct: ['expiryDate'],
+      orderBy: { expiryDate: 'asc' },
+    });
+
+    // expiryDate is @db.Date (no TZ), so its UTC midnight maps 1:1 to the
+    // ISO "YYYY-MM-DD" we stored it with — no locale math needed.
+    return rows.map((r) => r.expiryDate.toISOString().split('T')[0]);
+  }
 
   private async getExpiriesFromDB(underlying: string): Promise<string[]> {
     try {

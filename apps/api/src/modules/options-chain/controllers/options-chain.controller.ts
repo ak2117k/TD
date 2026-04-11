@@ -43,23 +43,27 @@ export class OptionsChainController {
       expiry = expiries[0];
     }
 
-    const chain = await this.optionsChainService.getOptionsChain(
-      underlying,
-      expiry,
-    );
+    const { chain, spotPrice: snapshotSpot } =
+      await this.optionsChainService.getOptionsChainWithSpot(underlying, expiry);
 
-    // Fetch spot price for the underlying
-    let spotPrice = 0;
-    const indexInfo = INDEX_TOKENS[underlying.toUpperCase()];
-    if (indexInfo && this.brokerAdapter) {
-      try {
-        const quote = await this.brokerAdapter.getLiveQuote(
-          indexInfo.token,
-          indexInfo.exchange,
-        );
-        spotPrice = quote.ltp;
-      } catch {
-        // Estimate from chain if live quote fails
+    // Prefer the spot embedded in the snapshot/source; only hit the broker
+    // when we have no spot at all (rare — would mean estimate-from-chain was
+    // also unable to derive one).
+    let spotPrice = snapshotSpot;
+    if (spotPrice === 0) {
+      const indexInfo = INDEX_TOKENS[underlying.toUpperCase()];
+      if (indexInfo && this.brokerAdapter) {
+        try {
+          const quote = await Promise.race([
+            this.brokerAdapter.getLiveQuote(indexInfo.token, indexInfo.exchange),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('broker quote timeout')), 1500),
+            ),
+          ]);
+          spotPrice = quote.ltp;
+        } catch {
+          // fall through to chain-based estimate
+        }
       }
     }
 

@@ -69,6 +69,20 @@ model OISnapshot {
   @@map("oi_snapshots")
 }
 
+model OptionChainSnapshot {
+  id          String   @id @default(cuid())
+  underlying  String   // NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY
+  expiryDate  DateTime @db.Date
+  spotPrice   Decimal  @db.Decimal(12, 2)
+  source      String   // ANGEL_ONE | NSE | ANGEL_ONE_WS | DB_INSTRUMENTS
+  strikeCount Int
+  chainJson   Json     // full OptionsChainEntry[] serialized
+  capturedAt  DateTime @default(now())
+
+  @@index([underlying, expiryDate, capturedAt(sort: Desc)])
+  @@map("option_chain_snapshots")
+}
+
 // ============================================
 // Signals & Trades
 // ============================================
@@ -89,6 +103,7 @@ model Signal {
   strategy        String
   timeframe       String
   reason          String
+  marketStatus    String   @default("LIVE")
   isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())
   expiresAt       DateTime?
@@ -225,6 +240,7 @@ model UserSettings {
   preferredSegments      String[] @default(["OPTIONS", "EQUITY"])
   tradingHoursOnly       Boolean  @default(true)
   notificationsEnabled   Boolean  @default(true)
+  mlConfig               Json?
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 
@@ -293,4 +309,23 @@ model AIInsight {
   @@index([sectionKey, contextKey, status])
   @@index([status, requestedAt])
   @@map("ai_insights")
+}
+
+// ============================================
+// Broker credentials (existed pre-Prisma)
+// ============================================
+
+model BrokerCredential {
+  id            String    @id @default(cuid())
+  broker        String    @unique @default("angel_one")
+  apiKey        String
+  clientId      String
+  password      String
+  totpSecret    String
+  isActive      Boolean   @default(true)
+  lastConnected DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@map("broker_credentials")
 }
