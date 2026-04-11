@@ -67,3 +67,11 @@ prisma/*.db
 *.key
 credentials.json
 secrets.json
+
+# Claude Code / MCP session state
+.claude/
+.playwright-mcp/
+
+# Local data dumps (runtime artifacts, not source)
+ai-engine/data/
+apps/api/data/
