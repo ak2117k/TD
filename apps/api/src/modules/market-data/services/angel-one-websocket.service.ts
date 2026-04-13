@@ -328,11 +328,11 @@ export class AngelOneWebSocketService extends EventEmitter implements OnModuleDe
       token,
       symbol: String(tick.symbol ?? tick.tradingSymbol ?? tick.name ?? ''),
       ltp: this.toNumber(tick.last_traded_price ?? tick.ltp ?? tick.lp ?? 0) / divisor,
-      open: this.toNumber(tick.open_price_of_the_day ?? tick.open ?? tick.op ?? 0) / divisor,
-      high: this.toNumber(tick.high_price_of_the_day ?? tick.high ?? tick.hp ?? 0) / divisor,
-      low: this.toNumber(tick.low_price_of_the_day ?? tick.low ?? tick.lop ?? 0) / divisor,
-      close: this.toNumber(tick.closed_price ?? tick.close ?? tick.cp ?? 0) / divisor,
-      volume: this.toNumber(tick.volume_trade_for_the_day ?? tick.volume ?? tick.v ?? 0),
+      open: this.toNumber(tick.open_price_day ?? tick.open_price_of_the_day ?? tick.open ?? tick.op ?? 0) / divisor,
+      high: this.toNumber(tick.high_price_day ?? tick.high_price_of_the_day ?? tick.high ?? tick.hp ?? 0) / divisor,
+      low: this.toNumber(tick.low_price_day ?? tick.low_price_of_the_day ?? tick.low ?? tick.lop ?? 0) / divisor,
+      close: this.toNumber(tick.close_price ?? tick.closed_price ?? tick.close ?? tick.cp ?? 0) / divisor,
+      volume: this.toNumber(tick.vol_traded ?? tick.volume_trade_for_the_day ?? tick.volume ?? tick.v ?? 0),
       oi: tick.open_interest ? this.toNumber(tick.open_interest) : undefined,
       timestamp: tick.exchange_timestamp
         ? new Date(Number(tick.exchange_timestamp))

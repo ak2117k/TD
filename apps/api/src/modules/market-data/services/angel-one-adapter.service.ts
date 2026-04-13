@@ -9,7 +9,18 @@ import {
 } from '../../../common/interfaces/broker-adapter.interface';
 import { AngelOneAuthService } from './angel-one-auth.service';
 import { AngelOneWebSocketService, WsFeedMode, ExchangeType } from './angel-one-websocket.service';
-import { COMMODITIES } from '@td/shared/constants';
+import { COMMODITIES, INDICES } from '@td/shared/constants';
+
+/**
+ * Tokens that live on BSE (not NSE). SENSEX and other BSE-listed indices
+ * must be subscribed with ExchangeType.BSE_CM or Angel One drops them silently.
+ * Built once from the INDICES constant.
+ */
+const BSE_TOKENS: ReadonlySet<string> = new Set(
+  (Object.values(INDICES) as Array<{ token: string; exchange: string }>)
+    .filter((idx) => idx.exchange === 'BSE')
+    .map((idx) => idx.token),
+);
 
 /**
  * Map our generic order types to Angel One SmartAPI order type strings.
@@ -382,14 +393,21 @@ export class AngelOneAdapterService implements BrokerAdapter {
     // Register the callback for tick events
     this.wsService.on('tick', callback);
 
-    // Separate tokens by exchange — MCX tokens need MCX_FO exchange type
+    // Separate tokens by exchange — each exchange needs its own exchangeType
+    // on the Angel One WebSocket or subscriptions are silently dropped.
     const mcxTokens = new Set<string>();
     for (const c of Object.values(COMMODITIES)) {
       if (c.token && c.token !== '0') mcxTokens.add(c.token);
     }
 
-    const nseTokenList = tokens.filter((t) => !mcxTokens.has(t));
-    const mcxTokenList = tokens.filter((t) => mcxTokens.has(t));
+    const nseTokenList: string[] = [];
+    const bseTokenList: string[] = [];
+    const mcxTokenList: string[] = [];
+    for (const t of tokens) {
+      if (mcxTokens.has(t)) mcxTokenList.push(t);
+      else if (BSE_TOKENS.has(t)) bseTokenList.push(t);
+      else nseTokenList.push(t);
+    }
 
     // Subscribe NSE tokens
     if (nseTokenList.length > 0) {
@@ -398,6 +416,17 @@ export class AngelOneAdapterService implements BrokerAdapter {
         .catch((error) => {
           this.logger.error(
             `NSE feed subscription failed: ${error instanceof Error ? error.message : error}`,
+          );
+        });
+    }
+
+    // Subscribe BSE tokens (SENSEX etc.)
+    if (bseTokenList.length > 0) {
+      this.wsService
+        .subscribe(bseTokenList, WsFeedMode.SNAP_QUOTE, ExchangeType.BSE_CM)
+        .catch((error) => {
+          this.logger.error(
+            `BSE feed subscription failed: ${error instanceof Error ? error.message : error}`,
           );
         });
     }

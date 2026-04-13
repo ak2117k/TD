@@ -8,7 +8,7 @@ import {
   MessageBody,
   ConnectedSocket,
 } from '@nestjs/websockets';
-import { Logger } from '@nestjs/common';
+import { Logger, OnModuleDestroy } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { WS_NAMESPACE } from '@td/shared/constants';
 import { Quote, OIData } from '@td/shared/types';
@@ -30,6 +30,13 @@ export interface ConnectionStatusPayload {
   timestamp: Date;
 }
 
+/**
+ * Max flush rate for coalesced tick broadcasts. Angel One can emit hundreds
+ * of ticks per second; the UI only needs a few updates per second per symbol.
+ * 100ms → max 10 updates/sec per token regardless of upstream tick rate.
+ */
+const TICK_FLUSH_INTERVAL_MS = 100;
+
 @WebSocketGateway({
   namespace: WS_NAMESPACE,
   cors: {
@@ -39,7 +46,7 @@ export interface ConnectionStatusPayload {
   transports: ['polling', 'websocket'],
 })
 export class MarketDataGateway
-  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
 {
   private readonly logger = new Logger(MarketDataGateway.name);
 
@@ -49,8 +56,27 @@ export class MarketDataGateway
   /** Track which tokens each client is interested in. */
   private readonly clientSubscriptions = new Map<string, Set<string>>();
 
+  /**
+   * Latest pending quote per token, awaiting the next flush tick.
+   * Writes overwrite — stale prices are discarded in favor of the newest.
+   */
+  private readonly pendingTicks = new Map<string, Quote>();
+  private flushInterval: NodeJS.Timeout | null = null;
+
   afterInit(): void {
     this.logger.log('Market Data WebSocket Gateway initialized');
+    this.flushInterval = setInterval(
+      () => this.flushPendingTicks(),
+      TICK_FLUSH_INTERVAL_MS,
+    );
+  }
+
+  onModuleDestroy(): void {
+    if (this.flushInterval) {
+      clearInterval(this.flushInterval);
+      this.flushInterval = null;
+    }
+    this.flushPendingTicks();
   }
 
   handleConnection(client: Socket): void {
@@ -121,20 +147,20 @@ export class MarketDataGateway
   // ------------------------------------------------------------------
 
   /**
-   * Emit a tick (live price update) to all connected clients.
-   *
-   * We broadcast to all clients because the frontend subscribes to
-   * multiple instruments (watchlist, dashboard, charts) and filters
-   * by token on the client side. Using room-based targeting would
-   * require the frontend to explicitly join/leave rooms on every
-   * symbol change, which adds complexity. The tick payload is small
-   * and the client-side token filter is reliable.
-   *
-   * The token field on the quote is the authoritative identifier;
-   * symbol names are normalized server-side before reaching here.
+   * Queue a tick for the next flush. Per-token coalescing: if multiple ticks
+   * for the same token arrive within the flush window, only the latest is
+   * broadcast. Clients still filter by token — broadcast target is unchanged.
    */
   emitTick(quote: Quote): void {
-    this.server.emit('tick', quote);
+    this.pendingTicks.set(quote.token, quote);
+  }
+
+  private flushPendingTicks(): void {
+    if (this.pendingTicks.size === 0) return;
+    for (const quote of this.pendingTicks.values()) {
+      this.server.emit('tick', quote);
+    }
+    this.pendingTicks.clear();
   }
 
   /**
