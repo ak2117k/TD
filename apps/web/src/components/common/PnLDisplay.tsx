@@ -2,8 +2,10 @@ import { TrendingUp, TrendingDown, Minus } from 'lucide-react';
 import { cn } from '../../utils/cn';
 
 interface PnLDisplayProps {
-  value: number;
-  percent?: number;
+  // Accept null/undefined for open trades whose realized P&L isn't known
+  // until close — render a dash in those cases instead of a misleading ₹0.00.
+  value: number | null | undefined;
+  percent?: number | null;
   size?: 'sm' | 'md' | 'lg';
   showSign?: boolean;
   className?: string;
@@ -24,6 +26,20 @@ export function PnLDisplay({
   showSign = true,
   className,
 }: PnLDisplayProps) {
+  if (value === null || value === undefined) {
+    return (
+      <span
+        className={cn(
+          'inline-flex items-center gap-1 text-gray-500',
+          sizeStyles[size],
+          className,
+        )}
+      >
+        --
+      </span>
+    );
+  }
+
   const isPositive = value > 0;
   const isNegative = value < 0;
   const colorClass = isPositive
@@ -48,7 +64,7 @@ export function PnLDisplay({
     >
       <Icon size={iconSizes[size]} />
       <span>{formatted}</span>
-      {percent !== undefined && (
+      {percent !== undefined && percent !== null && (
         <span className="opacity-75">
           ({sign}{percent.toFixed(2)}%)
         </span>

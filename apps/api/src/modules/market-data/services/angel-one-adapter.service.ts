@@ -579,9 +579,16 @@ export class AngelOneAdapterService implements BrokerAdapter {
           lotSize: parseInt(String(i.lotsize ?? '1')) || 1,
         };
       })
-      .filter(
-        (o: { expiry: Date }) => !isNaN(o.expiry.getTime()) && o.expiry >= new Date(),
-      );
+      .filter((o: { expiry: Date }) => {
+        if (isNaN(o.expiry.getTime())) return false;
+        // Keep contracts whose expiry day is today or later. Comparing to
+        // `new Date()` (now) drops same-day expiries after midnight, hiding
+        // 0-DTE options from consumers — which breaks live-quote lookups for
+        // any trade placed on its expiry day.
+        const startOfToday = new Date();
+        startOfToday.setHours(0, 0, 0, 0);
+        return o.expiry >= startOfToday;
+      });
 
     this.logger.log(
       `Found ${options.length} active option contracts for ${underlying}`,

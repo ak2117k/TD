@@ -4,6 +4,7 @@ import { PrismaModule } from '../../common/prisma/prisma.module';
 import { MarketDataModule } from '../market-data/market-data.module';
 import { SettingsModule } from '../settings/settings.module';
 import { InsightsModule } from '../insights/insights.module';
+import { OptionsChainModule } from '../options-chain/options-chain.module';
 
 // Controller
 import { TradeEngineController } from './controllers/trade-engine.controller';
@@ -15,8 +16,9 @@ import { PaperTradeService } from './services/paper-trade.service';
 import { RiskManagerService } from './services/risk-manager.service';
 import { OrderTrackerService } from './services/order-tracker.service';
 
-// Worker
+// Workers
 import { SignalReviewWorker } from './workers/signal-review.worker';
+import { OpenPaperTradeRefresherWorker } from './workers/open-paper-trade-refresher.worker';
 
 // Repository
 import { TradeRepository } from './repositories/trade.repository';
@@ -34,6 +36,7 @@ import { BROKER_ADAPTER_TOKEN } from '../market-data/services/market-feed.servic
     MarketDataModule,
     SettingsModule,
     InsightsModule,
+    OptionsChainModule,
     BullModule.registerQueue({ name: 'signal-review' }),
   ],
   controllers: [TradeEngineController],
@@ -50,6 +53,7 @@ import { BROKER_ADAPTER_TOKEN } from '../market-data/services/market-feed.servic
 
     // Workers
     SignalReviewWorker,
+    OpenPaperTradeRefresherWorker,
 
     // WebSocket gateway
     TradeGateway,

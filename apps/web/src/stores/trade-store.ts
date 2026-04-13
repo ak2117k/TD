@@ -47,8 +47,18 @@ export const useTradeStore = create<TradeState>((set) => ({
 
   fetchOpenTrades: async () => {
     try {
-      const { data } = await api.get<Trade[]>('/trades/open');
-      set({ openTrades: data });
+      const { data } = await api.get<any[]>('/trades/open');
+      // Normalize backend's isPaperTrade → frontend's isPaper field name,
+      // and lift instrument.symbol/exchange to the top level (the JournalPage
+      // and TradeCard read t.symbol / t.exchange directly).
+      set({
+        openTrades: (data ?? []).map((t) => ({
+          ...t,
+          isPaper: t.isPaper ?? t.isPaperTrade ?? false,
+          symbol: t.symbol ?? t.instrument?.symbol ?? '',
+          exchange: t.exchange ?? t.instrument?.exchange ?? '',
+        })) as Trade[],
+      });
     } catch {
       console.warn('Failed to fetch open trades');
     }

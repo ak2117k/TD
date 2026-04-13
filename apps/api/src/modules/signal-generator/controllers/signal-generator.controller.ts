@@ -42,6 +42,25 @@ export class SignalGeneratorController {
   }
 
   /**
+   * POST /api/signals/reset-transition — clear the combined strategy's
+   * transition memory so it can re-fire even if the conditions are still
+   * aligned. Use this to unstick the strategy after a downstream failure
+   * left it thinking a trade was already placed when it wasn't.
+   */
+  @Post('reset-transition')
+  @HttpCode(HttpStatus.OK)
+  async resetTransition() {
+    const strat = this.strategyRegistry.getStrategy('anand-sniper-v25-combined') as
+      | { resetTransition?: () => void }
+      | undefined;
+    if (strat && typeof strat.resetTransition === 'function') {
+      strat.resetTransition();
+      return { ok: true, reset: 'anand-sniper-v25-combined' };
+    }
+    return { ok: false, reason: 'strategy not found or does not support reset' };
+  }
+
+  /**
    * GET /api/signals — list signals with filters and pagination.
    */
   @Get()

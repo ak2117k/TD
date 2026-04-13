@@ -84,6 +84,174 @@ export class AnandSniperV25CombinedStrategy implements TradingStrategy {
   };
 
   /**
+   * Mark a (symbol, exchange) as having had a confirmed trade in `direction`.
+   * Called by the universe scanner after the trade lands successfully —
+   * blocks re-firing the same setup on subsequent ticks until the rule
+   * disengages and re-aligns.
+   */
+  commitTransition(symbol: string, exchange: string, direction: 'BUY' | 'SELL'): void {
+    this.lastDirection.set(`${symbol}:${exchange}`, direction);
+  }
+
+  /**
+   * Clear the transition memory for a single symbol or all symbols.
+   * Useful to manually un-stick the strategy after a downstream failure
+   * stranded the state in a "won't fire" position.
+   */
+  resetTransition(symbol?: string, exchange?: string): void {
+    if (symbol && exchange) {
+      this.lastDirection.delete(`${symbol}:${exchange}`);
+    } else {
+      this.lastDirection.clear();
+    }
+  }
+
+  /**
+   * Diagnostic — runs the same evaluation as analyze() but returns the raw
+   * metric breakdown regardless of whether the rule fires. Use this from a
+   * UI or test endpoint to see WHY the rule didn't fire (which threshold
+   * fell short). Does NOT mutate transition state, so it's safe to call
+   * repeatedly without affecting the live signal generator.
+   */
+  evaluateConditions(data: MarketSnapshot): {
+    ok: boolean;
+    reason: string;
+    hubGreen: number;
+    hubRed: number;
+    hubTotal: number;
+    alignmentBullPct: number;
+    alignmentBearPct: number;
+    bullPct: number;
+    bearPct: number;
+    bScore: number;
+    rScore: number;
+    winProb: number;
+    putProb: number;
+    hubBullish: boolean;
+    hubBearish: boolean;
+    sniperBullOk: boolean;
+    sniperBearOk: boolean;
+    winProbBullOk: boolean;
+    winProbBearOk: boolean;
+    direction: Direction;
+    thresholds: { hub: number; sniper: number; winProb: number };
+  } {
+    const { candles, mtfCandles, ltp } = data;
+    const minCandles = 50;
+    const empty = {
+      ok: false,
+      reason: '',
+      hubGreen: 0,
+      hubRed: 0,
+      hubTotal: 0,
+      alignmentBullPct: 0,
+      alignmentBearPct: 0,
+      bullPct: 0,
+      bearPct: 0,
+      bScore: 0,
+      rScore: 0,
+      winProb: 0,
+      putProb: 0,
+      hubBullish: false,
+      hubBearish: false,
+      sniperBullOk: false,
+      sniperBearOk: false,
+      winProbBullOk: false,
+      winProbBearOk: false,
+      direction: null as Direction,
+      thresholds: {
+        hub: this.params.hubAlignmentThreshold,
+        sniper: this.params.sniperPctThreshold,
+        winProb: this.params.winProbThreshold,
+      },
+    };
+    if (!candles || candles.length < minCandles) {
+      return { ...empty, reason: `15m candles ${candles?.length ?? 0} < ${minCandles}` };
+    }
+    if (ltp <= 0) {
+      return { ...empty, reason: 'ltp <= 0' };
+    }
+    if (!mtfCandles || !mtfCandles['1m'] || !mtfCandles['5m'] || !mtfCandles['60m']) {
+      return { ...empty, reason: 'mtfCandles missing 1m/5m/60m' };
+    }
+    const tf15 = mtfCandles['15m'] && mtfCandles['15m'].length >= minCandles ? mtfCandles['15m'] : candles;
+    const tf1 = mtfCandles['1m'];
+    const tf5 = mtfCandles['5m'];
+    const tf60 = mtfCandles['60m'];
+    if (tf1.length < minCandles || tf5.length < minCandles || tf60.length < minCandles) {
+      return {
+        ...empty,
+        reason: `MTF insufficient (1m=${tf1.length}, 5m=${tf5.length}, 60m=${tf60.length})`,
+      };
+    }
+
+    const cells1m = this.computeHubCells(tf1);
+    const cells5m = this.computeHubCells(tf5);
+    const cells15m = this.computeHubCells(tf15);
+    const cells60m = this.computeHubCells(tf60);
+    const allCells = [...cells1m, ...cells5m, ...cells15m, ...cells60m];
+    const hubGreen = allCells.filter((c) => c === 1).length;
+    const hubRed = allCells.length - hubGreen;
+    const alignmentBullPct = hubGreen / allCells.length;
+    const alignmentBearPct = hubRed / allCells.length;
+    const hubBullish = alignmentBullPct >= this.params.hubAlignmentThreshold;
+    const hubBearish = alignmentBearPct >= this.params.hubAlignmentThreshold;
+
+    const { bullPct, bearPct, bScore, rScore } = this.computeSniperBias(tf15, tf5);
+    const sniperBullOk = bullPct >= this.params.sniperPctThreshold;
+    const sniperBearOk = bearPct >= this.params.sniperPctThreshold;
+
+    const winProb = this.computeWinProb(tf1);
+    const putProb = 100 - winProb;
+    const winProbBullOk = winProb >= this.params.winProbThreshold;
+    const winProbBearOk = putProb >= this.params.winProbThreshold;
+
+    let direction: Direction = null;
+    if (hubBullish && sniperBullOk && winProbBullOk) direction = 'BUY';
+    else if (hubBearish && sniperBearOk && winProbBearOk) direction = 'SELL';
+
+    // Build a human-readable shortfall string for the no-fire case.
+    let reason = '';
+    if (direction !== null) {
+      reason = `aligned ${direction}`;
+    } else {
+      const bullParts: string[] = [];
+      const bearParts: string[] = [];
+      if (!hubBullish) bullParts.push(`hub ${(alignmentBullPct * 100).toFixed(0)}%<${this.params.hubAlignmentThreshold * 100}%`);
+      if (!sniperBullOk) bullParts.push(`bullPct ${bullPct.toFixed(0)}<${this.params.sniperPctThreshold}`);
+      if (!winProbBullOk) bullParts.push(`winProb ${winProb.toFixed(0)}<${this.params.winProbThreshold}`);
+      if (!hubBearish) bearParts.push(`hub ${(alignmentBearPct * 100).toFixed(0)}%<${this.params.hubAlignmentThreshold * 100}%`);
+      if (!sniperBearOk) bearParts.push(`bearPct ${bearPct.toFixed(0)}<${this.params.sniperPctThreshold}`);
+      if (!winProbBearOk) bearParts.push(`putProb ${putProb.toFixed(0)}<${this.params.winProbThreshold}`);
+      reason = `BUY short: [${bullParts.join(', ')}] | SELL short: [${bearParts.join(', ')}]`;
+    }
+
+    return {
+      ok: direction !== null,
+      reason,
+      hubGreen,
+      hubRed,
+      hubTotal: allCells.length,
+      alignmentBullPct: Math.round(alignmentBullPct * 10000) / 100,
+      alignmentBearPct: Math.round(alignmentBearPct * 10000) / 100,
+      bullPct: Math.round(bullPct * 100) / 100,
+      bearPct: Math.round(bearPct * 100) / 100,
+      bScore,
+      rScore,
+      winProb: Math.round(winProb * 100) / 100,
+      putProb: Math.round(putProb * 100) / 100,
+      hubBullish,
+      hubBearish,
+      sniperBullOk,
+      sniperBearOk,
+      winProbBullOk,
+      winProbBearOk,
+      direction,
+      thresholds: empty.thresholds,
+    };
+  }
+
+  /**
    * Evaluate the combined rule on a single market snapshot. Expects the
    * primary `candles` array to be the 15m series and `mtfCandles` to contain
    * `1m`, `5m`, `15m` and `60m` series. Returns a signal only on a direction
@@ -186,7 +354,10 @@ export class AnandSniperV25CombinedStrategy implements TradingStrategy {
       return null;
     }
 
-    this.lastDirection.set(key, newDirection);
+    // NOTE: we deliberately do NOT mutate lastDirection here. The caller
+    // must call commitTransition(symbol, exchange, side) only AFTER the
+    // trade is actually confirmed downstream. This prevents a "stuck in
+    // SELL" state if strike selection or trade execution fails post-fire.
 
     const atr = this.calculateATR(tf15, 14);
     if (atr <= 0) {

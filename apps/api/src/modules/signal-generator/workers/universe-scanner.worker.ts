@@ -35,13 +35,17 @@ interface WatchedSymbol {
 }
 
 const WATCHED: WatchedSymbol[] = [
-  { underlying: 'NIFTY', exchange: 'NSE', lotSize: 75 },
+  { underlying: 'NIFTY', exchange: 'NSE', lotSize: 65 },
   { underlying: 'BANKNIFTY', exchange: 'NSE', lotSize: 30 },
 ];
 
 const TIMEFRAMES = ['1m', '5m', '15m', '60m'] as const;
 const MIN_CANDLES_PER_TF = 60;
-const STALENESS_THRESHOLD_MIN = 30; // skip a symbol if its newest 15m bar is older than this
+// Skip a symbol if its newest 15m bar is older than this. Wide enough to
+// absorb a weekend gap (Friday close → Monday open ≈ 65 h) so the smoke
+// test on Monday morning doesn't reject Friday's bars. Tighten to ≤30
+// in production once the live bar feed reliably persists fresh candles.
+const STALENESS_THRESHOLD_MIN = 96 * 60;
 
 @Injectable()
 export class UniverseScannerWorker implements OnModuleInit {
@@ -105,10 +109,23 @@ export class UniverseScannerWorker implements OnModuleInit {
 
   /**
    * Manual trigger — useful for smoke testing without waiting for the cron.
-   * Returns the signal (or null) and the resulting trade outcome (if any).
+   * Returns the signal (or null), the diagnostic breakdown, and the trade
+   * outcome (if any).
    */
-  async runOnce(): Promise<Array<{ symbol: string; signal: SignalOutput | null; tradeId: string | null; reason: string }>> {
-    const out: Array<{ symbol: string; signal: SignalOutput | null; tradeId: string | null; reason: string }> = [];
+  async runOnce(): Promise<Array<{
+    symbol: string;
+    signal: SignalOutput | null;
+    tradeId: string | null;
+    reason: string;
+    diagnostic: Record<string, unknown> | null;
+  }>> {
+    const out: Array<{
+      symbol: string;
+      signal: SignalOutput | null;
+      tradeId: string | null;
+      reason: string;
+      diagnostic: Record<string, unknown> | null;
+    }> = [];
     for (const w of WATCHED) {
       const result = await this.scanSymbol(w);
       out.push({ symbol: w.underlying, ...result });
@@ -118,15 +135,25 @@ export class UniverseScannerWorker implements OnModuleInit {
 
   private async scanSymbol(
     w: WatchedSymbol,
-  ): Promise<{ signal: SignalOutput | null; tradeId: string | null; reason: string }> {
+  ): Promise<{
+    signal: SignalOutput | null;
+    tradeId: string | null;
+    reason: string;
+    diagnostic: Record<string, unknown> | null;
+  }> {
     if (!w.instrumentId) {
-      return { signal: null, tradeId: null, reason: 'instrument not resolved' };
+      return { signal: null, tradeId: null, reason: 'instrument not resolved', diagnostic: null };
     }
 
-    // 1. Fetch MTF candles from local DB. Window: last 24h is enough for
-    //    60m bars to fill 50 candles; smaller timeframes get plenty.
+    // 1. Fetch MTF candles from local DB. Window is intentionally wide
+    //    (90 days) so it absorbs both weekend gaps and any holes in the
+    //    backfill — the strategy only needs the most recent ~50 bars for
+    //    indicator computation, so a non-contiguous 60+ rows is fine.
+    //    Row counts per symbol per timeframe stay under ~10k, no perf
+    //    concern. Tighten in production if the live bar feed reliably
+    //    persists fresh candles.
     const now = new Date();
-    const from24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const from30d = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
     const mtfCandles: Record<string, CandleData[]> = {};
     let staleness = Infinity;
 
@@ -136,7 +163,7 @@ export class UniverseScannerWorker implements OnModuleInit {
       const rows = await this.marketDataRepo.getCandles(
         w.instrumentId,
         tfKey,
-        from24h,
+        from30d,
         now,
       );
       const candles: CandleData[] = rows.map((r) => ({
@@ -155,10 +182,10 @@ export class UniverseScannerWorker implements OnModuleInit {
     }
 
     if ((mtfCandles['15m']?.length ?? 0) < MIN_CANDLES_PER_TF) {
-      return { signal: null, tradeId: null, reason: `insufficient 15m candles (${mtfCandles['15m']?.length ?? 0})` };
+      return { signal: null, tradeId: null, reason: `insufficient 15m candles (${mtfCandles['15m']?.length ?? 0})`, diagnostic: null };
     }
     if (staleness > STALENESS_THRESHOLD_MIN) {
-      return { signal: null, tradeId: null, reason: `data stale by ${staleness.toFixed(0)}min` };
+      return { signal: null, tradeId: null, reason: `data stale by ${staleness.toFixed(0)}min`, diagnostic: null };
     }
 
     const candles15m = mtfCandles['15m'];
@@ -176,9 +203,18 @@ export class UniverseScannerWorker implements OnModuleInit {
       volume,
     };
 
+    // Compute the diagnostic FIRST so we always have visibility into why
+    // the rule fires or doesn't, even on "no fire" outcomes.
+    const diagnostic = this.strategy.evaluateConditions(snapshot) as unknown as Record<string, unknown>;
+
     const signal = this.strategy.analyze(snapshot);
     if (!signal) {
-      return { signal: null, tradeId: null, reason: 'rule did not fire' };
+      return {
+        signal: null,
+        tradeId: null,
+        reason: `rule did not fire — ${diagnostic.reason ?? 'unknown'}`,
+        diagnostic,
+      };
     }
 
     this.logger.log(
@@ -188,7 +224,7 @@ export class UniverseScannerWorker implements OnModuleInit {
     // 3. Pick the best strike. CE for BUY signal, PE for SELL signal.
     const expiries = await this.optionsChainService.getExpiries(w.underlying);
     if (expiries.length === 0) {
-      return { signal, tradeId: null, reason: 'no expiries available for underlying' };
+      return { signal, tradeId: null, reason: 'no expiries available for underlying', diagnostic };
     }
     const expiry = expiries[0]; // nearest weekly
 
@@ -198,22 +234,53 @@ export class UniverseScannerWorker implements OnModuleInit {
       side: signal.side === 'BUY' ? 'CE' : 'PE',
     });
     if (!strike) {
-      return { signal, tradeId: null, reason: 'no viable strike in band' };
+      return { signal, tradeId: null, reason: 'no viable strike in band', diagnostic };
     }
 
     this.logger.log(
       `[${w.underlying}] selected ${strike.side} ${strike.strikePrice} @ ${strike.ltp} (score ${strike.score.toFixed(1)}) — ${strike.reason}`,
     );
 
-    // 4. Build the ExecuteTradeDto. We use synthetic symbol+token because
-    //    the option contract instruments table may be empty in this Phase-1
-    //    deployment (the backfill only seeded INDEX rows, not OPTIDX). The
-    //    paper trade service falls back to request.price for fills when the
-    //    token isn't in its tick LTP cache, so passing strike.ltp as price
-    //    gives us a clean simulated fill at the strike's last traded price.
+    // 4. Build the ExecuteTradeDto. We need a real instruments-table row for
+    //    the option contract because TradeExecutionService validates the
+    //    instrument exists before accepting the order. Upsert a synthetic
+    //    OPTIDX row first if one doesn't exist — the paper trade service
+    //    fills against `request.price` so the token only needs to be unique
+    //    and stable, not a real Angel One token.
     const expiryCompact = expiry.replace(/-/g, '').slice(2); // 2026-04-13 → 260413
     const syntheticSymbol = `${w.underlying}${expiryCompact}${strike.strikePrice}${strike.side}`;
-    const syntheticToken = `PAPER-${w.underlying}-${strike.strikePrice}-${strike.side}`;
+    const syntheticToken = `PAPER-${w.underlying}-${expiryCompact}-${strike.strikePrice}-${strike.side}`;
+
+    try {
+      await this.prisma.instrument.upsert({
+        where: {
+          symbol_exchange_token: {
+            symbol: syntheticSymbol,
+            exchange: 'NFO',
+            token: syntheticToken,
+          },
+        },
+        create: {
+          symbol: syntheticSymbol,
+          name: w.underlying,
+          token: syntheticToken,
+          exchange: 'NFO',
+          segment: 'OPTIONS',
+          lotSize: w.lotSize,
+          tickSize: 0.05,
+          expiry: new Date(expiry),
+          strike: strike.strikePrice,
+          optionType: strike.side,
+          isActive: true,
+        },
+        update: { isActive: true },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `[${w.underlying}] failed to upsert synthetic option instrument: ${err instanceof Error ? err.message : err}`,
+      );
+      return { signal, tradeId: null, reason: 'instrument upsert failed', diagnostic };
+    }
 
     try {
       const result = await this.tradeExecutionService.executeTrade({
@@ -238,6 +305,13 @@ export class UniverseScannerWorker implements OnModuleInit {
       this.logger.log(
         `[${w.underlying}] paper trade placed: ${syntheticSymbol} qty=${w.lotSize} @ ${strike.ltp} → tradeId=${tradeId}`,
       );
+
+      // CRITICAL: only mark the strategy's transition as committed AFTER
+      // a successful trade. If we mutate before this point and the trade
+      // fails, the strategy gets stuck in a "won't fire" state until reset.
+      if (tradeId) {
+        this.strategy.commitTransition(w.underlying, w.exchange, signal.side);
+      }
 
       // 5. Enqueue Claude's post-trade review.
       if (tradeId) {
@@ -268,11 +342,11 @@ export class UniverseScannerWorker implements OnModuleInit {
         this.logger.log(`[${w.underlying}] enqueued signal-review for trade ${tradeId}`);
       }
 
-      return { signal, tradeId, reason: 'trade placed' };
+      return { signal, tradeId, reason: 'trade placed', diagnostic };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error(`[${w.underlying}] trade execution failed: ${msg}`);
-      return { signal, tradeId: null, reason: `trade execution failed: ${msg}` };
+      return { signal, tradeId: null, reason: `trade execution failed: ${msg}`, diagnostic };
     }
   }
 }

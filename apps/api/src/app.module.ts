@@ -16,6 +16,7 @@ import { OptionsChainModule } from './modules/options-chain/options-chain.module
 import { AIAdvisorModule } from './modules/ai-advisor/ai-advisor.module';
 import { AutoTradeModule } from './modules/auto-trade/auto-trade.module';
 import { InsightsModule } from './modules/insights/insights.module';
+import { BrokerModule } from './modules/broker/broker.module';
 
 @Module({
   imports: [
@@ -76,6 +77,9 @@ import { InsightsModule } from './modules/insights/insights.module';
 
     // Auto-trade — signal-to-trade automation with approval workflow
     AutoTradeModule,
+
+    // Broker management — credential storage and connection lifecycle
+    BrokerModule,
   ],
   providers: [],
 })

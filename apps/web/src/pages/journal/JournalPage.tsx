@@ -177,6 +177,27 @@ export default function JournalPage() {
         },
       },
       {
+        key: 'currentPrice',
+        header: 'Current',
+        align: 'right' as const,
+        render: (_val, row) => {
+          const t = row as unknown as Trade;
+          // Closed trade: exit price is the current price.
+          if (t.exitPrice != null) {
+            return <span className="text-xs">{t.exitPrice.toFixed(2)}</span>;
+          }
+          // Open trade: derive from entry + per-unit unrealized P&L. The
+          // refresher worker keeps trade.pnl live for option positions.
+          if (t.entryPrice != null && t.pnl != null && t.quantity > 0) {
+            const perUnit = t.pnl / t.quantity;
+            const current =
+              t.side === 'BUY' ? t.entryPrice + perUnit : t.entryPrice - perUnit;
+            return <span className="text-xs">{current.toFixed(2)}</span>;
+          }
+          return <span className="text-xs text-gray-500">--</span>;
+        },
+      },
+      {
         key: 'exitPrice',
         header: 'Exit',
         align: 'right' as const,
@@ -217,6 +238,11 @@ export default function JournalPage() {
         width: '70px',
         render: (_val, row) => {
           const t = row as unknown as Trade;
+          // Open trades have pnlPercent === null until the position closes.
+          // Render a dash so the row doesn't crash.
+          if (t.pnlPercent === null || t.pnlPercent === undefined) {
+            return <span className="text-xs text-gray-500">--</span>;
+          }
           const color =
             t.pnlPercent > 0
               ? 'text-emerald-400'

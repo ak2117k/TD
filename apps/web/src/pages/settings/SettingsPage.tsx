@@ -201,30 +201,21 @@ export default function SettingsPage() {
       setStrategiesLoading(true);
       try {
         const { data } = await api.get('/signals/strategies');
+        // Backend returns the StrategyRegistry shape:
+        //   { name, description, supportedSegments, preferredTimeframes, parameters }
+        // Frontend (this page) expects:
+        //   { id, name, description, segments, timeframes }
+        // Adapt at the fetch site so the rest of the page stays simple. The
+        // backend's `name` doubles as the unique id.
+        const raw: any[] = Array.isArray(data) ? data : (data?.strategies ?? data ?? []);
         setStrategies(
-          data.strategies ?? data ?? [
-            {
-              id: 'rsi-reversal',
-              name: 'RSI Reversal',
-              description: 'Reversal signals based on RSI oversold/overbought zones',
-              segments: ['EQUITY', 'OPTIONS'],
-              timeframes: ['5m', '15m', '1h'],
-            },
-            {
-              id: 'ema-crossover',
-              name: 'EMA Crossover',
-              description: 'Trend signals from EMA crossover patterns',
-              segments: ['EQUITY', 'FUTURES'],
-              timeframes: ['15m', '1h', '4h'],
-            },
-            {
-              id: 'vwap-deviation',
-              name: 'VWAP Deviation',
-              description: 'Mean reversion signals using VWAP bands',
-              segments: ['EQUITY', 'OPTIONS', 'FUTURES'],
-              timeframes: ['5m', '15m'],
-            },
-          ],
+          raw.map((s) => ({
+            id: s.id ?? s.name,
+            name: s.name,
+            description: s.description ?? '',
+            segments: s.segments ?? s.supportedSegments ?? [],
+            timeframes: s.timeframes ?? s.preferredTimeframes ?? [],
+          })),
         );
       } catch {
         // Use defaults

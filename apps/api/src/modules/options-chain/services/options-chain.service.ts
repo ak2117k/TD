@@ -180,6 +180,92 @@ export class OptionsChainService {
     return { chain: fallbackChain, spotPrice: 0 };
   }
 
+  /**
+   * Resolve the broker's real LTP for a single option contract by looking up
+   * its true token in the instrument master and calling getLiveQuote(). This
+   * bypasses the chain-snapshot path entirely, so consumers (like the open
+   * paper trade refresher) get the same number the broker terminal shows
+   * instead of a delta-extrapolated estimate.
+   *
+   * Returns null if the contract can't be resolved or the broker call fails;
+   * the caller should fall back to its own approximation.
+   */
+  async getLiveOptionLtp(
+    underlying: string,
+    expiryIso: string,
+    strike: number,
+    optionType: 'CE' | 'PE',
+  ): Promise<number | null> {
+    const result = await this.getLiveOptionLtpDebug(underlying, expiryIso, strike, optionType);
+    return result.ltp;
+  }
+
+  async getLiveOptionLtpDebug(
+    underlying: string,
+    expiryIso: string,
+    strike: number,
+    optionType: 'CE' | 'PE',
+  ): Promise<{ ltp: number | null; reason: string; candidates?: string[]; expiriesSeen?: string[] }> {
+    if (!this.brokerAdapter) {
+      return { ltp: null, reason: 'no brokerAdapter' };
+    }
+    const contracts = await this.getOptionContracts(underlying);
+    if (contracts.length === 0) {
+      return { ltp: null, reason: 'getOptionContracts returned 0' };
+    }
+
+    const expiryYmd = expiryIso.slice(0, 10);
+    // Angel One's NFO master stores strike in paise (₹56,000 → 5600000) on
+    // index options. Accept either a raw rupee match or a paise match (s/100).
+    const strikeMatches = (s: number) =>
+      Math.abs(s - strike) < 0.01 || Math.abs(s / 100 - strike) < 0.01;
+
+    // The Angel One master parses expiries via new Date(year, mon, day) which
+    // creates a local-midnight Date. .toISOString() shifts that back into UTC,
+    // so a Tuesday 28-APR expiry stored at IST midnight serializes as the
+    // previous day in UTC ("2026-04-27"). Compare against the local-time
+    // date components so 28-APR matches 28-APR regardless of TZ representation.
+    const localYmd = (d: Date) => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    };
+
+    const sameType = contracts.filter((c) => c.optionType === optionType);
+    const expiriesSeen = Array.from(
+      new Set(sameType.map((c) => localYmd(c.expiry))),
+    ).sort();
+    const candidates = sameType.filter((c) => localYmd(c.expiry) === expiryYmd);
+    const match = candidates.find((c) => strikeMatches(c.strike));
+
+    if (!match) {
+      const sample = candidates
+        .slice(0, 8)
+        .map((c) => `${c.symbol}@${c.strike}`);
+      return {
+        ltp: null,
+        reason: `no strike match for ${expiryYmd} ${strike}${optionType}; ${candidates.length} candidates of ${sameType.length} same-type total`,
+        candidates: sample,
+        expiriesSeen: expiriesSeen.slice(0, 10),
+      };
+    }
+
+    try {
+      const tick = await this.brokerAdapter.getLiveQuote(match.token, match.exchange);
+      const ltp = tick?.ltp;
+      if (typeof ltp === 'number' && ltp > 0) {
+        return { ltp, reason: `ok via token ${match.token}` };
+      }
+      return { ltp: null, reason: `broker returned ltp=${ltp} for token ${match.token}` };
+    } catch (err) {
+      return {
+        ltp: null,
+        reason: `broker call threw: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+
   private async withTimeout<T>(
     promise: Promise<T>,
     ms: number,
@@ -214,11 +300,33 @@ export class OptionsChainService {
       orderBy: { capturedAt: 'desc' },
     });
     if (!row) return null;
+
+    // Freshness gate: during market hours (9:15–15:30 IST, Mon–Fri) the snapshot
+    // must be at most SNAPSHOT_FRESHNESS_MS old, otherwise we fall through to a
+    // live NSE re-fetch. Without this, the first snapshot of the day is served
+    // for the rest of the session and live LTPs never propagate to consumers
+    // like OpenPaperTradeRefresherWorker.
+    const SNAPSHOT_FRESHNESS_MS = 60 * 1000;
+    const ageMs = Date.now() - row.capturedAt.getTime();
+    if (this.isMarketHoursIST() && ageMs > SNAPSHOT_FRESHNESS_MS) {
+      return null;
+    }
+
     return {
       chain: row.chainJson as unknown as OptionsChainEntry[],
       spotPrice: Number(row.spotPrice),
       source: row.source,
     };
+  }
+
+  private isMarketHoursIST(): boolean {
+    const nowUtcMs = Date.now();
+    const istMs = nowUtcMs + 5.5 * 60 * 60 * 1000;
+    const ist = new Date(istMs);
+    const dow = ist.getUTCDay();
+    if (dow === 0 || dow === 6) return false;
+    const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+    return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
   }
 
   /**

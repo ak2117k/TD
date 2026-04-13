@@ -30,6 +30,7 @@ import {
   StrategyBadge,
   ConfidenceMeter,
 } from '@/components/trading';
+import AutoTradeDiagnostic from '@/components/trading/AutoTradeDiagnostic';
 import { useSignals } from '@/hooks/useSignals';
 import { useSignalStore } from '@/stores/signal-store';
 
@@ -203,6 +204,9 @@ export default function SignalsPage() {
 
   return (
     <div className="space-y-5">
+      {/* Auto-Trade Diagnostic — top of page so it's the first thing you see */}
+      <AutoTradeDiagnostic />
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">

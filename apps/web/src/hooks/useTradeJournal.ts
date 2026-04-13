@@ -47,7 +47,19 @@ export function useTradeJournal() {
       if (filters.sortBy) params.sortBy = filters.sortBy;
 
       const { data } = await api.get('/portfolio/journal', { params });
-      setTrades(data.trades ?? data.data ?? []);
+      // Backend trade rows use `isPaperTrade` but the frontend Trade type
+      // and every consumer (TradeCard, JournalPage, TradeDetailModal) reads
+      // `isPaper`. Normalize at the fetch site so the rest of the page
+      // never has to know about the field-name divergence.
+      const raw: any[] = data.trades ?? data.data ?? [];
+      setTrades(
+        raw.map((t) => ({
+          ...t,
+          isPaper: t.isPaper ?? t.isPaperTrade ?? false,
+          symbol: t.symbol ?? t.instrument?.symbol ?? '',
+          exchange: t.exchange ?? t.instrument?.exchange ?? '',
+        })),
+      );
       setTotalCount(data.totalCount ?? data.total ?? 0);
     } catch {
       console.warn('Failed to fetch trade journal');

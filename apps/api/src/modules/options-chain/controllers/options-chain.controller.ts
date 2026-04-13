@@ -134,6 +134,32 @@ export class OptionsChainController {
   }
 
   /**
+   * GET /api/options/debug-live-ltp/:underlying?expiry=2026-04-28&strike=56000&type=PE
+   * Diagnose why the real-broker LTP path is or isn't resolving for a contract.
+   */
+  @Get('debug-live-ltp/:underlying')
+  async debugLiveLtp(
+    @Param('underlying') underlying: string,
+    @Query('expiry') expiry: string,
+    @Query('strike') strikeStr: string,
+    @Query('type') type: string,
+  ) {
+    const strike = parseFloat(strikeStr);
+    const optionType = (type ?? 'PE').toUpperCase() as 'CE' | 'PE';
+    const debug = await this.optionsChainService.getLiveOptionLtpDebug(
+      underlying,
+      expiry,
+      strike,
+      optionType,
+    );
+    return {
+      input: { underlying, expiry, strike, optionType },
+      brokerAdapterPresent: this.brokerAdapter !== null,
+      ...debug,
+    };
+  }
+
+  /**
    * GET /api/options/greeks?spot=22000&strike=22500&expiry=2026-03-27&iv=0.15&type=CE
    * Calculate Greeks for a specific option.
    */
