@@ -4,6 +4,7 @@ import { SettingsService } from '../../settings/services/settings.service';
 import { RsiReversalStrategy } from '../strategies/rsi-reversal.strategy';
 import { EmaCrossoverStrategy } from '../strategies/ema-crossover.strategy';
 import { VwapDeviationStrategy } from '../strategies/vwap-deviation.strategy';
+import { AnandSniperV25CombinedStrategy } from '../strategies/anand-sniper-v25-combined.strategy';
 
 @Injectable()
 export class StrategyRegistryService implements OnModuleInit {
@@ -15,6 +16,7 @@ export class StrategyRegistryService implements OnModuleInit {
     private readonly rsiReversalStrategy: RsiReversalStrategy,
     private readonly emaCrossoverStrategy: EmaCrossoverStrategy,
     private readonly vwapDeviationStrategy: VwapDeviationStrategy,
+    private readonly anandSniperV25CombinedStrategy: AnandSniperV25CombinedStrategy,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -22,6 +24,7 @@ export class StrategyRegistryService implements OnModuleInit {
     this.register(this.rsiReversalStrategy);
     this.register(this.emaCrossoverStrategy);
     this.register(this.vwapDeviationStrategy);
+    this.register(this.anandSniperV25CombinedStrategy);
 
     this.logger.log(
       `Strategy registry initialized with ${this.strategies.size} strategies`,

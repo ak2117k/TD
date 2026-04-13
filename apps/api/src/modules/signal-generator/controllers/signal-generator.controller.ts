@@ -15,6 +15,7 @@ import { Queue } from 'bull';
 import { SignalGeneratorService } from '../services/signal-generator.service';
 import { StrategyRegistryService } from '../services/strategy-registry.service';
 import { SignalRepository } from '../repositories/signal.repository';
+import { UniverseScannerWorker } from '../workers/universe-scanner.worker';
 import { SignalFilterDto } from '../dto/signal.dto';
 
 @Controller('api/signals')
@@ -25,8 +26,20 @@ export class SignalGeneratorController {
     private readonly signalGeneratorService: SignalGeneratorService,
     private readonly strategyRegistry: StrategyRegistryService,
     private readonly signalRepository: SignalRepository,
+    private readonly universeScannerWorker: UniverseScannerWorker,
     @InjectQueue('signal-scan') private readonly signalScanQueue: Queue,
   ) {}
+
+  /**
+   * POST /api/signals/scan-now — manually trigger one universe scan tick.
+   * Bypasses the 15-min cron so we can smoke-test the combined-strategy
+   * pipeline immediately. Returns the per-symbol outcome.
+   */
+  @Post('scan-now')
+  @HttpCode(HttpStatus.OK)
+  async scanNow() {
+    return this.universeScannerWorker.runOnce();
+  }
 
   /**
    * GET /api/signals — list signals with filters and pagination.

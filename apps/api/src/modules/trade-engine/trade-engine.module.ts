@@ -1,7 +1,9 @@
 import { Module } from '@nestjs/common';
+import { BullModule } from '@nestjs/bull';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { MarketDataModule } from '../market-data/market-data.module';
 import { SettingsModule } from '../settings/settings.module';
+import { InsightsModule } from '../insights/insights.module';
 
 // Controller
 import { TradeEngineController } from './controllers/trade-engine.controller';
@@ -12,6 +14,9 @@ import { PositionManagerService } from './services/position-manager.service';
 import { PaperTradeService } from './services/paper-trade.service';
 import { RiskManagerService } from './services/risk-manager.service';
 import { OrderTrackerService } from './services/order-tracker.service';
+
+// Worker
+import { SignalReviewWorker } from './workers/signal-review.worker';
 
 // Repository
 import { TradeRepository } from './repositories/trade.repository';
@@ -28,6 +33,8 @@ import { BROKER_ADAPTER_TOKEN } from '../market-data/services/market-feed.servic
     PrismaModule,
     MarketDataModule,
     SettingsModule,
+    InsightsModule,
+    BullModule.registerQueue({ name: 'signal-review' }),
   ],
   controllers: [TradeEngineController],
   providers: [
@@ -40,6 +47,9 @@ import { BROKER_ADAPTER_TOKEN } from '../market-data/services/market-feed.servic
 
     // Data access
     TradeRepository,
+
+    // Workers
+    SignalReviewWorker,
 
     // WebSocket gateway
     TradeGateway,

@@ -5,6 +5,7 @@ import { OptionsChainController } from './controllers/options-chain.controller';
 import { OptionsChainService } from './services/options-chain.service';
 import { GreeksCalculatorService } from './services/greeks-calculator.service';
 import { NseOptionsChainService } from './services/nse-options-chain.service';
+import { OptionStrikeSelectorService } from './services/option-strike-selector.service';
 
 @Module({
   imports: [PrismaModule, MarketDataModule],
@@ -13,9 +14,10 @@ import { NseOptionsChainService } from './services/nse-options-chain.service';
     OptionsChainService,
     GreeksCalculatorService,
     NseOptionsChainService,
+    OptionStrikeSelectorService,
     // BROKER_ADAPTER_TOKEN is exported by MarketDataModule and available
     // via injection — no need to re-provide it here.
   ],
-  exports: [OptionsChainService, GreeksCalculatorService],
+  exports: [OptionsChainService, GreeksCalculatorService, OptionStrikeSelectorService],
 })
 export class OptionsChainModule {}

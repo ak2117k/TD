@@ -14,6 +14,14 @@ export interface MarketSnapshot {
   oi?: number;
   oiChange?: number;
   volume: number;
+  /**
+   * Optional multi-timeframe candle data for strategies that need to
+   * evaluate conditions across several intervals at once (e.g. a 15m
+   * strategy that also checks 1m / 5m / 1h alignment). Existing
+   * single-timeframe strategies ignore this field; MTF-aware ones
+   * read from `mtfCandles['1m']`, `mtfCandles['5m']`, etc.
+   */
+  mtfCandles?: Record<string, CandleData[]>;
 }
 
 export interface CandleData {
