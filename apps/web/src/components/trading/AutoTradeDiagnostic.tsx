@@ -7,10 +7,12 @@ import api from '@/services/api';
  * Diagnostic panel for the Anand Sniper + V25 combined auto-trade strategy.
  *
  * Hits POST /api/signals/scan-now to run one evaluation tick on every watched
- * symbol (NIFTY + BANKNIFTY), then renders the per-symbol breakdown of all
- * three rule conditions with current vs. threshold values. This is how the
- * user sees WHY the strategy fired (or didn't) without reading server logs
- * or curling endpoints.
+ * symbol (NIFTY + BANKNIFTY on NSE, CRUDEOIL + COPPER on MCX), then renders
+ * the per-symbol breakdown of all three rule conditions with current vs.
+ * threshold values. This is how the user sees WHY the strategy fired (or
+ * didn't) without reading server logs or curling endpoints. The card grid
+ * auto-flexes to whatever the scan endpoint returns, so adding/removing
+ * watched symbols on the backend needs no frontend change.
  */
 
 interface DiagnosticPayload {
@@ -261,14 +263,14 @@ export default function AutoTradeDiagnostic() {
 
       {!results && !loading && (
         <p className="text-xs text-[var(--color-text-muted)]">
-          Click "Run Scan Now" to evaluate the rule on the latest 15m bar for NIFTY and BANKNIFTY.
-          The cron also runs this automatically every 15 min during NSE hours; this button is for
-          on-demand checks.
+          Click "Run Scan Now" to evaluate the rule on the latest 15m bar for every watched
+          symbol (NIFTY, BANKNIFTY on NSE; CRUDEOIL, COPPER on MCX). The cron also runs this
+          automatically every 15 min during market hours; this button is for on-demand checks.
         </p>
       )}
 
       {results && (
-        <div className="grid gap-3 lg:grid-cols-2">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-2">
           {results.map((r) => (
             <SymbolCard key={r.symbol} result={r} />
           ))}

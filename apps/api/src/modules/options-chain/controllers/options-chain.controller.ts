@@ -1,6 +1,7 @@
 import { Controller, Get, Param, Query, Inject, Optional } from '@nestjs/common';
 import { OptionsChainService } from '../services/options-chain.service';
 import { GreeksCalculatorService } from '../services/greeks-calculator.service';
+import { OptionStrikeSelectorService } from '../services/option-strike-selector.service';
 import { GetChainDto, GreeksQueryDto } from '../dto/options-chain.dto';
 import { BrokerAdapter } from '../../../common/interfaces/broker-adapter.interface';
 import { BROKER_ADAPTER_TOKEN } from '../../market-data/services/market-feed.service';
@@ -18,6 +19,7 @@ export class OptionsChainController {
   constructor(
     private readonly optionsChainService: OptionsChainService,
     private readonly greeksCalculator: GreeksCalculatorService,
+    private readonly strikeSelector: OptionStrikeSelectorService,
     @Optional()
     @Inject(BROKER_ADAPTER_TOKEN)
     private readonly brokerAdapter: BrokerAdapter | null,
@@ -156,6 +158,81 @@ export class OptionsChainController {
       input: { underlying, expiry, strike, optionType },
       brokerAdapterPresent: this.brokerAdapter !== null,
       ...debug,
+    };
+  }
+
+  /**
+   * GET /api/options/mcx-test/:underlying
+   * Smoke-test endpoint for MCX options chain. Resolves the nearest expiry,
+   * builds the chain via the MCX path, runs the strike selector for both
+   * CE and PE, and returns the top winner per side plus a chain summary.
+   *
+   * Example: GET /api/options/mcx-test/CRUDEOIL
+   */
+  @Get('mcx-test/:underlying')
+  async mcxTest(@Param('underlying') underlying: string) {
+    const expiries = await this.optionsChainService.getExpiries(underlying);
+    if (expiries.length === 0) {
+      return {
+        underlying: underlying.toUpperCase(),
+        error: 'No expiries available for underlying',
+        expiries: [],
+      };
+    }
+    const expiry = expiries[0];
+
+    const { chain, spotPrice } =
+      await this.optionsChainService.getOptionsChainWithSpot(
+        underlying,
+        expiry,
+      );
+
+    // Score top 3 strikes across both sides. We reuse the strike selector
+    // twice (CE and PE) and also materialize a simple "top by volume" list
+    // to sanity-check there's real liquidity in the chain.
+    const ceWinner = await this.strikeSelector.selectBestStrike({
+      underlying,
+      expiry,
+      side: 'CE',
+    });
+    const peWinner = await this.strikeSelector.selectBestStrike({
+      underlying,
+      expiry,
+      side: 'PE',
+    });
+
+    // Top 3 strikes by liquidity (volume + OI) — a cheap secondary view
+    // that doesn't depend on the selector's scoring weights.
+    const liquidityRanked = [...chain]
+      .map((e) => {
+        const ceVol = e.ceData?.volume ?? 0;
+        const peVol = e.peData?.volume ?? 0;
+        const ceOi = e.ceData?.oi ?? 0;
+        const peOi = e.peData?.oi ?? 0;
+        return {
+          strike: e.strikePrice,
+          ceLtp: e.ceData?.ltp ?? 0,
+          peLtp: e.peData?.ltp ?? 0,
+          ceVolume: ceVol,
+          peVolume: peVol,
+          ceOi,
+          peOi,
+          totalVolume: ceVol + peVol,
+          totalOi: ceOi + peOi,
+        };
+      })
+      .sort((a, b) => b.totalVolume + b.totalOi - (a.totalVolume + a.totalOi))
+      .slice(0, 3);
+
+    return {
+      underlying: underlying.toUpperCase(),
+      expiry,
+      spotPrice,
+      chainLength: chain.length,
+      expiriesAvailable: expiries.slice(0, 10),
+      top3ByLiquidity: liquidityRanked,
+      bestCE: ceWinner,
+      bestPE: peWinner,
     };
   }
 

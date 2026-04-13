@@ -10,7 +10,31 @@ import { BROKER_ADAPTER_TOKEN } from '../../market-data/services/market-feed.ser
 import { AngelOneAuthService } from '../../market-data/services/angel-one-auth.service';
 import { GreeksCalculatorService } from './greeks-calculator.service';
 import { NseOptionsChainService } from './nse-options-chain.service';
+import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { OptionsChainEntry, OptionData, OptionType } from '@td/shared/types';
+import { COMMODITIES } from '@td/shared/constants';
+
+/**
+ * MCX commodity underlyings that trade options-on-futures. Used to branch
+ * the chain-build path away from NSE-specific sources (which don't apply
+ * to commodities) and toward the Angel One master + per-strike live-quote
+ * path.
+ */
+const MCX_COMMODITIES: ReadonlySet<string> = new Set([
+  'CRUDEOIL',
+  'COPPER',
+  'GOLD',
+  'SILVER',
+  'NATURALGAS',
+]);
+
+/** Index token map for spot price lookups on NSE indices. */
+const INDEX_SPOT_TOKENS: Record<string, { token: string; exchange: string }> = {
+  NIFTY: { token: '99926000', exchange: 'NSE' },
+  BANKNIFTY: { token: '99926009', exchange: 'NSE' },
+  FINNIFTY: { token: '99926037', exchange: 'NSE' },
+  MIDCPNIFTY: { token: '99926074', exchange: 'NSE' },
+};
 
 const DEFAULT_RISK_FREE_RATE = 0.065;
 
@@ -62,7 +86,62 @@ export class OptionsChainService {
     @Inject(BROKER_ADAPTER_TOKEN)
     private readonly brokerAdapter: BrokerAdapter | null,
     private readonly authService: AngelOneAuthService,
+    @Optional()
+    private readonly marketFeed: MarketFeedService | null,
   ) {}
+
+  /** True for symbols that trade MCX commodity options (OPTFUT). */
+  private isMcxUnderlying(underlying: string): boolean {
+    return MCX_COMMODITIES.has(underlying.toUpperCase());
+  }
+
+  /**
+   * Resolve the current spot price for either NSE indices or MCX commodities.
+   * For MCX we use the front-month future's LTP (from the COMMODITIES token map)
+   * as the spot — that's how commodity options are priced in practice.
+   */
+  private async getSpotForUnderlying(underlying: string): Promise<number> {
+    const upper = underlying.toUpperCase();
+
+    // MCX: use the front-month future as spot.
+    if (this.isMcxUnderlying(upper)) {
+      const cmd = COMMODITIES[upper];
+      if (!cmd) return 0;
+
+      // 1) Try the in-memory feed cache (hot path).
+      if (this.marketFeed) {
+        const cached = this.marketFeed.getQuote(cmd.token);
+        if (cached && cached.ltp > 0) return cached.ltp;
+      }
+
+      // 2) Fall back to a direct broker REST quote.
+      if (this.brokerAdapter) {
+        try {
+          const q = await this.brokerAdapter.getLiveQuote(cmd.token, 'MCX');
+          if (q?.ltp > 0) return q.ltp;
+        } catch (err) {
+          this.logger.debug(
+            `MCX spot lookup failed for ${upper}: ${
+              err instanceof Error ? err.message : err
+            }`,
+          );
+        }
+      }
+      return 0;
+    }
+
+    // NSE indices
+    const idx = INDEX_SPOT_TOKENS[upper];
+    if (idx && this.brokerAdapter) {
+      try {
+        const q = await this.brokerAdapter.getLiveQuote(idx.token, idx.exchange);
+        if (q?.ltp > 0) return q.ltp;
+      } catch {
+        // fall through
+      }
+    }
+    return 0;
+  }
 
   /**
    * Get available expiry dates for an underlying symbol.
@@ -91,14 +170,27 @@ export class OptionsChainService {
       return [];
     }
 
-    // Extract unique expiry dates, filter to future dates, sort ascending
+    // Extract unique expiry dates, filter to future dates, sort ascending.
+    // Angel One master expiries are parsed at local midnight; use the local
+    // Y-M-D string rather than toISOString() so Monday 27-APR doesn't slip
+    // to Sunday 26-APR when the UTC offset crosses midnight.
     const now = new Date();
     now.setHours(0, 0, 0, 0);
+    const localYmd = (d: Date) => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    };
 
     const expirySet = new Set<string>();
     for (const c of contracts) {
       if (c.expiry >= now) {
-        expirySet.add(c.expiry.toISOString().split('T')[0]);
+        expirySet.add(
+          this.isMcxUnderlying(underlying)
+            ? localYmd(c.expiry)
+            : c.expiry.toISOString().split('T')[0],
+        );
       }
     }
 
@@ -126,6 +218,13 @@ export class OptionsChainService {
     underlying: string,
     expiry: string,
   ): Promise<{ chain: OptionsChainEntry[]; spotPrice: number }> {
+    // MCX branch: NSE chain API does not apply to commodity options, and
+    // the `instrument` DB table is populated only for NFO instruments.
+    // Go straight to snapshot → master-backed chain.
+    if (this.isMcxUnderlying(underlying)) {
+      return this.getMcxOptionsChainWithSpot(underlying, expiry);
+    }
+
     // 1. Fresh snapshot captured today → serve instantly. During market hours
     // a background refresh worker overwrites these; on weekends the bootstrap
     // script holds Friday-close data. Either way, the DB is the fast path.
@@ -178,6 +277,201 @@ export class OptionsChainService {
     // 5. Last resort: synthetic chain from instrument master.
     const fallbackChain = dbChain.length > 0 ? dbChain : await this.getChainFromMaster(underlying, expiry);
     return { chain: fallbackChain, spotPrice: 0 };
+  }
+
+  /**
+   * MCX-specific chain builder. The NSE public chain API doesn't cover
+   * commodities, and the `instrument` DB is NFO-only, so the path is:
+   *
+   *   1) today's snapshot
+   *   2) 7-day read-fallback snapshot
+   *   3) live build from Angel One MCX master + per-strike live-quote
+   *      (windowed to ±10 strikes around the front-month future spot so the
+   *      REST fan-out stays sane).
+   */
+  private async getMcxOptionsChainWithSpot(
+    underlying: string,
+    expiry: string,
+  ): Promise<{ chain: OptionsChainEntry[]; spotPrice: number }> {
+    // 1. Today's snapshot — same freshness gate as NSE path.
+    const todaysSnapshot = await this.loadTodaysSnapshot(underlying, expiry);
+    if (todaysSnapshot) {
+      this.logger.log(
+        `Serving today's snapshot for MCX ${underlying} ${expiry} (source=${todaysSnapshot.source})`,
+      );
+      return {
+        chain: this.enrichGreeks(
+          todaysSnapshot.chain,
+          todaysSnapshot.spotPrice,
+          expiry,
+        ),
+        spotPrice: todaysSnapshot.spotPrice,
+      };
+    }
+
+    // 2. Live build from instrument master + broker live quotes.
+    const spotPrice = await this.getSpotForUnderlying(underlying);
+    const liveChain = await this.buildMcxChainFromMaster(
+      underlying,
+      expiry,
+      spotPrice,
+    );
+
+    if (liveChain.length > 0 && this.chainHasRealData(liveChain)) {
+      const enriched = this.enrichGreeks(liveChain, spotPrice, expiry);
+      void this.persistSnapshot(
+        underlying,
+        expiry,
+        enriched,
+        spotPrice,
+        'ANGEL_ONE',
+      );
+      return { chain: enriched, spotPrice };
+    }
+
+    // 3. 7-day read-fallback snapshot.
+    const snapshot = await this.loadLatestSnapshot(underlying, expiry);
+    if (snapshot) {
+      this.logger.log(
+        `Serving persisted snapshot for MCX ${underlying} ${expiry} from ${snapshot.capturedAt.toISOString()}`,
+      );
+      return {
+        chain: this.enrichGreeks(snapshot.chain, snapshot.spotPrice, expiry),
+        spotPrice: snapshot.spotPrice,
+      };
+    }
+
+    // 4. Last resort: return the scaffold (even with zero LTPs it lets the
+    // strike selector see which strikes exist).
+    return { chain: liveChain, spotPrice };
+  }
+
+  /**
+   * Build a live MCX options chain from the Angel One instrument master,
+   * windowed to ±10 strikes around the front-month future spot so the
+   * per-strike REST fan-out is bounded.
+   */
+  private async buildMcxChainFromMaster(
+    underlying: string,
+    expiry: string,
+    spotPrice: number,
+  ): Promise<OptionsChainEntry[]> {
+    const contracts = await this.getOptionContracts(underlying);
+    if (contracts.length === 0) {
+      this.logger.warn(
+        `MCX master returned 0 option contracts for ${underlying}`,
+      );
+      return [];
+    }
+
+    // Filter contracts to the requested expiry (compare on local-date parts
+    // to avoid TZ drift — see getLiveOptionLtpDebug for the same approach).
+    const expiryYmd = expiry.slice(0, 10);
+    const localYmd = (d: Date) => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    };
+    const forExpiry = contracts.filter((c) => localYmd(c.expiry) === expiryYmd);
+    if (forExpiry.length === 0) {
+      this.logger.warn(
+        `No MCX contracts for ${underlying} expiry ${expiryYmd}`,
+      );
+      return [];
+    }
+
+    // MCX master strikes: on commodities these are typically in rupees
+    // (e.g. 6500 for CRUDEOIL), unlike NFO indices which store strike in
+    // paise. If the median strike is >10x spot, assume paise and rescale.
+    const rawStrikes = Array.from(
+      new Set(forExpiry.map((c) => c.strike)),
+    ).sort((a, b) => a - b);
+    let scale = 1;
+    if (spotPrice > 0 && rawStrikes.length > 0) {
+      const median = rawStrikes[Math.floor(rawStrikes.length / 2)];
+      if (median > spotPrice * 10) scale = 100; // paise-encoded
+    }
+    const normalizedContracts = forExpiry.map((c) => ({
+      ...c,
+      strike: c.strike / scale,
+    }));
+
+    // Group by strike
+    const byStrike = new Map<
+      number,
+      { ce: OptionContract | null; pe: OptionContract | null }
+    >();
+    for (const c of normalizedContracts) {
+      if (!byStrike.has(c.strike)) byStrike.set(c.strike, { ce: null, pe: null });
+      const entry = byStrike.get(c.strike)!;
+      if (c.optionType === 'CE') entry.ce = c;
+      else if (c.optionType === 'PE') entry.pe = c;
+    }
+    const allStrikes = Array.from(byStrike.keys()).sort((a, b) => a - b);
+
+    // Window to ±10 strikes around spot (or the middle of the chain if
+    // we have no spot). The per-strike live-quote fan-out is bounded by
+    // Angel One's 10 req/sec rate limit; 21 strikes * 2 legs = 42 calls
+    // sits in the safe zone.
+    const WINDOW = 10;
+    let atmIdx = Math.floor(allStrikes.length / 2);
+    if (spotPrice > 0) {
+      let bestDist = Infinity;
+      for (let i = 0; i < allStrikes.length; i++) {
+        const dist = Math.abs(allStrikes[i] - spotPrice);
+        if (dist < bestDist) {
+          bestDist = dist;
+          atmIdx = i;
+        }
+      }
+    }
+    const start = Math.max(0, atmIdx - WINDOW);
+    const end = Math.min(allStrikes.length, atmIdx + WINDOW + 1);
+    const windowStrikes = allStrikes.slice(start, end);
+
+    this.logger.log(
+      `Building MCX chain for ${underlying} ${expiryYmd}: ` +
+        `${windowStrikes.length}/${allStrikes.length} strikes around spot=${spotPrice} (scale=${scale})`,
+    );
+
+    // Time-to-expiry for Greeks
+    const expiryEnd = new Date(expiry);
+    expiryEnd.setHours(23, 30, 0, 0); // MCX options expire end-of-day
+    const timeToExpiry = this.greeksCalculator.getTimeToExpiry(expiryEnd);
+
+    // Fetch live quotes per leg. Serial to respect Angel One rate limits;
+    // 42 calls at ~5/sec is ~8 seconds which is acceptable for a chain fetch.
+    const chain: OptionsChainEntry[] = [];
+    for (const strike of windowStrikes) {
+      const { ce, pe } = byStrike.get(strike)!;
+      const ceData = ce
+        ? await this.buildOptionDataFromMaster(
+            { ...ce, strike }, // pass normalized strike back into the builder
+            spotPrice,
+            strike,
+            timeToExpiry,
+            'CE',
+          )
+        : null;
+      const peData = pe
+        ? await this.buildOptionDataFromMaster(
+            { ...pe, strike },
+            spotPrice,
+            strike,
+            timeToExpiry,
+            'PE',
+          )
+        : null;
+      chain.push({
+        strikePrice: strike,
+        expiryDate: expiry,
+        ceData,
+        peData,
+      });
+    }
+    chain.sort((a, b) => a.strikePrice - b.strikePrice);
+    return chain;
   }
 
   /**
@@ -723,7 +1017,12 @@ export class OptionsChainService {
   private async getOptionContracts(
     underlying: string,
   ): Promise<OptionContract[]> {
-    const key = underlying.toUpperCase();
+    // Prefix the cache key with exchange to keep NFO and MCX entries from
+    // colliding. In practice CRUDEOIL/COPPER never appear in NFO, but being
+    // explicit means we won't silently serve NFO rows for an MCX ask if the
+    // symbol names ever overlap.
+    const exchangePrefix = this.isMcxUnderlying(underlying) ? 'MCX' : 'NFO';
+    const key = `${exchangePrefix}:${underlying.toUpperCase()}`;
     const cached = this.contractsCache.get(key);
 
     if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {

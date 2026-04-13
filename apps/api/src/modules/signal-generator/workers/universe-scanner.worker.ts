@@ -37,6 +37,12 @@ interface WatchedSymbol {
 const WATCHED: WatchedSymbol[] = [
   { underlying: 'NIFTY', exchange: 'NSE', lotSize: 65 },
   { underlying: 'BANKNIFTY', exchange: 'NSE', lotSize: 30 },
+  // MCX commodity futures — the Sniper+V25 rule is segment-agnostic (works on
+  // any OHLCV series with enough history), so we fire signals on these the
+  // same way as indices. Stale-bar checks below naturally silence them
+  // outside MCX hours (09:00–23:30 IST).
+  { underlying: 'CRUDEOIL', exchange: 'MCX', lotSize: 100 },
+  { underlying: 'COPPER', exchange: 'MCX', lotSize: 2500 },
 ];
 
 const TIMEFRAMES = ['1m', '5m', '15m', '60m'] as const;
@@ -69,20 +75,33 @@ export class UniverseScannerWorker implements OnModuleInit {
       // Match either 'INDEX' or 'INDICES' segment label — different parts of
       // the codebase have used both historically (the backfill script writes
       // 'INDEX', the older WS subscriber wrote 'INDICES').
+      //
+      // MCX commodities live under segment='COMMODITY' (upserted by the
+      // commodity backfill script) and have no INDEX counterpart, so we
+      // accept that label too. On MCX we intentionally drop the segment
+      // filter entirely — the (symbol, exchange) pair is already unique
+      // enough to pin the spot future row.
+      const segmentFilter =
+        w.exchange === 'MCX'
+          ? undefined
+          : { in: ['INDEX', 'INDICES', 'COMMODITY'] as string[] };
       const inst = await this.prisma.instrument.findFirst({
         where: {
           symbol: w.underlying,
           exchange: w.exchange,
-          segment: { in: ['INDEX', 'INDICES'] },
+          ...(segmentFilter ? { segment: segmentFilter } : {}),
         },
       });
       if (inst) {
         w.instrumentId = inst.id;
-        this.logger.log(`Resolved ${w.underlying} → instrumentId=${inst.id}`);
+        this.logger.log(
+          `Resolved ${w.underlying} (${w.exchange}) → instrumentId=${inst.id} segment=${inst.segment}`,
+        );
       } else {
         this.logger.warn(
-          `${w.underlying} not in instruments table — scanner will skip it. ` +
-          `Run scripts/backfill-candles.mjs once to seed the index row.`,
+          `${w.underlying} (${w.exchange}) not in instruments table — scanner will skip it. ` +
+          `For NSE indices run scripts/backfill-candles.mjs; for MCX commodities ensure the ` +
+          `instrument row exists before the scanner starts.`,
         );
       }
     }
@@ -90,10 +109,12 @@ export class UniverseScannerWorker implements OnModuleInit {
 
   /**
    * Cron: every 15 minutes at the bar close (3:30s past the quarter to give
-   * the broker a beat to settle the bar). Only fires during NSE market hours
-   * IST (09:15-15:30, Mon-Fri).
+   * the broker a beat to settle the bar). Runs 09:00–23:59 IST Mon–Fri so the
+   * same pass covers NSE hours (09:15–15:30) AND MCX commodity hours
+   * (09:00–23:30). NSE symbols outside 09:15–15:30 simply hit the staleness
+   * gate below and are skipped; no extra wiring needed.
    */
-  @Cron('30 */15 9-15 * * 1-5', { timeZone: 'Asia/Kolkata' })
+  @Cron('30 */15 9-23 * * 1-5', { timeZone: 'Asia/Kolkata' })
   async scanCron(): Promise<void> {
     this.logger.log('Universe scan tick');
     for (const w of WATCHED) {

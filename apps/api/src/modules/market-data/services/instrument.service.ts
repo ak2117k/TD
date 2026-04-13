@@ -4,6 +4,7 @@ import {
   MarketDataRepository,
   UpsertInstrumentInput,
 } from '../repositories/market-data.repository';
+import { CandleAggregatorService } from './candle-aggregator.service';
 import { INDICES } from '@td/shared/constants';
 
 export interface InstrumentRecord {
@@ -33,6 +34,7 @@ export class InstrumentService implements OnModuleInit {
   constructor(
     private readonly repository: MarketDataRepository,
     private readonly configService: ConfigService,
+    private readonly candleAggregator: CandleAggregatorService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -168,20 +170,39 @@ export class InstrumentService implements OnModuleInit {
   }
 
   /**
-   * Load all active instruments from the database into the in-memory cache.
+   * Load all active instruments from the database into the in-memory cache
+   * AND proactively seed the candle-aggregator's token→instrumentId map.
+   *
+   * This is critical for live-tick ingestion across all exchanges (NSE, NFO,
+   * BSE, MCX). Previously this used searchInstruments('') which is capped at
+   * `take: 50` — that silently dropped every instrument beyond the first 50
+   * rows alphabetically, so tokens for MCX commodities (CRUDEOIL/COPPER) and
+   * most NFO options never got a cache entry and their ticks were discarded
+   * by CandleAggregator.processTick (which bails when tokenInstrumentMap has
+   * no match for the tick's token).
+   *
+   * We now pull the full active set via the dedicated repository method and
+   * seed BOTH maps in lockstep so every tradable token has a mapping ready
+   * before the first tick arrives.
    */
   private async loadFromDatabase(): Promise<void> {
-    // We use a broad search with empty query to load all
-    // This is more efficient with a direct Prisma call
     try {
-      const instruments = await this.repository.searchInstruments('');
+      const instruments = await this.repository.getAllActiveInstruments();
       this.instrumentsByToken.clear();
+      let seeded = 0;
       for (const inst of instruments) {
-        this.instrumentsByToken.set(
-          inst.token,
-          inst as InstrumentRecord,
-        );
+        const record = inst as InstrumentRecord;
+        this.instrumentsByToken.set(record.token, record);
+        // Push into the candle-aggregator so live ticks for this token
+        // are aggregated into candles and persisted. Without this, MCX
+        // commodity ticks (and any instrument outside the first 50 rows)
+        // hit processTick with instrumentId=undefined and get dropped.
+        this.candleAggregator.setTokenInstrumentId(record.token, record.id);
+        seeded++;
       }
+      this.logger.log(
+        `Seeded candle-aggregator tokenInstrumentMap with ${seeded} instruments across all exchanges (NSE, NFO, BSE, MCX).`,
+      );
     } catch (error) {
       this.logger.error(
         `Failed to load instruments from DB: ${error instanceof Error ? error.message : error}`,

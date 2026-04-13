@@ -516,17 +516,30 @@ export class AngelOneAdapterService implements BrokerAdapter {
       lotSize: number;
     }>
   > {
-    const master = instrumentMaster ?? (await this.fetchInstrumentMaster('NFO'));
+    const upperUnderlyingRaw = underlying.toUpperCase();
+    const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'].includes(
+      upperUnderlyingRaw,
+    );
+    const isMcxCommodity = ['CRUDEOIL', 'COPPER', 'GOLD', 'SILVER', 'NATURALGAS'].includes(
+      upperUnderlyingRaw,
+    );
 
-    // Angel One uses "OPTIDX" for index options and "OPTSTK" for stock options
-    const instrumentTypes =
-      ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'].includes(
-        underlying.toUpperCase(),
-      )
-        ? ['OPTIDX']
-        : ['OPTSTK'];
+    // MCX commodity options live on the MCX segment (exch_seg='MCX') and use
+    // instrumenttype 'OPTFUT' because they're options-on-futures, not
+    // options-on-index/stock. NFO uses OPTIDX/OPTSTK.
+    const masterExchange = isMcxCommodity ? 'MCX' : 'NFO';
+    const master =
+      instrumentMaster ?? (await this.fetchInstrumentMaster(masterExchange));
 
-    const upperUnderlying = underlying.toUpperCase();
+    // Angel One uses "OPTIDX" for index options, "OPTSTK" for stock options,
+    // and "OPTFUT" for options on MCX futures (CRUDEOIL, COPPER, etc).
+    const instrumentTypes = isMcxCommodity
+      ? ['OPTFUT']
+      : isIndex
+      ? ['OPTIDX']
+      : ['OPTSTK'];
+
+    const upperUnderlying = upperUnderlyingRaw;
 
     const options = master
       .filter((i: any) => {
@@ -572,7 +585,9 @@ export class AngelOneAdapterService implements BrokerAdapter {
           token: String(i.token),
           symbol: String(i.symbol),
           name: String(i.name ?? underlying),
-          exchange: 'NFO',
+          // Preserve the master's segment string so downstream live-quote
+          // calls route MCX options to MCX and NFO options to NFO.
+          exchange: String(i.exch_seg ?? masterExchange),
           expiry,
           strike,
           optionType: optionType as 'CE' | 'PE',

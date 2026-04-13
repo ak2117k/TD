@@ -210,6 +210,23 @@ export class MarketDataRepository {
   }
 
   /**
+   * Load every active instrument in the DB. Used by InstrumentService at
+   * boot to prime the in-memory token→instrumentId cache so the candle
+   * aggregator has mappings for all tradable segments (NSE indices, NFO
+   * options, and MCX commodities) without per-token DB round-trips on
+   * every incoming tick.
+   *
+   * NOTE: returns the full instrument row set, not paginated — intended
+   * for cold-start cache warmup, not request-path use.
+   */
+  async getAllActiveInstruments() {
+    return this.prisma.instrument.findMany({
+      where: { isActive: true },
+      orderBy: { symbol: 'asc' },
+    });
+  }
+
+  /**
    * Get instruments by a list of tokens.
    */
   async getInstrumentsByTokens(tokens: string[]) {
