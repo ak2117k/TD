@@ -11,3 +11,4 @@ export { Tabs } from './Tabs';
 export { EmptyState } from './EmptyState';
 export { ConnectionStatus } from './ConnectionStatus';
 export { MiniChart } from './MiniChart';
+export { PageLoadingOverlay } from './PageLoadingOverlay';
