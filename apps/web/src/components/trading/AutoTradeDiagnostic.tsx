@@ -212,7 +212,10 @@ export default function AutoTradeDiagnostic() {
     setLoading(true);
     setError(null);
     try {
-      const res = await api.post<ScanResult[]>('/signals/scan-now');
+      // 60s timeout: an on-demand scan walks 4 symbols and may rebuild MCX
+      // option chains via per-leg broker calls — the global 15s default
+      // isn't enough on a cold cache.
+      const res = await api.post<ScanResult[]>('/signals/scan-now', null, { timeout: 60000 });
       setResults(res.data);
       setLastRunAt(new Date());
     } catch (err) {

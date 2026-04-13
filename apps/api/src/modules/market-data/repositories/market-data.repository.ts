@@ -79,7 +79,26 @@ export class MarketDataRepository {
     timeframe: string,
     from: Date,
     to: Date,
+    take?: number,
   ) {
+    // When `take` is provided, fetch the most-recent N rows in DESC order and
+    // reverse so the caller still gets ascending timestamps. This is the fast
+    // path for indicator computation: we only need the last ~200 bars even
+    // when the [from, to] window contains 200k+ rows (e.g. 90 days of 1m
+    // commodity bars). Without the cap a single scan-now would burn 3 minutes
+    // serializing rows the strategy never reads.
+    if (take !== undefined) {
+      const rows = await this.prisma.candle.findMany({
+        where: {
+          instrumentId,
+          timeframe,
+          timestamp: { gte: from, lte: to },
+        },
+        orderBy: { timestamp: 'desc' },
+        take,
+      });
+      return rows.reverse();
+    }
     return this.prisma.candle.findMany({
       where: {
         instrumentId,

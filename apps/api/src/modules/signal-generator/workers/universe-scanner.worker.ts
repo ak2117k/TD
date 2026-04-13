@@ -167,14 +167,14 @@ export class UniverseScannerWorker implements OnModuleInit {
     }
 
     // 1. Fetch MTF candles from local DB. Window is intentionally wide
-    //    (90 days) so it absorbs both weekend gaps and any holes in the
-    //    backfill — the strategy only needs the most recent ~50 bars for
-    //    indicator computation, so a non-contiguous 60+ rows is fine.
-    //    Row counts per symbol per timeframe stay under ~10k, no perf
-    //    concern. Tighten in production if the live bar feed reliably
-    //    persists fresh candles.
+    //    (90 days) so it absorbs weekend gaps and holes in the backfill,
+    //    but we cap each query at 300 most-recent bars — the strategy only
+    //    looks back ~50 bars for the longest indicator (SuperTrend/ADX),
+    //    plus a buffer for warmup. Without this cap, MCX commodity 1m
+    //    bars (200k+ rows over 90 days) make scan-now take 3+ minutes.
     const now = new Date();
     const from30d = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+    const MAX_BARS_PER_TF = 300;
     const mtfCandles: Record<string, CandleData[]> = {};
     let staleness = Infinity;
 
@@ -186,6 +186,7 @@ export class UniverseScannerWorker implements OnModuleInit {
         tfKey,
         from30d,
         now,
+        MAX_BARS_PER_TF,
       );
       const candles: CandleData[] = rows.map((r) => ({
         timestamp: r.timestamp,
