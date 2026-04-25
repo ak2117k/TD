@@ -107,6 +107,36 @@ export default function TradeFilters({
         <option value="live">Live Only</option>
       </select>
 
+      {/* M5: VIX regime at entry */}
+      <select
+        value={filters.vixRegime}
+        onChange={(e) => onFilterChange({ vixRegime: e.target.value })}
+        className={selectClass}
+      >
+        <option value="all">All Regimes</option>
+        <option value="LOW">Low VIX</option>
+        <option value="NORMAL">Normal</option>
+        <option value="ELEVATED">Elevated</option>
+        <option value="HIGH">High VIX</option>
+        <option value="UNKNOWN">Unknown</option>
+      </select>
+
+      {/* M5: structured exit reason */}
+      <select
+        value={filters.exitReasonTag}
+        onChange={(e) => onFilterChange({ exitReasonTag: e.target.value })}
+        className={selectClass}
+      >
+        <option value="all">All Exits</option>
+        <option value="HIT_TARGET">Hit Target</option>
+        <option value="STOPPED_OUT">Stopped Out</option>
+        <option value="MOVED_STOP">Moved Stop</option>
+        <option value="PANIC_EXIT">Panic Exit</option>
+        <option value="TIME_EXIT">Time Exit</option>
+        <option value="REVERSAL_SEEN">Reversal Seen</option>
+        <option value="OTHER">Other</option>
+      </select>
+
       {/* Sort By */}
       <select
         value={filters.sortBy}
