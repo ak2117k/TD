@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { BullModule } from '@nestjs/bull';
 import { MarketDataController } from './controllers/market-data.controller';
 import { MarketDataGateway } from './gateways/market-data.gateway';
@@ -10,12 +10,19 @@ import { OITrackerProcessor } from './workers/oi-tracker.processor';
 import { AngelOneAuthService } from './services/angel-one-auth.service';
 import { AngelOneWebSocketService } from './services/angel-one-websocket.service';
 import { AngelOneAdapterService } from './services/angel-one-adapter.service';
+import { YahooFinanceService } from './services/yahoo-finance.service';
+import { MarketContextService } from './services/market-context.service';
+import { OptionsChainModule } from '../options-chain/options-chain.module';
 
 @Module({
   imports: [
     BullModule.registerQueue({
       name: 'oi-tracker',
     }),
+    // forwardRef avoids the circular import: OptionsChainModule imports
+    // MarketDataModule (for MarketFeedService) and we now need
+    // OptionsChainService here for MarketContextService.
+    forwardRef(() => OptionsChainModule),
   ],
   controllers: [MarketDataController],
   providers: [
@@ -23,6 +30,8 @@ import { AngelOneAdapterService } from './services/angel-one-adapter.service';
     MarketFeedService,
     CandleAggregatorService,
     InstrumentService,
+    YahooFinanceService,
+    MarketContextService,
 
     // Angel One broker services
     AngelOneAuthService,
@@ -52,6 +61,8 @@ import { AngelOneAdapterService } from './services/angel-one-adapter.service';
     MarketDataGateway,
     AngelOneAuthService,
     AngelOneAdapterService,
+    YahooFinanceService,
+    MarketContextService,
     BROKER_ADAPTER_TOKEN,
   ],
 })

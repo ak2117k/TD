@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { MarketDataModule } from '../market-data/market-data.module';
 import { OptionsChainController } from './controllers/options-chain.controller';
@@ -8,7 +8,7 @@ import { NseOptionsChainService } from './services/nse-options-chain.service';
 import { OptionStrikeSelectorService } from './services/option-strike-selector.service';
 
 @Module({
-  imports: [PrismaModule, MarketDataModule],
+  imports: [PrismaModule, forwardRef(() => MarketDataModule)],
   controllers: [OptionsChainController],
   providers: [
     OptionsChainService,
