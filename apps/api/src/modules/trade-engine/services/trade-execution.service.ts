@@ -13,6 +13,7 @@ import {
 } from '../../../common/interfaces/broker-adapter.interface';
 import { BROKER_ADAPTER_TOKEN } from '../../market-data/services/market-feed.service';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
+import { MarketContextService } from '../../market-data/services/market-context.service';
 import { SettingsService } from '../../settings/services/settings.service';
 import { PaperTradeService } from './paper-trade.service';
 import { RiskManagerService } from './risk-manager.service';
@@ -24,8 +25,22 @@ import {
   ExecuteTradeDto,
   ModifyTradeDto,
   TradeFilterDto,
+  ExitReasonTag,
 } from '../dto/trade.dto';
-import { Trade } from '@prisma/client';
+import { Trade, Prisma } from '@prisma/client';
+
+/**
+ * Strip an option/futures suffix to recover the underlying symbol.
+ * "NIFTY24APR22500CE" → "NIFTY", "BANKNIFTY24APR45000PE" → "BANKNIFTY".
+ * Used so MarketContextService can fetch the index-level context (spot,
+ * PCR, max-pain) even when the trade is on a derivative leg.
+ */
+function deriveUnderlying(symbol: string): string {
+  const upper = (symbol ?? '').toUpperCase();
+  const match = upper.match(/^(MIDCPNIFTY|BANKNIFTY|FINNIFTY|NIFTY|SENSEX)/);
+  if (match) return match[1];
+  return upper;
+}
 
 @Injectable()
 export class TradeExecutionService {
@@ -43,6 +58,7 @@ export class TradeExecutionService {
     private readonly tradeGateway: TradeGateway,
     private readonly settingsService: SettingsService,
     private readonly marketFeedService: MarketFeedService,
+    private readonly marketContextService: MarketContextService,
   ) {}
 
   /**
@@ -140,6 +156,24 @@ export class TradeExecutionService {
       );
     }
 
+    // ---- STEP 4b: Capture market context snapshot ----
+    // Tolerant: a snapshot failure must NOT block the trade. The service
+    // already swallows individual upstream failures and returns nulls; we
+    // wrap one more time defensively so a totally broken context capture
+    // (e.g. exception thrown before Promise.all even resolves) still lets
+    // the trade record persist.
+    const underlying = deriveUnderlying(request.symbol);
+    let context: Awaited<ReturnType<MarketContextService['snapshot']>> | null = null;
+    try {
+      context = await this.marketContextService.snapshot(underlying);
+    } catch (err) {
+      this.logger.warn(
+        `Market context snapshot failed for ${underlying}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+    }
+
     // ---- STEP 5: Create trade record in DB ----
     const trade = await this.tradeRepository.createTrade({
       instrumentId,
@@ -156,6 +190,20 @@ export class TradeExecutionService {
       strategy: request.strategy,
       isPaperTrade,
       entryTime,
+      entryReason: request.entryReason ?? null,
+      entryTags: request.entryTags ?? [],
+      spotAtEntry: context?.spot ?? null,
+      vixAtEntry: context?.vix ?? null,
+      vixRegimeAtEntry: context?.vixRegime ?? null,
+      pcrAtEntry: context?.pcr ?? null,
+      maxPainAtEntry: context?.maxPain ?? null,
+      adRatioAtEntry: context?.adRatio ?? null,
+      contextSnapshot: context
+        ? ({
+            ...context,
+            capturedAt: context.capturedAt.toISOString(),
+          } as unknown as Prisma.InputJsonValue)
+        : null,
     });
 
     // ---- STEP 6: Start order tracking ----

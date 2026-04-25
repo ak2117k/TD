@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { Trade, DailyPerformance } from '@prisma/client';
 import { TradeFilterDto, DailyPerformanceData } from '../dto/trade.dto';
@@ -25,8 +26,29 @@ export class TradeRepository {
     isPaperTrade: boolean;
     entryTime?: Date;
     notes?: string;
+    // ---- M5: entry context capture ----
+    entryReason?: string | null;
+    entryTags?: string[];
+    spotAtEntry?: number | null;
+    vixAtEntry?: number | null;
+    vixRegimeAtEntry?: string | null;
+    pcrAtEntry?: number | null;
+    maxPainAtEntry?: number | null;
+    adRatioAtEntry?: number | null;
+    contextSnapshot?: Prisma.InputJsonValue | null;
   }): Promise<Trade> {
-    return this.prisma.trade.create({ data });
+    const { contextSnapshot, ...rest } = data;
+    return this.prisma.trade.create({
+      data: {
+        ...rest,
+        // Prisma Json columns require explicit handling: undefined/null
+        // both leave the column empty, but `null` passes through cleanly
+        // when the field is optional in the schema.
+        ...(contextSnapshot !== undefined && contextSnapshot !== null
+          ? { contextSnapshot }
+          : {}),
+      },
+    });
   }
 
   async updateTrade(
@@ -45,6 +67,9 @@ export class TradeRepository {
       entryTime: Date;
       exitTime: Date;
       notes: string;
+      // ---- M5: exit-reason capture ----
+      exitReasonTag: string | null;
+      exitNotes: string | null;
     }>,
   ): Promise<Trade> {
     return this.prisma.trade.update({
