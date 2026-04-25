@@ -207,4 +207,39 @@ export class YahooFinanceService {
   canResolve(symbol: string, exchange: string, token: string): boolean {
     return toYahooSymbol(symbol, exchange, token) !== null;
   }
+
+  /**
+   * Fetch India VIX spot price from Yahoo Finance (^INDIAVIX).
+   *
+   * Used by MarketContextService to stamp the volatility regime onto every
+   * trade entry. Returns null on failure so callers can keep the trade
+   * record (with vix=null) — partial context is more useful than no trade.
+   */
+  async getIndiaVix(): Promise<number | null> {
+    try {
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent('^INDIAVIX')}?interval=1d&range=5d`;
+
+      const response = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+      });
+
+      if (!response.ok) {
+        this.logger.warn(`Yahoo Finance returned ${response.status} for ^INDIAVIX`);
+        return null;
+      }
+
+      const data = (await response.json()) as any;
+      const meta = data?.chart?.result?.[0]?.meta;
+      const ltp = meta?.regularMarketPrice;
+      if (typeof ltp !== 'number' || !Number.isFinite(ltp)) {
+        return null;
+      }
+      return ltp;
+    } catch (error) {
+      this.logger.warn(
+        `Failed to fetch India VIX: ${error instanceof Error ? error.message : error}`,
+      );
+      return null;
+    }
+  }
 }
