@@ -5,6 +5,7 @@ import {
   IsEnum,
   IsBoolean,
   IsInt,
+  IsArray,
   Min,
   IsDateString,
 } from 'class-validator';
@@ -26,6 +27,23 @@ export enum PositionTypeDto {
   INTRADAY = 'INTRADAY',
   DELIVERY = 'DELIVERY',
   CARRYFORWARD = 'CARRYFORWARD',
+}
+
+/**
+ * Structured exit-reason tag captured on every trade close.
+ * The journal uses these to bucket outcomes — "did the trade hit target,
+ * stop out, get exited early, etc.?" — so the trader can see WHICH kind
+ * of exits are draining their P&L (e.g. lots of PANIC_EXITs ⇒ discipline
+ * issue, not strategy issue).
+ */
+export enum ExitReasonTag {
+  HIT_TARGET = 'HIT_TARGET',
+  STOPPED_OUT = 'STOPPED_OUT',
+  MOVED_STOP = 'MOVED_STOP',
+  PANIC_EXIT = 'PANIC_EXIT',
+  TIME_EXIT = 'TIME_EXIT',
+  REVERSAL_SEEN = 'REVERSAL_SEEN',
+  OTHER = 'OTHER',
 }
 
 export class ExecuteTradeDto {
@@ -67,6 +85,19 @@ export class ExecuteTradeDto {
   @IsNumber()
   target?: number;
 
+  /** Free-text "why this trade" reason captured at entry. Optional — the
+   *  UI strongly encourages it for journal quality but server doesn't enforce. */
+  @IsOptional()
+  @IsString()
+  entryReason?: string;
+
+  /** Tag chips selected at entry (e.g. ["OI_BUILDUP","VWAP_RECLAIM"]).
+   *  Used by the journal for bucket-by-setup analysis. */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  entryTags?: string[];
+
   @IsOptional()
   @IsString()
   signalId?: string;
@@ -92,6 +123,18 @@ export class ModifyTradeDto {
 }
 
 export class CloseTradeDto {
+  /** Structured exit-reason tag — drives journal exit-bucket analysis. */
+  @IsOptional()
+  @IsEnum(ExitReasonTag)
+  exitReasonTag?: ExitReasonTag;
+
+  /** Free-text exit notes (what actually happened, optional). */
+  @IsOptional()
+  @IsString()
+  exitNotes?: string;
+
+  /** @deprecated Prefer exitReasonTag + exitNotes. Kept for backwards
+   *  compatibility with older clients that POST `{reason: "..."}`. */
   @IsOptional()
   @IsString()
   reason?: string;
@@ -127,6 +170,16 @@ export class TradeFilterDto {
   @IsOptional()
   @IsDateString()
   to?: string;
+
+  /** Filter by VIX regime captured at entry: LOW | NORMAL | ELEVATED | HIGH | UNKNOWN. */
+  @IsOptional()
+  @IsString()
+  vixRegime?: string;
+
+  /** Filter by structured exit-reason tag (matches ExitReasonTag values). */
+  @IsOptional()
+  @IsString()
+  exitReasonTag?: string;
 
   @IsOptional()
   @IsInt()
