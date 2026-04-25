@@ -6,6 +6,7 @@ import { formatINR } from '@td/shared';
 import type { Trade } from '@/types';
 import api from '@/services/api';
 import toast from 'react-hot-toast';
+import ExitTradeModal from './ExitTradeModal';
 
 interface TradeDetailModalProps {
   trade: Trade | null;
@@ -84,7 +85,10 @@ export default function TradeDetailModal({
 }: TradeDetailModalProps) {
   const [notes, setNotes] = useState('');
   const [isSavingNotes, setIsSavingNotes] = useState(false);
-  const [isClosing, setIsClosing] = useState(false);
+  // M5: the close flow now goes through ExitTradeModal so the trader is
+  // forced to pick a structured exitReasonTag. We just track the open
+  // state of that nested modal here.
+  const [exitModalOpen, setExitModalOpen] = useState(false);
 
   const handleSaveNotes = useCallback(async () => {
     if (!trade) return;
@@ -98,21 +102,6 @@ export default function TradeDetailModal({
       setIsSavingNotes(false);
     }
   }, [trade, notes]);
-
-  const handleCloseTrade = useCallback(async () => {
-    if (!trade) return;
-    setIsClosing(true);
-    try {
-      await api.post(`/trades/${trade.id}/close`);
-      toast.success('Trade closed');
-      onTradeUpdated?.();
-      onClose();
-    } catch {
-      toast.error('Failed to close trade');
-    } finally {
-      setIsClosing(false);
-    }
-  }, [trade, onClose, onTradeUpdated]);
 
   if (!trade) return null;
 
@@ -276,6 +265,87 @@ export default function TradeDetailModal({
           </div>
         </div>
 
+        {/* M5: Market context at entry */}
+        {(trade.vixAtEntry != null ||
+          trade.pcrAtEntry != null ||
+          trade.spotAtEntry != null) && (
+          <div className="rounded-lg border border-gray-700/60 bg-gray-800/40 p-3">
+            <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wide mb-2">
+              Market Context @ Entry
+            </h3>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-xs">
+              <div>
+                <span className="text-[10px] text-gray-500">Spot</span>
+                <p className="text-gray-200">
+                  {trade.spotAtEntry != null ? trade.spotAtEntry.toFixed(2) : '--'}
+                </p>
+              </div>
+              <div>
+                <span className="text-[10px] text-gray-500">VIX</span>
+                <p className="text-gray-200">
+                  {trade.vixAtEntry != null ? trade.vixAtEntry.toFixed(2) : '--'}{' '}
+                  <span className="text-[10px] text-gray-500">
+                    ({trade.vixRegimeAtEntry ?? 'UNKNOWN'})
+                  </span>
+                </p>
+              </div>
+              <div>
+                <span className="text-[10px] text-gray-500">PCR</span>
+                <p className="text-gray-200">
+                  {trade.pcrAtEntry != null ? trade.pcrAtEntry.toFixed(2) : '--'}
+                </p>
+              </div>
+              <div>
+                <span className="text-[10px] text-gray-500">Max Pain</span>
+                <p className="text-gray-200">
+                  {trade.maxPainAtEntry != null ? trade.maxPainAtEntry.toFixed(2) : '--'}
+                </p>
+              </div>
+              <div>
+                <span className="text-[10px] text-gray-500">A/D</span>
+                <p className="text-gray-200">
+                  {trade.adRatioAtEntry != null ? trade.adRatioAtEntry.toFixed(2) : '--'}
+                </p>
+              </div>
+            </div>
+            {trade.entryReason && (
+              <div className="mt-3 pt-3 border-t border-gray-700/40">
+                <span className="text-[10px] text-gray-500 uppercase tracking-wide">
+                  Why this trade
+                </span>
+                <p className="text-xs text-gray-200 mt-1">{trade.entryReason}</p>
+              </div>
+            )}
+            {trade.entryTags && trade.entryTags.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1">
+                {trade.entryTags.map((t) => (
+                  <span
+                    key={t}
+                    className="rounded-full border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-300"
+                  >
+                    {t}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* M5: Exit reason (closed trades only) */}
+        {trade.exitReasonTag && (
+          <div className="rounded-lg border border-gray-700/60 bg-gray-800/40 p-3">
+            <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wide mb-2">
+              Exit Reason
+            </h3>
+            <p className="text-xs text-gray-200">
+              {trade.exitReasonTag.replace(/_/g, ' ')}
+            </p>
+            {trade.exitNotes && (
+              <p className="text-xs text-gray-400 mt-1">{trade.exitNotes}</p>
+            )}
+          </div>
+        )}
+
         {/* Notes */}
         <div className="rounded-lg border border-gray-700/60 bg-gray-800/40 p-3">
           <div className="flex items-center gap-1.5 mb-2">
@@ -304,15 +374,26 @@ export default function TradeDetailModal({
         {isOpen_ && (
           <div className="flex justify-end pt-2 border-t border-gray-700/60">
             <button
-              onClick={handleCloseTrade}
-              disabled={isClosing}
-              className="rounded-md bg-red-600 px-4 py-2 text-xs font-medium text-white hover:bg-red-500 transition-colors disabled:opacity-50"
+              onClick={() => setExitModalOpen(true)}
+              className="rounded-md bg-red-600 px-4 py-2 text-xs font-medium text-white hover:bg-red-500 transition-colors"
             >
-              {isClosing ? 'Closing...' : 'Close Trade'}
+              Close Trade
             </button>
           </div>
         )}
       </div>
+
+      {/* M5: nested modal collects structured exit reason. onClosed
+          refreshes the parent list and dismisses this detail modal. */}
+      <ExitTradeModal
+        tradeId={trade.id}
+        isOpen={exitModalOpen}
+        onClose={() => setExitModalOpen(false)}
+        onClosed={() => {
+          onTradeUpdated?.();
+          onClose();
+        }}
+      />
     </Modal>
   );
 }
