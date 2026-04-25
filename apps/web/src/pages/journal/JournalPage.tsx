@@ -92,9 +92,21 @@ export default function JournalPage() {
 
   const handleExportCSV = useCallback(() => {
     if (trades.length === 0) return;
+    // Quote a value so commas, quotes, and newlines inside reason/notes
+    // text don't break the CSV. RFC 4180-style escaping.
+    const csvCell = (val: unknown): string => {
+      if (val === null || val === undefined) return '';
+      const s = String(val);
+      if (/[",\n\r]/.test(s)) {
+        return `"${s.replace(/"/g, '""')}"`;
+      }
+      return s;
+    };
+
     const headers = [
       'Date', 'Symbol', 'Side', 'Entry', 'Exit', 'Qty', 'P&L', 'P&L%',
       'Strategy', 'Type', 'Status', 'Duration',
+      'VIX', 'Regime', 'PCR', 'Tags', 'Why', 'ExitReason', 'ExitNotes',
     ];
     const rows = trades.map((t) => [
       formatDate(t.createdAt),
@@ -109,8 +121,18 @@ export default function JournalPage() {
       t.isPaper ? 'Paper' : 'Live',
       t.status,
       computeDuration(t.createdAt, t.closedAt),
+      t.vixAtEntry ?? '',
+      t.vixRegimeAtEntry ?? '',
+      t.pcrAtEntry ?? '',
+      (t.entryTags ?? []).join('|'),
+      t.entryReason ?? '',
+      t.exitReasonTag ?? '',
+      t.exitNotes ?? '',
     ]);
-    const csv = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+    const csv = [
+      headers.map(csvCell).join(','),
+      ...rows.map((r) => r.map(csvCell).join(',')),
+    ].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -291,6 +313,66 @@ export default function JournalPage() {
         render: (_val, row) => {
           const t = row as unknown as Trade;
           return <Badge label={t.status} variant={statusVariant(t.status)} size="sm" />;
+        },
+      },
+      {
+        key: 'vixAtEntry',
+        header: 'VIX',
+        align: 'right' as const,
+        width: '70px',
+        render: (_val, row) => {
+          const t = row as unknown as Trade;
+          if (t.vixAtEntry == null) return <span className="text-xs text-gray-500">--</span>;
+          return (
+            <div className="text-xs">
+              <span className="text-gray-200">{t.vixAtEntry.toFixed(1)}</span>
+              {t.vixRegimeAtEntry && (
+                <span className="ml-1 text-[10px] text-gray-500">
+                  {t.vixRegimeAtEntry.charAt(0)}
+                </span>
+              )}
+            </div>
+          );
+        },
+      },
+      {
+        key: 'entryTags',
+        header: 'Tags',
+        width: '180px',
+        render: (_val, row) => {
+          const t = row as unknown as Trade;
+          if (!t.entryTags || t.entryTags.length === 0) {
+            return <span className="text-xs text-gray-500">--</span>;
+          }
+          return (
+            <div className="flex flex-wrap gap-1">
+              {t.entryTags.slice(0, 3).map((tag) => (
+                <span
+                  key={tag}
+                  className="rounded-full border border-blue-500/30 bg-blue-500/10 px-1.5 py-0 text-[10px] text-blue-300"
+                >
+                  {tag.replace(/_/g, ' ').toLowerCase()}
+                </span>
+              ))}
+              {t.entryTags.length > 3 && (
+                <span className="text-[10px] text-gray-500">+{t.entryTags.length - 3}</span>
+              )}
+            </div>
+          );
+        },
+      },
+      {
+        key: 'exitReasonTag',
+        header: 'Exit',
+        width: '110px',
+        render: (_val, row) => {
+          const t = row as unknown as Trade;
+          if (!t.exitReasonTag) return <span className="text-xs text-gray-500">--</span>;
+          return (
+            <span className="text-xs text-gray-300">
+              {t.exitReasonTag.replace(/_/g, ' ').toLowerCase()}
+            </span>
+          );
         },
       },
       {
