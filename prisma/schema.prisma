@@ -140,6 +140,22 @@ model Trade {
   entryTime       DateTime?
   exitTime        DateTime?
   notes           String?
+
+  // ---- M5: Entry context capture ----
+  entryReason       String?
+  entryTags         String[]  @default([])
+  spotAtEntry       Float?
+  vixAtEntry        Float?
+  vixRegimeAtEntry  String?
+  pcrAtEntry        Float?
+  maxPainAtEntry    Float?
+  adRatioAtEntry    Float?
+  contextSnapshot   Json?
+
+  // ---- M5: Exit reason capture ----
+  exitReasonTag     String?
+  exitNotes         String?
+
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -147,6 +163,8 @@ model Trade {
   @@index([createdAt])
   @@index([strategy])
   @@index([isPaperTrade])
+  @@index([vixRegimeAtEntry])
+  @@index([exitReasonTag])
   @@map("trades")
 }
 
