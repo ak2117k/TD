@@ -114,6 +114,9 @@ export class TradeEngineController {
 
   /**
    * POST /api/trades/:id/close — Close a specific trade.
+   *
+   * Body accepts the structured M5 form `{exitReasonTag, exitNotes}` and
+   * still tolerates the legacy `{reason}` shape for older clients.
    */
   @Post(':id/close')
   @HttpCode(HttpStatus.OK)
@@ -121,7 +124,11 @@ export class TradeEngineController {
     @Param('id') id: string,
     @Body() dto: CloseTradeDto,
   ) {
-    return this.tradeExecutionService.closeTrade(id, dto.reason);
+    return this.tradeExecutionService.closeTrade(id, {
+      exitReasonTag: dto.exitReasonTag,
+      exitNotes: dto.exitNotes,
+      reason: dto.reason,
+    });
   }
 
   /**

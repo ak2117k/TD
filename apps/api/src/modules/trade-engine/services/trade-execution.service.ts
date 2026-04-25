@@ -241,8 +241,26 @@ export class TradeExecutionService {
 
   /**
    * Close an open trade by placing an opposite order.
+   *
+   * Accepts either the legacy `string` (for back-compat with existing
+   * call sites like the kill-switch) or the structured M5 close-options
+   * object: `{exitReasonTag, exitNotes, reason?}`.
    */
-  async closeTrade(tradeId: string, reason?: string): Promise<Trade> {
+  async closeTrade(
+    tradeId: string,
+    reasonOrOpts?:
+      | string
+      | {
+          exitReasonTag?: ExitReasonTag | string | null;
+          exitNotes?: string | null;
+          reason?: string | null;
+        },
+  ): Promise<Trade> {
+    const opts =
+      typeof reasonOrOpts === 'string'
+        ? { reason: reasonOrOpts }
+        : reasonOrOpts ?? {};
+
     const trade = await this.tradeRepository.getTradeById(tradeId);
     if (!trade) {
       throw new HttpException('Trade not found', HttpStatus.NOT_FOUND);
@@ -320,6 +338,15 @@ export class TradeExecutionService {
         ? (pnl / (entryPrice * trade.quantity)) * 100
         : 0;
 
+    // Pick the human-readable note: prefer structured exitNotes, fall back
+    // to the legacy `reason` string (kill-switch path), preserve original
+    // notes otherwise.
+    const exitNote =
+      opts.exitNotes ?? opts.reason ?? null;
+    const noteForLegacyField = opts.reason
+      ? `Closed: ${opts.reason}`
+      : trade.notes ?? undefined;
+
     // Update trade record
     const updatedTrade = await this.tradeRepository.updateTrade(tradeId, {
       status: 'CLOSED',
@@ -327,7 +354,9 @@ export class TradeExecutionService {
       exitTime: new Date(),
       pnl,
       pnlPercent,
-      notes: reason ? `Closed: ${reason}` : trade.notes ?? undefined,
+      notes: noteForLegacyField,
+      exitReasonTag: opts.exitReasonTag ?? null,
+      exitNotes: exitNote,
     });
 
     // Remove from position manager
