@@ -102,7 +102,7 @@ export class TradeRepository {
     const limit = filters.limit ?? 20;
     const skip = (page - 1) * limit;
 
-    const where: any = {};
+    const where: Prisma.TradeWhereInput = {};
 
     if (filters.status) {
       where.status = filters.status;
@@ -115,8 +115,16 @@ export class TradeRepository {
     }
     if (filters.from || filters.to) {
       where.createdAt = {};
-      if (filters.from) where.createdAt.gte = new Date(filters.from);
-      if (filters.to) where.createdAt.lte = new Date(filters.to);
+      if (filters.from) (where.createdAt as Prisma.DateTimeFilter).gte = new Date(filters.from);
+      if (filters.to) (where.createdAt as Prisma.DateTimeFilter).lte = new Date(filters.to);
+    }
+    // M5 journal filters: bucket trades by VIX regime captured at entry
+    // and by structured exit-reason tag.
+    if (filters.vixRegime) {
+      where.vixRegimeAtEntry = filters.vixRegime;
+    }
+    if (filters.exitReasonTag) {
+      where.exitReasonTag = filters.exitReasonTag;
     }
 
     const [trades, total] = await Promise.all([
