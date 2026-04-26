@@ -54,6 +54,21 @@ export class JournalFilterDto extends DateRangeDto {
   @IsString()
   side?: string;
 
+  // M5: filter by VIX regime captured at entry. The four real values come
+  // from MarketContextService.classifyVixRegime; UNKNOWN is the fallback
+  // when VIX wasn't reachable. We accept any string here rather than
+  // an enum so older trades with null regime aren't blocked at the DTO layer.
+  @ApiPropertyOptional({ description: 'Filter by VIX regime at entry (LOW|NORMAL|ELEVATED|HIGH|UNKNOWN)' })
+  @IsOptional()
+  @IsString()
+  vixRegime?: string;
+
+  // M5: filter by structured exit-reason tag persisted on closeTrade.
+  @ApiPropertyOptional({ description: 'Filter by exit reason tag (HIT_TARGET|STOPPED_OUT|...)' })
+  @IsOptional()
+  @IsString()
+  exitReasonTag?: string;
+
   @ApiPropertyOptional({ description: 'Page number (1-based)', minimum: 1 })
   @IsOptional()
   @Type(() => Number)

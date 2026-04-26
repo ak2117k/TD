@@ -153,6 +153,8 @@ export class PortfolioService {
     segment?: string;
     status?: string;
     side?: string;
+    vixRegime?: string;
+    exitReasonTag?: string;
     page: number;
     limit: number;
     sortBy: string;

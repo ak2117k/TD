@@ -233,6 +233,8 @@ export class PortfolioRepository {
     segment?: string;
     status?: string;
     side?: string;
+    vixRegime?: string;
+    exitReasonTag?: string;
     page: number;
     limit: number;
     sortBy: string;
@@ -249,6 +251,9 @@ export class PortfolioRepository {
     if (options.strategy) where.strategy = options.strategy;
     if (options.status) where.status = options.status;
     if (options.side) where.side = options.side;
+    // M5: filter by entry-time market regime + structured exit reason.
+    if (options.vixRegime) where.vixRegimeAtEntry = options.vixRegime;
+    if (options.exitReasonTag) where.exitReasonTag = options.exitReasonTag;
 
     // For segment filtering we need to filter on the related instrument
     if (options.segment) {

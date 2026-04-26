@@ -60,6 +60,8 @@ export class PortfolioController {
       segment: dto.segment,
       status: dto.status,
       side: dto.side,
+      vixRegime: dto.vixRegime,
+      exitReasonTag: dto.exitReasonTag,
       page: dto.page ?? 1,
       limit: dto.limit ?? 20,
       sortBy: dto.sortBy ?? 'date',
