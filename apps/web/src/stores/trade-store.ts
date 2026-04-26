@@ -4,6 +4,29 @@ import type { Position } from '@/types';
 import api from '@/services/api';
 import toast from 'react-hot-toast';
 
+// M5: explicit shape for trade-execute payloads. The store previously
+// accepted Record<string, unknown> so any extra keys *would* have flowed
+// through, but a typed shape gives modal callers autocomplete and
+// catches typos in field names like `entryReason` / `entryTags`.
+export interface ExecuteTradeDto {
+  symbol: string;
+  token: string;
+  exchange: string;
+  side: string;
+  orderType: string;
+  quantity: number;
+  price?: number;
+  triggerPrice?: number;
+  positionType: string;
+  stoploss?: number;
+  target?: number;
+  entryReason?: string;
+  entryTags?: string[];
+  // Allow forward-compat passthrough (e.g. signalId) without tightening
+  // every caller in the same patch.
+  [key: string]: unknown;
+}
+
 interface TradeState {
   openTrades: Trade[];
   positions: Position[];
@@ -16,7 +39,7 @@ interface TradeState {
   fetchOpenTrades: () => Promise<void>;
   fetchPositions: () => Promise<void>;
   fetchRiskStatus: () => Promise<void>;
-  executeTrade: (dto: Record<string, unknown>) => Promise<void>;
+  executeTrade: (dto: ExecuteTradeDto) => Promise<void>;
   closeTrade: (id: string) => Promise<void>;
   closeAllPositions: () => Promise<void>;
   addTradeEvent: (event: TradeEvent) => void;

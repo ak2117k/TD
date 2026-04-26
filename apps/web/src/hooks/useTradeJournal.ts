@@ -10,6 +10,10 @@ export interface JournalFilters {
   segment: string;
   paperLive: string;
   sortBy: string;
+  // M5: filter by the regime/exit-reason fields captured at entry/exit.
+  // 'all' is treated as "no filter" — same convention as status/strategy.
+  vixRegime: string;
+  exitReasonTag: string;
 }
 
 const defaultFilters: JournalFilters = {
@@ -20,6 +24,8 @@ const defaultFilters: JournalFilters = {
   segment: 'all',
   paperLive: 'all',
   sortBy: 'date',
+  vixRegime: 'all',
+  exitReasonTag: 'all',
 };
 
 const PAGE_SIZE = 20;
@@ -45,6 +51,12 @@ export function useTradeJournal() {
       if (filters.segment !== 'all') params.segment = filters.segment;
       if (filters.paperLive !== 'all') params.paperLive = filters.paperLive;
       if (filters.sortBy) params.sortBy = filters.sortBy;
+      if (filters.vixRegime && filters.vixRegime !== 'all') {
+        params.vixRegime = filters.vixRegime;
+      }
+      if (filters.exitReasonTag && filters.exitReasonTag !== 'all') {
+        params.exitReasonTag = filters.exitReasonTag;
+      }
 
       const { data } = await api.get('/portfolio/journal', { params });
       // Backend trade rows use `isPaperTrade` but the frontend Trade type

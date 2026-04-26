@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Modal } from '@/components/common';
 import { cn } from '@/utils/cn';
-import { OrderSide, OrderType, PositionType } from '@/types';
+import { OrderSide, OrderType, PositionType, ENTRY_TAG_OPTIONS } from '@/types';
 import { useTradeStore } from '@/stores/trade-store';
 import { useSettingsStore } from '@/stores/settings-store';
 import { AutoTradeMode } from '@/types';
@@ -41,6 +41,10 @@ export default function ExecuteTradeModal({ isOpen, onClose }: ExecuteTradeModal
   const [ltp, setLtp] = useState<number>(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [searchTimer, setSearchTimer] = useState<ReturnType<typeof setTimeout> | null>(null);
+  // M5: capture trader rationale + tag chips at entry so the journal
+  // can correlate outcomes back to the *intent* behind each trade.
+  const [entryReason, setEntryReason] = useState('');
+  const [entryTags, setEntryTags] = useState<string[]>([]);
 
   const needsPrice = orderType === OrderType.LIMIT || orderType === OrderType.STOPLOSS;
   const needsTrigger = orderType === OrderType.STOPLOSS || orderType === OrderType.STOPLOSS_MARKET;
@@ -108,6 +112,8 @@ export default function ExecuteTradeModal({ isOpen, onClose }: ExecuteTradeModal
       setTarget('');
       setLtp(0);
       setIsSubmitting(false);
+      setEntryReason('');
+      setEntryTags([]);
     }
   }, [isOpen]);
 
@@ -127,6 +133,8 @@ export default function ExecuteTradeModal({ isOpen, onClose }: ExecuteTradeModal
         positionType,
         stoploss: stoploss ? Number(stoploss) : undefined,
         target: target ? Number(target) : undefined,
+        entryReason: entryReason.trim() || undefined,
+        entryTags: entryTags.length > 0 ? entryTags : undefined,
       });
       onClose();
     } catch {
@@ -320,6 +328,46 @@ export default function ExecuteTradeModal({ isOpen, onClose }: ExecuteTradeModal
               placeholder="--"
               className="w-full rounded-md border border-gray-700 bg-gray-800 py-2 px-3 text-sm text-gray-100 placeholder-gray-600 outline-none focus:border-blue-500"
             />
+          </div>
+        </div>
+
+        {/* M5: Why this trade — free-text rationale + tag chips */}
+        <div>
+          <label className="block text-xs font-medium text-gray-400 mb-1">
+            Why this trade?
+          </label>
+          <textarea
+            value={entryReason}
+            onChange={(e) => setEntryReason(e.target.value)}
+            placeholder="What's your edge here? (free text)"
+            rows={2}
+            className="w-full rounded-md border border-gray-700 bg-gray-800 py-2 px-3 text-sm text-gray-100 placeholder-gray-500 outline-none focus:border-blue-500 resize-none"
+          />
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {ENTRY_TAG_OPTIONS.map((tag) => {
+              const active = entryTags.includes(tag.value);
+              return (
+                <button
+                  key={tag.value}
+                  type="button"
+                  onClick={() =>
+                    setEntryTags((prev) =>
+                      prev.includes(tag.value)
+                        ? prev.filter((t) => t !== tag.value)
+                        : [...prev, tag.value],
+                    )
+                  }
+                  className={cn(
+                    'rounded-full border px-2.5 py-0.5 text-[11px] transition-colors',
+                    active
+                      ? 'border-blue-500 bg-blue-500/15 text-blue-300'
+                      : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600',
+                  )}
+                >
+                  {tag.label}
+                </button>
+              );
+            })}
           </div>
         </div>
 
