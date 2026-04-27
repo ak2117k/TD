@@ -1,10 +1,14 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import clsx from 'clsx';
 import { CandlestickChart, ChartToolbar, IndicatorPanel, OIOverlay } from '@/components/charts';
 import type { CandlestickChartHandle } from '@/components/charts';
+import LevelOverlay, { LEVEL_COLORS } from '@/components/charts/LevelOverlay';
+import SetupMarker from '@/components/charts/SetupMarker';
 import { useChartData } from '@/hooks/useChartData';
 import { useChartStore, type SelectedSymbol } from '@/stores/chart-store';
+import api from '@/services/api';
+import type { SetupContext } from '@/types';
 
 const WATCHLIST_ITEMS: SelectedSymbol[] = [
   { symbol: 'NIFTY', token: '99926000', exchange: 'NSE', name: 'NIFTY 50' },
@@ -51,6 +55,29 @@ export default function ChartsPage() {
       });
     }
   }, [searchParams, setSymbol]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Signal mode: fetch setupContext when ?signal=<id> is in the URL
+  const signalId = searchParams.get('signal');
+  const [setupContext, setSetupContext] = useState<SetupContext | null>(null);
+
+  useEffect(() => {
+    if (!signalId) { setSetupContext(null); return; }
+    api.get(`/signals/${signalId}`)
+      .then((r) => setSetupContext(r.data?.setupContext ?? null))
+      .catch(() => setSetupContext(null));
+  }, [signalId]);
+
+  const overlayLevels = useMemo(() => {
+    if (!setupContext) return [];
+    const lb = setupContext.levelBookSnapshot;
+    return [
+      { type: 'PDH', value: lb.pdh, color: LEVEL_COLORS.PDH, label: 'PDH' },
+      { type: 'PDL', value: lb.pdl, color: LEVEL_COLORS.PDL, label: 'PDL' },
+      ...(lb.orh !== null ? [{ type: 'ORH', value: lb.orh, color: LEVEL_COLORS.ORH, label: 'ORH' }] : []),
+      ...(lb.orl !== null ? [{ type: 'ORL', value: lb.orl, color: LEVEL_COLORS.ORL, label: 'ORL' }] : []),
+      { type: 'VWAP', value: lb.vwap, color: LEVEL_COLORS.VWAP, label: 'VWAP' },
+    ];
+  }, [setupContext]);
 
   const {
     candles,
@@ -190,6 +217,19 @@ export default function ChartsPage() {
             oiData={oiData}
             visible={indicators.oi}
           />
+
+          {/* Signal-mode overlays: level lines + setup marker */}
+          {setupContext && (
+            <>
+              <LevelOverlay series={chartRef.current?.candleSeries ?? null} levels={overlayLevels} />
+              <SetupMarker
+                series={chartRef.current?.candleSeries ?? null}
+                time={setupContext.triggerCandle.time}
+                side={setupContext.entry > setupContext.stoploss ? 'BUY' : 'SELL'}
+                text={`${setupContext.setupType} · ${setupContext.grade}`}
+              />
+            </>
+          )}
 
           {/* Indicator panel overlay */}
           {showIndicators && (
