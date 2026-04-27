@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import {
   TrendingUp,
   TrendingDown,
@@ -141,6 +142,48 @@ export default function SignalCard({
           size="sm"
         />
 
+        {/* Setup context — rendered only for levels-context signals */}
+        {signal.setupContext && (
+          <div className="rounded-lg border border-gray-700/60 bg-gray-800/40 p-3 text-xs">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-gray-200">
+                  {signal.setupContext.setupType === 'BREAKOUT' ? '↗ Breakout' : '↘ Reversal'}
+                </span>
+                <span className="rounded bg-gray-700/60 px-1.5 py-0.5 text-[10px] font-medium text-gray-300">
+                  {signal.setupContext.levelType}
+                </span>
+              </div>
+              <span className={`rounded px-2 py-0.5 text-[10px] font-bold ${
+                signal.setupContext.grade === 'A' ? 'bg-emerald-500/20 text-emerald-300'
+                : signal.setupContext.grade === 'B' ? 'bg-blue-500/20 text-blue-300'
+                : 'bg-gray-500/20 text-gray-300'
+              }`}>
+                Grade {signal.setupContext.grade}
+              </span>
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-[11px] text-gray-300">
+              <div>
+                <div className="text-[9px] uppercase text-gray-500">Level</div>
+                <div className="font-mono">{signal.setupContext.levelValue.toFixed(2)}</div>
+              </div>
+              <div>
+                <div className="text-[9px] uppercase text-gray-500">Vol vs MA</div>
+                <div className="font-mono">{signal.setupContext.volumeRatio.toFixed(2)}×</div>
+              </div>
+              <div>
+                <div className="text-[9px] uppercase text-gray-500">Window</div>
+                <div className="font-mono">{signal.setupContext.timeOfDayWindow.replace('-trend', '')}</div>
+              </div>
+            </div>
+            {signal.setupContext.expiryDayWarning && (
+              <div className="mt-2 rounded bg-amber-500/10 border border-amber-500/30 px-2 py-1 text-[10px] text-amber-300">
+                ⚠ Expiry day — theta acceleration risk
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Bottom row */}
         <div className="flex items-center justify-between pt-1 border-t border-gray-700/40">
           <div className="flex items-center gap-3 text-[10px] text-gray-500">
@@ -151,6 +194,12 @@ export default function SignalCard({
             <span>{signal.timeframe}</span>
           </div>
           <div className="flex items-center gap-2">
+            <Link
+              to={`/charts?symbol=${encodeURIComponent(signal.symbol)}&signal=${signal.id}`}
+              className="rounded-md bg-blue-500/15 border border-blue-500/30 px-2.5 py-1 text-[11px] font-medium text-blue-300 hover:bg-blue-500/25 transition-colors"
+            >
+              📈 View Chart
+            </Link>
             {onTakeAction && (
               <button
                 onClick={() => onTakeAction(signal)}
