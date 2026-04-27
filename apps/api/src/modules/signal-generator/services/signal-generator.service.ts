@@ -111,6 +111,7 @@ export type AnalyzeResult =
       volumeRatio: number;
       levels: LevelsSnapshot;
       reason: string;
+      indicators: SetupContext['indicators'];
     }
   | {
       kind: 'no-setup';
@@ -248,6 +249,7 @@ export class SignalGeneratorService {
       volumeRatio: ctx.volumeRatio,
       levels: snapshotFromBook(book),
       reason: output.reason,
+      indicators: ctx.indicators,
     };
   }
 

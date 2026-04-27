@@ -11,6 +11,23 @@ export interface LevelsSnapshot {
   atr14: number;
 }
 
+export interface IndicatorReadings {
+  ema9: number | null;
+  ema21: number | null;
+  rsi14: number | null;
+  macdHistogram: number | null;
+  bollingerPosition: number | null; // -1 to +1
+  roc10: number | null; // percentage
+  alignment: {
+    ema: 1 | 0 | -1;
+    rsi: 1 | 0 | -1;
+    macd: 1 | 0 | -1;
+    bollinger: 1 | 0 | -1;
+    momentum: 1 | 0 | -1;
+  };
+  agreement: number; // -5 to +5
+}
+
 export interface SetupAnalysis {
   kind: 'setup';
   symbol: string;
@@ -25,6 +42,7 @@ export interface SetupAnalysis {
   volumeRatio: number;
   levels: LevelsSnapshot;
   reason: string;
+  indicators?: IndicatorReadings;
 }
 
 export interface NoSetupAnalysis {
@@ -179,6 +197,68 @@ export default function AnalysisPanel({ analysis, loading }: AnalysisPanelProps)
           vol {analysis.volumeRatio.toFixed(2)}×
         </span>
       </div>
+
+      {analysis.indicators && (() => {
+        const ind = analysis.indicators;
+        const aligned = (
+          [ind.alignment.ema, ind.alignment.rsi, ind.alignment.macd, ind.alignment.bollinger, ind.alignment.momentum] as const
+        ).filter((v) => v === 1).length;
+        const arrow = isBuy ? '↑' : '↓';
+        const headerClass =
+          ind.agreement >= 4
+            ? 'text-emerald-400'
+            : ind.agreement <= -2
+              ? 'text-red-400'
+              : 'text-gray-400';
+
+        const fmtMacd = (v: number | null) =>
+          v === null ? 'n/a' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}`;
+        const fmtRsi = (v: number | null) => (v === null ? 'n/a' : v.toFixed(1));
+        const fmtRoc = (v: number | null) =>
+          v === null ? 'n/a' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
+        const emaTitle =
+          ind.ema9 !== null && ind.ema21 !== null
+            ? `EMA9${ind.ema9 > ind.ema21 ? '>' : ind.ema9 < ind.ema21 ? '<' : '='}EMA21`
+            : 'EMA n/a';
+        const bbTitle =
+          ind.bollingerPosition === null
+            ? 'BB n/a'
+            : `BB pos ${ind.bollingerPosition >= 0 ? '+' : ''}${ind.bollingerPosition.toFixed(2)}`;
+
+        const chips: { label: string; alignment: 1 | 0 | -1; title: string }[] = [
+          { label: 'EMA', alignment: ind.alignment.ema, title: emaTitle },
+          { label: 'RSI', alignment: ind.alignment.rsi, title: `RSI ${fmtRsi(ind.rsi14)}` },
+          { label: 'MACD', alignment: ind.alignment.macd, title: `MACD hist ${fmtMacd(ind.macdHistogram)}` },
+          { label: 'BB', alignment: ind.alignment.bollinger, title: bbTitle },
+          { label: 'MOM', alignment: ind.alignment.momentum, title: `ROC10 ${fmtRoc(ind.roc10)}` },
+        ];
+
+        return (
+          <div className="mt-3 border-t border-gray-700/60 pt-2">
+            <div className={clsx('text-[10px] font-semibold uppercase tracking-wider', headerClass)}>
+              Confluence: {aligned}/5 {arrow}
+            </div>
+            <div className="mt-1.5 flex items-center gap-1">
+              {chips.map((chip) => (
+                <span
+                  key={chip.label}
+                  title={chip.title}
+                  className={clsx(
+                    'text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded',
+                    chip.alignment === 1
+                      ? 'bg-emerald-500/15 text-emerald-400'
+                      : chip.alignment === -1
+                        ? 'bg-red-500/15 text-red-400'
+                        : 'bg-gray-700/40 text-gray-500',
+                  )}
+                >
+                  {chip.label}
+                </span>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
 
       <div className="mt-2 truncate text-[10px] italic text-gray-500" title={analysis.reason}>
         {analysis.reason}

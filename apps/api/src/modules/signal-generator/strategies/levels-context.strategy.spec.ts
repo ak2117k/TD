@@ -155,4 +155,91 @@ describe('LevelsContextStrategy.analyze', () => {
     expect(out).not.toBeNull();
     expect(out!.metadata!.grade).toBe('A');
   });
+
+  // ---- Indicator confluence: bullish boost upgrades grade ----
+  it('upgrades grade when indicators align bullish on a BUY breakout', () => {
+    // 40 closes with a steady uptrend mixed with small pullbacks so RSI
+    // lands in the (50, 70) trend-zone rather than getting stretched
+    // toward 100. MACD needs 35+ closes (slow=26 + signal=9) to render
+    // a non-null histogram. Volume spikes only on the trigger candle so
+    // the base grade is B (no prime-window confluence boost).
+    const closes: number[] = [];
+    let v = 24050;
+    for (let i = 0; i < 39; i++) {
+      // net-positive drift with alternating small pullbacks
+      v += i % 2 === 0 ? 4 : -1;
+      closes.push(v);
+    }
+    closes.push(24195); // breakout above PDH 24180
+    const book = baseLevelBook({
+      spot: 24195,
+      pdh: 24180,
+      roundNumbers: [24000, 24050, 24100],
+    });
+    const candles = buildCandles(40, {
+      closes,
+      volumes: [...Array(35).fill(100_000), ...Array(5).fill(150_000)],
+    });
+    const out = strategy.analyze({ candles, levelBook: book, nowIst: '11:00' });
+    expect(out).not.toBeNull();
+    const meta = out!.metadata as { indicators: { agreement: number }; grade: string };
+    expect(meta.indicators.agreement).toBeGreaterThanOrEqual(4);
+    expect(meta.grade).toBe('A');
+  });
+
+  // ---- Indicator confluence: bearish opposition demotes grade ----
+  it('demotes grade when indicators oppose a BUY breakout', () => {
+    // Strongly descending 40-bar series, then a single high-volume spike
+    // candle that closes just above PDH — the breakout fires, but every
+    // indicator opposes it. Base grade (volume + confluence + prime
+    // window) would be A → demoted by the agreement penalty.
+    const closes: number[] = [];
+    for (let i = 0; i < 39; i++) closes.push(24600 - i * 5); // 24600 → 24410
+    closes.push(24395); // last bar above PDH+0.1·ATR=24390 but still below recent EMAs
+    const book = baseLevelBook({
+      spot: 24395,
+      pdh: 24380,
+      orh: 24380,
+      roundNumbers: [24380, 24400, 24500],
+    });
+    const candles = buildCandles(40, {
+      closes,
+      volumes: [...Array(35).fill(100_000), ...Array(5).fill(160_000)],
+    });
+    const out = strategy.analyze({ candles, levelBook: book, nowIst: '10:00' });
+    expect(out).not.toBeNull();
+    const meta = out!.metadata as { indicators: { agreement: number }; grade: string };
+    expect(meta.indicators.agreement).toBeLessThanOrEqual(-2);
+    expect(['B', 'C']).toContain(meta.grade);
+  });
+
+  // ---- SetupContext.indicators populated ----
+  it('populates SetupContext.indicators with non-null readings when history is sufficient', () => {
+    const closes: number[] = [];
+    let v = 24050;
+    for (let i = 0; i < 39; i++) {
+      v += i % 2 === 0 ? 4 : -1;
+      closes.push(v);
+    }
+    closes.push(24195);
+    const book = baseLevelBook({
+      spot: 24195,
+      pdh: 24180,
+      roundNumbers: [24000, 24050, 24100],
+    });
+    const candles = buildCandles(40, {
+      closes,
+      volumes: [...Array(35).fill(100_000), ...Array(5).fill(160_000)],
+    });
+    const out = strategy.analyze({ candles, levelBook: book, nowIst: '10:00' });
+    expect(out).not.toBeNull();
+    const ind = (out!.metadata as { indicators: Record<string, unknown> }).indicators;
+    expect(ind.ema9).not.toBeNull();
+    expect(ind.ema21).not.toBeNull();
+    expect(ind.rsi14).not.toBeNull();
+    expect(ind.macdHistogram).not.toBeNull();
+    expect(ind.bollingerPosition).not.toBeNull();
+    expect(ind.roc10).not.toBeNull();
+    expect(typeof ind.agreement).toBe('number');
+  });
 });

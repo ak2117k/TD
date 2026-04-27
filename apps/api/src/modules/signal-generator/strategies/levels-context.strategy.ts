@@ -13,7 +13,9 @@ import {
   SetupGrade,
   SetupContext,
   TimeOfDayWindow,
+  IndicatorReadings,
 } from '../types/setup-context.types';
+import { ema, rsi, macd, bollinger, roc } from './indicators';
 
 const DISTANCE_GATE_ATR = 0.3;       // |spot - level| ≤ 0.3 × ATR14
 const BREAKOUT_BODY_ATR = 0.1;       // close must be > level + 0.1 × ATR
@@ -113,15 +115,18 @@ export class LevelsContextStrategy implements TradingStrategy {
       if (rr < (this.params.rrFloor as number)) { debug?.('reject:rr', { rr }); continue; }
       debug?.('pass:rr', { rr });
 
+      const indicators = this.computeIndicators(candles, levelBook.spot, isLong);
+      debug?.('pass:indicators', { agreement: indicators.agreement });
+
       const grade = this.gradeSetup({
         candidates, level: lvl, atr: levelBook.atr14,
-        volumeRatio, nowIst,
+        volumeRatio, nowIst, agreement: indicators.agreement,
       });
       if (grade === 'C' && !this.params.includeGradeC) {
-        debug?.('reject:grade-c', { volumeRatio });
+        debug?.('reject:grade-c', { volumeRatio, agreement: indicators.agreement });
         continue;
       }
-      debug?.('pass:grade', { grade });
+      debug?.('pass:grade', { grade, agreement: indicators.agreement });
 
       const window: TimeOfDayWindow =
         this.between(nowIst, MORNING_START, MORNING_END)
@@ -148,6 +153,7 @@ export class LevelsContextStrategy implements TradingStrategy {
         atr14: levelBook.atr14,
         volumeRatio,
         timeOfDayWindow: window,
+        indicators,
       };
 
       const reason = this.buildReason(setupContext, levelBook);
@@ -317,8 +323,9 @@ export class LevelsContextStrategy implements TradingStrategy {
     atr: number;
     volumeRatio: number;
     nowIst: string;
+    agreement: number;
   }): SetupGrade {
-    const { candidates, level, atr, volumeRatio, nowIst } = args;
+    const { candidates, level, atr, volumeRatio, nowIst, agreement } = args;
     const confluence = candidates.filter(
       (c) =>
         c !== level && Math.abs(c.value - level.value) <= CONFLUENCE_RADIUS_ATR * atr,
@@ -326,9 +333,113 @@ export class LevelsContextStrategy implements TradingStrategy {
     const primeWindow =
       this.between(nowIst, '09:45', '10:30') ||
       this.between(nowIst, '14:45', '15:15');
-    if (confluence >= 1 && volumeRatio >= VOLUME_RATIO_GRADE_A && primeWindow) return 'A';
-    if (volumeRatio >= VOLUME_RATIO_MIN) return 'B';
-    return 'C';
+    let base: SetupGrade;
+    if (confluence >= 1 && volumeRatio >= VOLUME_RATIO_GRADE_A && primeWindow) base = 'A';
+    else if (volumeRatio >= VOLUME_RATIO_MIN) base = 'B';
+    else base = 'C';
+
+    // Indicator-confluence adjustment: strong agreement (≥4) bumps up one
+    // tier; meaningful opposition (≤-2) bumps down one tier; otherwise the
+    // base grade stands.
+    if (agreement >= 4) {
+      if (base === 'B') return 'A';
+      if (base === 'C') return 'B';
+      return 'A';
+    }
+    if (agreement <= -2) {
+      if (base === 'A') return 'B';
+      if (base === 'B') return 'C';
+      return 'C';
+    }
+    return base;
+  }
+
+  private computeIndicators(
+    candles: CandleData[],
+    spot: number,
+    isLong: boolean,
+  ): IndicatorReadings {
+    const closes = candles.map((c) => c.close);
+    const ema9Val = ema(closes, 9);
+    const ema21Val = ema(closes, 21);
+    const rsi14Val = rsi(closes, 14);
+    const macdVal = macd(closes);
+    const bb = bollinger(closes, 20, 2);
+    const roc10Val = roc(closes, 10);
+
+    const macdHistogram = macdVal ? macdVal.histogram : null;
+
+    // Bollinger position normalised to [-1, +1] using `(spot - middle) /
+    // (upper - middle)`. When upper === middle (zero-volatility window)
+    // we report 0 to avoid div-by-zero.
+    let bollingerPosition: number | null = null;
+    if (bb) {
+      const denom = bb.upper - bb.middle;
+      if (denom > 0) {
+        const raw = (spot - bb.middle) / denom;
+        bollingerPosition = Math.max(-1, Math.min(1, raw));
+      } else {
+        bollingerPosition = 0;
+      }
+    }
+
+    // Per-indicator bullish-vote (+1 bullish, -1 bearish, 0 neutral). For
+    // SELL setups we flip at the end so "agrees with setup" stays +1.
+    const emaVote: 1 | 0 | -1 =
+      ema9Val == null || ema21Val == null ? 0 : ema9Val > ema21Val ? 1 : -1;
+
+    let rsiVote: 1 | 0 | -1 = 0;
+    if (rsi14Val != null) {
+      // 50<rsi<70 = bullish trend zone; 30<rsi<50 = bearish trend zone.
+      // Outside [30,70] is "stretched" → neutral (0) regardless of side.
+      if (rsi14Val > 50 && rsi14Val < 70) rsiVote = 1;
+      else if (rsi14Val > 30 && rsi14Val < 50) rsiVote = -1;
+      else rsiVote = 0;
+    }
+
+    const macdVote: 1 | 0 | -1 =
+      macdHistogram == null ? 0 : macdHistogram > 0 ? 1 : macdHistogram < 0 ? -1 : 0;
+
+    const bbVote: 1 | 0 | -1 =
+      bollingerPosition == null
+        ? 0
+        : bollingerPosition > 0
+          ? 1
+          : bollingerPosition < 0
+            ? -1
+            : 0;
+
+    const momentumVote: 1 | 0 | -1 =
+      roc10Val == null ? 0 : roc10Val > 0 ? 1 : roc10Val < 0 ? -1 : 0;
+
+    const flip = (v: 1 | 0 | -1): 1 | 0 | -1 =>
+      v === 1 ? -1 : v === -1 ? 1 : 0;
+    const align = (v: 1 | 0 | -1): 1 | 0 | -1 => (isLong ? v : flip(v));
+
+    const alignment = {
+      ema: align(emaVote),
+      rsi: align(rsiVote),
+      macd: align(macdVote),
+      bollinger: align(bbVote),
+      momentum: align(momentumVote),
+    };
+    const agreement =
+      alignment.ema +
+      alignment.rsi +
+      alignment.macd +
+      alignment.bollinger +
+      alignment.momentum;
+
+    return {
+      ema9: ema9Val,
+      ema21: ema21Val,
+      rsi14: rsi14Val,
+      macdHistogram,
+      bollingerPosition,
+      roc10: roc10Val,
+      alignment,
+      agreement,
+    };
   }
 
   private vma(candles: CandleData[]): number {
