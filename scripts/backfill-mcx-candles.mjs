@@ -77,11 +77,13 @@ function generateTOTP(base32Secret) {
 const YEARS_BACK = Number(process.env.YEARS_BACK ?? 1);
 const RATE_LIMIT_MS = 1200;
 
-// Tokens come from scripts/seed-mcx-commodities.mjs — front-month FUTCOM
-// contracts as of Apr 2026. If these change, update both files.
-const SYMBOLS = [
-  { symbol: 'CRUDEOIL', token: '486502', exchange: 'MCX', name: 'CRUDEOIL' },
-  { symbol: 'COPPER',   token: '488791', exchange: 'MCX', name: 'COPPER'   },
+// Symbols we backfill. Tokens are resolved at runtime from the DB so the
+// monthly contract roll (handled by scripts/roll-mcx-front-month.mjs and
+// the CommodityRollService cron) flows through automatically — no need to
+// edit two files when April → May → June rolls happen.
+const SYMBOLS_META = [
+  { symbol: 'CRUDEOIL', exchange: 'MCX', name: 'CRUDEOIL' },
+  { symbol: 'COPPER',   exchange: 'MCX', name: 'COPPER'   },
 ];
 
 /**
@@ -146,24 +148,18 @@ async function login() {
 }
 
 /**
- * Look up the MCX instrument row seeded by scripts/seed-mcx-commodities.mjs.
- * We explicitly do NOT upsert here — the seed script owns row creation, and
- * if a row is missing we want to surface that as a hard error rather than
- * silently creating a half-configured instrument (wrong lotSize/segment).
+ * Look up the MCX instrument row seeded by scripts/seed-mcx-commodities.mjs
+ * (or rotated by scripts/roll-mcx-front-month.mjs). Match on symbol+exchange
+ * — the token is whatever the current front-month is, which the roll script
+ * keeps current.
  */
 async function findInstrument(sym) {
-  const row = await prisma.instrument.findUnique({
-    where: {
-      symbol_exchange_token: {
-        symbol: sym.symbol,
-        exchange: sym.exchange,
-        token: sym.token,
-      },
-    },
+  const row = await prisma.instrument.findFirst({
+    where: { symbol: sym.symbol, exchange: sym.exchange },
   });
   if (!row) {
     throw new Error(
-      `Instrument row missing for ${sym.symbol} (${sym.exchange}, token ${sym.token}). ` +
+      `Instrument row missing for ${sym.symbol} (${sym.exchange}). ` +
         `Run scripts/seed-mcx-commodities.mjs first.`,
     );
   }
@@ -286,9 +282,12 @@ async function main() {
   const smartApi = await login();
 
   let grandTotal = 0;
-  for (const sym of SYMBOLS) {
+  for (const meta of SYMBOLS_META) {
+    const instrument = await findInstrument(meta);
+    // Compose the per-symbol context the rest of this script expects, with
+    // the live DB token (kept current by the roll script).
+    const sym = { ...meta, token: instrument.token };
     console.log(`\n>>> ${sym.symbol} (token ${sym.token}, ${sym.exchange})`);
-    const instrument = await findInstrument(sym);
     console.log(`    instrument row id=${instrument.id}`);
 
     for (const tf of TIMEFRAMES) {

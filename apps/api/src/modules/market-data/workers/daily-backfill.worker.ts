@@ -6,7 +6,13 @@ import { MarketDataRepository } from '../repositories/market-data.repository';
 
 interface BackfillTarget {
   symbol: string;
-  token: string;
+  /**
+   * Optional. NSE indices have stable tokens (NIFTY = 99926000 forever) so
+   * we can hardcode them. MCX commodities roll monthly — leave token absent
+   * and the worker will look up whatever the current token is in the DB,
+   * which the commodity-roll cron keeps updated.
+   */
+  token?: string;
   exchange: string;
   timeframes: string[];
 }
@@ -23,13 +29,14 @@ const NSE_TARGETS: BackfillTarget[] = [
 /**
  * MCX commodities we backfill at 23:35 IST (5 min after MCX session close).
  * MCX trades 09:00–23:30 IST, so the equity-close cron at 15:35 misses the
- * full evening session — these need their own slot. Tokens mirror
- * scripts/seed-mcx-commodities.mjs (front-month FUTCOM); update both files
- * together if contracts roll.
+ * full evening session — these need their own slot. Tokens are NOT
+ * hardcoded because MCX FUTCOM contracts roll every month; the
+ * commodity-roll cron keeps the instrument table's token up-to-date and
+ * this worker looks it up by (symbol, exchange) at run time.
  */
 const MCX_TARGETS: BackfillTarget[] = [
-  { symbol: 'CRUDEOIL', token: '486502', exchange: 'MCX', timeframes: ['1d', '1h', '15m', '5m'] },
-  { symbol: 'COPPER',   token: '488791', exchange: 'MCX', timeframes: ['1d', '1h', '15m', '5m'] },
+  { symbol: 'CRUDEOIL', exchange: 'MCX', timeframes: ['1d', '1h', '15m', '5m'] },
+  { symbol: 'COPPER',   exchange: 'MCX', timeframes: ['1d', '1h', '15m', '5m'] },
 ];
 
 /** Stay comfortably under Angel One's documented 1 req/sec historical-API cap. */
@@ -87,20 +94,30 @@ export class DailyBackfillWorker {
     let totalFailed = 0;
 
     for (const target of targets) {
+      // Stable tokens (NSE indices) match by token+exchange. Roll-prone
+      // tokens (MCX commodities) match by symbol+exchange and pick up the
+      // current token from the DB row — populated by the roll cron.
+      const where = target.token
+        ? { token: target.token, exchange: target.exchange }
+        : { symbol: target.symbol, exchange: target.exchange };
       const instrument = await this.prisma.instrument.findFirst({
-        where: { token: target.token, exchange: target.exchange },
-        select: { id: true },
+        where,
+        select: { id: true, token: true },
       });
       if (!instrument) {
         this.logger.warn(
-          `No instrument row for ${target.symbol} (${target.token}/${target.exchange}); skipping`,
+          `No instrument row for ${target.symbol}/${target.exchange}; skipping`,
         );
         continue;
       }
 
+      // Use the DB-resolved token for the broker call (matters for MCX
+      // where target.token was intentionally absent).
+      const resolvedTarget = { ...target, token: instrument.token };
+
       for (const tf of target.timeframes) {
         try {
-          const inserted = await this.backfillOne(target, instrument.id, tf);
+          const inserted = await this.backfillOne(resolvedTarget, instrument.id, tf);
           totalInserted += inserted;
         } catch (err) {
           totalFailed += 1;
@@ -128,6 +145,11 @@ export class DailyBackfillWorker {
     instrumentId: string,
     timeframe: string,
   ): Promise<number> {
+    if (!target.token) {
+      // runBackfill resolves token from DB before calling this — only path
+      // here without one is a misconfigured target row.
+      throw new Error(`backfillOne: ${target.symbol}/${target.exchange} has no token`);
+    }
     const last = await this.prisma.candle.findFirst({
       where: { instrumentId, timeframe },
       orderBy: { timestamp: 'desc' },
