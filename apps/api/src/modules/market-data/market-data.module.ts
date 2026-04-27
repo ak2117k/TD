@@ -7,6 +7,7 @@ import { CandleAggregatorService } from './services/candle-aggregator.service';
 import { InstrumentService } from './services/instrument.service';
 import { MarketDataRepository } from './repositories/market-data.repository';
 import { OITrackerProcessor } from './workers/oi-tracker.processor';
+import { DailyBackfillWorker } from './workers/daily-backfill.worker';
 import { AngelOneAuthService } from './services/angel-one-auth.service';
 import { AngelOneWebSocketService } from './services/angel-one-websocket.service';
 import { AngelOneAdapterService } from './services/angel-one-adapter.service';
@@ -46,6 +47,11 @@ import { OptionsChainModule } from '../options-chain/options-chain.module';
 
     // Bull queue processor
     OITrackerProcessor,
+
+    // Daily 15:35 IST cron — backfills any candles the live aggregator missed
+    // (downtime, restarts, holidays). Together with the one-shot backfill
+    // script, keeps the candle table complete without manual intervention.
+    DailyBackfillWorker,
 
     // Wire the Angel One adapter as the broker adapter
     {
