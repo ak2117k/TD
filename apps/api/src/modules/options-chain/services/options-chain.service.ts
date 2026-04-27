@@ -918,9 +918,15 @@ export class OptionsChainService {
     const expiryEnd = new Date(expiry);
     expiryEnd.setHours(23, 59, 59, 999);
 
+    // Filter by `name` exactly, NOT `symbol contains underlying` — the
+    // `contains` form is a substring match, so a query for "NIFTY" would
+    // also match every "BANKNIFTY*" symbol and bleed BANKNIFTY contracts
+    // into NIFTY's chain. The instruments table has a dedicated `name`
+    // column ("NIFTY" or "BANKNIFTY" verbatim) precisely so consumers
+    // don't have to do this fragile prefix-matching on `symbol`.
     const instruments = await this.prisma.instrument.findMany({
       where: {
-        symbol: { contains: underlying, mode: 'insensitive' },
+        name: { equals: underlying.toUpperCase(), mode: 'insensitive' },
         segment: 'OPTIONS',
         isActive: true,
         expiry: {
