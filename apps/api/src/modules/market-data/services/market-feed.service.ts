@@ -5,6 +5,7 @@ import {
   OnModuleDestroy,
   Inject,
   Optional,
+  forwardRef,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
@@ -33,6 +34,7 @@ import {
 import { CandleAggregatorService } from './candle-aggregator.service';
 import { InstrumentService } from './instrument.service';
 import { MarketDataGateway, CandlePayload } from '../gateways/market-data.gateway';
+import { LevelBookService } from '../../signal-generator/services/level-book.service';
 
 /** Redis pub/sub channel for tick distribution across services. */
 const REDIS_TICKS_CHANNEL = 'market:ticks';
@@ -101,6 +103,9 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
     @Inject(BROKER_ADAPTER_TOKEN)
     private readonly brokerAdapter: BrokerAdapter | null,
     private readonly angelOneAuth: AngelOneAuthService,
+    @Optional()
+    @Inject(forwardRef(() => LevelBookService))
+    private readonly levelBookService: LevelBookService | null,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -526,6 +531,15 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
 
       // 3. Pass to candle aggregator
       this.candleAggregator.processTick(tick);
+
+      // 3b. Drive the per-instrument level book off the same tick stream.
+      // LevelBookService rolls VWAP / today H/L / spot and tracks staleness.
+      this.levelBookService?.updateFromTick({
+        token: tick.token,
+        ltp: tick.ltp,
+        volume: tick.volume,
+        timestamp: tick.timestamp,
+      });
 
       // 4. Emit live tick to frontend via WebSocket gateway
       this.gateway.emitTick(quote);

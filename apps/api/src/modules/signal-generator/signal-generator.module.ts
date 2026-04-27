@@ -22,6 +22,7 @@ import { RsiReversalStrategy } from './strategies/rsi-reversal.strategy';
 import { EmaCrossoverStrategy } from './strategies/ema-crossover.strategy';
 import { VwapDeviationStrategy } from './strategies/vwap-deviation.strategy';
 import { AnandSniperV25CombinedStrategy } from './strategies/anand-sniper-v25-combined.strategy';
+import { LevelBookService } from './services/level-book.service';
 
 @Module({
   imports: [
@@ -63,6 +64,9 @@ import { AnandSniperV25CombinedStrategy } from './strategies/anand-sniper-v25-co
 
     // WebSocket gateway
     SignalGateway,
+
+    // Level book — per-instrument VWAP / today H/L / spot tracker
+    LevelBookService,
   ],
   exports: [
     SignalGeneratorService,
@@ -72,6 +76,7 @@ import { AnandSniperV25CombinedStrategy } from './strategies/anand-sniper-v25-co
     StrategyExecutorService,
     StrategyStorageService,
     SignalRepository,
+    LevelBookService,
   ],
 })
 export class SignalGeneratorModule {}
