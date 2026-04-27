@@ -769,31 +769,45 @@ export class OptionsChainService {
 
   /**
    * Calculate max pain strike -- the strike where total loss for option writers is minimized.
+   *
+   * `metric` selects which weighting to use: 'oi' (canonical) or 'volume'
+   * (fallback when OI is unavailable from the data source). Volume-derived
+   * "max pain" isn't classic max-pain — it's "the strike where today's
+   * traded flow would expire most flat" — but it's the right shape and
+   * better than returning 0.
    */
-  getMaxPain(chain: OptionsChainEntry[]): number {
+  getMaxPain(
+    chain: OptionsChainEntry[],
+    metric: 'oi' | 'volume' = 'oi',
+  ): number {
     if (chain.length === 0) return 0;
 
     const strikes = chain.map((e) => e.strikePrice);
     let minPain = Infinity;
-    let maxPainStrike = strikes[0];
+    let maxPainStrike = 0;
 
     for (const testStrike of strikes) {
       let totalPain = 0;
 
       for (const entry of chain) {
+        const ceWeight =
+          metric === 'oi' ? (entry.ceData?.oi ?? 0) : (entry.ceData?.volume ?? 0);
+        const peWeight =
+          metric === 'oi' ? (entry.peData?.oi ?? 0) : (entry.peData?.volume ?? 0);
         // CE writers' loss if expiry at testStrike
         if (entry.ceData && testStrike > entry.strikePrice) {
-          totalPain +=
-            (testStrike - entry.strikePrice) * entry.ceData.oi;
+          totalPain += (testStrike - entry.strikePrice) * ceWeight;
         }
         // PE writers' loss if expiry at testStrike
         if (entry.peData && testStrike < entry.strikePrice) {
-          totalPain +=
-            (entry.strikePrice - testStrike) * entry.peData.oi;
+          totalPain += (entry.strikePrice - testStrike) * peWeight;
         }
       }
 
-      if (totalPain < minPain) {
+      // Only consider strikes where there was actual pain (otherwise the
+      // first strike trivially "wins" with totalPain=0 when all weights are
+      // zero — that's the misleading "max pain at the lowest strike" bug).
+      if (totalPain > 0 && totalPain < minPain) {
         minPain = totalPain;
         maxPainStrike = testStrike;
       }
@@ -820,6 +834,13 @@ export class OptionsChainService {
 
   /**
    * Get full OI analysis summary.
+   *
+   * When OI is genuinely unavailable (Angel One's optionGreek API doesn't
+   * return OI without the paid Market Data subscription) we fall back to
+   * volume-based analytics. Volume tells a similar story for an intraday
+   * view: where the day's flow is concentrated → likely intraday support
+   * and resistance. The frontend renders these under "Volume Analysis"
+   * labels so the trader knows what they're looking at.
    */
   getOISummary(chain: OptionsChainEntry[]): OISummary {
     let totalCEOI = 0;
@@ -829,36 +850,57 @@ export class OptionsChainService {
     let highestCEOIStrike = 0;
     let highestPEOIStrike = 0;
 
+    let totalCEVolume = 0;
+    let totalPEVolume = 0;
+    let highestCEVolume = 0;
+    let highestPEVolume = 0;
+    let highestCEVolumeStrike = 0;
+    let highestPEVolumeStrike = 0;
+
     for (const entry of chain) {
       if (entry.ceData) {
         totalCEOI += entry.ceData.oi;
+        totalCEVolume += entry.ceData.volume;
         if (entry.ceData.oi > highestCEOI) {
           highestCEOI = entry.ceData.oi;
           highestCEOIStrike = entry.strikePrice;
         }
+        if (entry.ceData.volume > highestCEVolume) {
+          highestCEVolume = entry.ceData.volume;
+          highestCEVolumeStrike = entry.strikePrice;
+        }
       }
       if (entry.peData) {
         totalPEOI += entry.peData.oi;
+        totalPEVolume += entry.peData.volume;
         if (entry.peData.oi > highestPEOI) {
           highestPEOI = entry.peData.oi;
           highestPEOIStrike = entry.strikePrice;
         }
+        if (entry.peData.volume > highestPEVolume) {
+          highestPEVolume = entry.peData.volume;
+          highestPEVolumeStrike = entry.strikePrice;
+        }
       }
     }
 
+    const oiAvailable = totalCEOI > 0 || totalPEOI > 0;
+    const totalCE = oiAvailable ? totalCEOI : totalCEVolume;
+    const totalPE = oiAvailable ? totalPEOI : totalPEVolume;
+    const highestCEStrike = oiAvailable ? highestCEOIStrike : highestCEVolumeStrike;
+    const highestPEStrike = oiAvailable ? highestPEOIStrike : highestPEVolumeStrike;
+
     const pcr =
-      totalCEOI === 0
-        ? 0
-        : Math.round((totalPEOI / totalCEOI) * 100) / 100;
-    const maxPainStrike = this.getMaxPain(chain);
+      totalCE === 0 ? 0 : Math.round((totalPE / totalCE) * 100) / 100;
+    const maxPainStrike = this.getMaxPain(chain, oiAvailable ? 'oi' : 'volume');
 
     return {
-      totalCEOI,
-      totalPEOI,
+      totalCEOI: totalCE,
+      totalPEOI: totalPE,
       pcr,
       maxPainStrike,
-      highestCEOIStrike,
-      highestPEOIStrike,
+      highestCEOIStrike: highestCEStrike,
+      highestPEOIStrike: highestPEStrike,
     };
   }
 
