@@ -12,12 +12,24 @@ interface BackfillTarget {
 }
 
 /**
- * Symbols + timeframes the daily cron keeps current. Mirrors what
- * scripts/backfill-candles.mjs uses; extending this is a one-line edit.
+ * NSE-listed indices we backfill at 15:35 IST (5 min after equity close).
+ * Mirrors the symbol set used by scripts/backfill-candles.mjs.
  */
-const TARGETS: BackfillTarget[] = [
+const NSE_TARGETS: BackfillTarget[] = [
   { symbol: 'NIFTY', token: '99926000', exchange: 'NSE', timeframes: ['1d', '1h', '15m', '5m'] },
   { symbol: 'BANKNIFTY', token: '99926009', exchange: 'NSE', timeframes: ['1d', '1h', '15m', '5m'] },
+];
+
+/**
+ * MCX commodities we backfill at 23:35 IST (5 min after MCX session close).
+ * MCX trades 09:00–23:30 IST, so the equity-close cron at 15:35 misses the
+ * full evening session — these need their own slot. Tokens mirror
+ * scripts/seed-mcx-commodities.mjs (front-month FUTCOM); update both files
+ * together if contracts roll.
+ */
+const MCX_TARGETS: BackfillTarget[] = [
+  { symbol: 'CRUDEOIL', token: '486502', exchange: 'MCX', timeframes: ['1d', '1h', '15m', '5m'] },
+  { symbol: 'COPPER',   token: '488791', exchange: 'MCX', timeframes: ['1d', '1h', '15m', '5m'] },
 ];
 
 /** Stay comfortably under Angel One's documented 1 req/sec historical-API cap. */
@@ -49,18 +61,32 @@ export class DailyBackfillWorker {
   ) {}
 
   /**
-   * 15:35 IST, Mon-Fri (`0 35 15 * * 1-5` with TZ).
-   * Five-minute buffer past 15:30 close so the broker has finalised the
-   * last bar of the session.
+   * 15:35 IST, Mon-Fri — equity close + 5min buffer so the broker has
+   * finalised the day's last bar. Backfills NSE indices only.
    */
   @Cron('0 35 15 * * 1-5', { timeZone: 'Asia/Kolkata' })
-  async runDailyBackfill(): Promise<void> {
-    this.logger.log('Daily candle backfill starting');
+  async runEquityBackfill(): Promise<void> {
+    await this.runBackfill('NSE equity', NSE_TARGETS);
+  }
+
+  /**
+   * 23:35 IST, Mon-Fri — MCX close (23:30) + 5min buffer. Backfills MCX
+   * commodities; without this, the 15:35 cron would miss the entire
+   * 15:30–23:30 evening session and commodity gaps would accumulate
+   * every weekday.
+   */
+  @Cron('0 35 23 * * 1-5', { timeZone: 'Asia/Kolkata' })
+  async runCommodityBackfill(): Promise<void> {
+    await this.runBackfill('MCX commodity', MCX_TARGETS);
+  }
+
+  private async runBackfill(label: string, targets: BackfillTarget[]): Promise<void> {
+    this.logger.log(`${label} candle backfill starting (${targets.length} symbols)`);
     const startedAt = Date.now();
     let totalInserted = 0;
     let totalFailed = 0;
 
-    for (const target of TARGETS) {
+    for (const target of targets) {
       const instrument = await this.prisma.instrument.findFirst({
         where: { token: target.token, exchange: target.exchange },
         select: { id: true },
@@ -88,7 +114,7 @@ export class DailyBackfillWorker {
 
     const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
     this.logger.log(
-      `Daily candle backfill complete in ${elapsedSec}s — inserted=${totalInserted} failed=${totalFailed}`,
+      `${label} candle backfill complete in ${elapsedSec}s — inserted=${totalInserted} failed=${totalFailed}`,
     );
   }
 
