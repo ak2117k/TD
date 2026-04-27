@@ -59,10 +59,40 @@ const TIMEFRAME_MAP: Record<string, string> = {
 export class AngelOneAdapterService implements BrokerAdapter {
   private readonly logger = new Logger(AngelOneAdapterService.name);
 
+  /**
+   * Most-recent tick per token captured directly off the WebSocket feed.
+   *
+   * Angel One's REST `/rest/secure/angelbroking/market/v1/quote` endpoint
+   * (the SDK's `marketData` call) returns HTTP 403 for any client whose
+   * SmartAPI subscription does not include the paid "Market Data API"
+   * product. That is true for index tokens (NIFTY=99926000, BANKNIFTY=
+   * 99926009 and the rest of the 99926xxx family) and for MCX commodity
+   * tokens, even though the same tokens stream fine over the WebSocket.
+   * The 403 has nothing to do with payload shape — every documented
+   * variant (mode FULL/OHLC/LTP, exchange "NSE"/"NSE_CM", payload
+   * `exchangeTokens: { NSE: ['99926000'] }`) returns the same response.
+   *
+   * Rather than break live-quote consumers, we mirror every WebSocket
+   * tick into this cache and serve from it when the REST call fails.
+   * This gives us correct LTP/OHLC/volume for indices and commodities
+   * as long as the WS feed is up — which it always is during market
+   * hours, since MarketFeedService keeps a persistent connection.
+   */
+  private readonly wsTickCache = new Map<string, TickData>();
+
   constructor(
     public readonly authService: AngelOneAuthService,
     private readonly wsService: AngelOneWebSocketService,
-  ) {}
+  ) {
+    // Mirror every WS tick into the local cache. The wsService is an
+    // EventEmitter shared with MarketFeedService; adding our own listener
+    // here is non-destructive (setMaxListeners is 100).
+    this.wsService.on('tick', (tick: TickData) => {
+      if (tick?.token) {
+        this.wsTickCache.set(String(tick.token), tick);
+      }
+    });
+  }
 
   // ─────────────────────────────────────────────────────
   // Connection lifecycle
@@ -275,6 +305,8 @@ export class AngelOneAdapterService implements BrokerAdapter {
   // ─────────────────────────────────────────────────────
 
   async getLiveQuote(token: string, exchange: string): Promise<TickData> {
+    // Try the REST quote endpoint first. It returns the freshest snapshot
+    // (with proper prev-close) for any token the API key is entitled to.
     try {
       const smartApi = this.authService.getSmartApi();
 
@@ -283,35 +315,42 @@ export class AngelOneAdapterService implements BrokerAdapter {
         exchangeTokens: { [exchange]: [token] },
       });
 
-      // Debug: log raw response structure for first few calls
-      if (!response?.data?.fetched?.length) {
-        this.logger.debug(
-          `marketData raw for ${token}/${exchange}: ${JSON.stringify({
-            status: response?.status,
-            message: response?.message,
-            hasData: !!response?.data,
-            dataKeys: response?.data ? Object.keys(response.data) : [],
-            fetched: response?.data?.fetched?.length ?? 0,
-            unfetched: response?.data?.unfetched?.length ?? 0,
-          })}`,
-        );
-        throw new Error(response?.message ?? 'Market data fetch failed');
+      if (response?.data?.fetched?.length) {
+        const d = response.data.fetched[0];
+        return {
+          token: String(d.symbolToken ?? d.symboltoken ?? token),
+          symbol: d.tradingSymbol ?? d.tradingsymbol ?? '',
+          ltp: Number(d.ltp ?? 0),
+          open: Number(d.open ?? 0),
+          high: Number(d.high ?? 0),
+          low: Number(d.low ?? 0),
+          close: Number(d.close ?? 0),
+          volume: Number(d.tradeVolume ?? d.volume ?? 0),
+          oi: d.opnInterest != null ? Number(d.opnInterest) : undefined,
+          timestamp: new Date(),
+        };
       }
 
-      const d = response.data.fetched[0];
-      return {
-        token: String(d.symbolToken ?? d.symboltoken ?? token),
-        symbol: d.tradingSymbol ?? d.tradingsymbol ?? '',
-        ltp: Number(d.ltp ?? 0),
-        open: Number(d.open ?? 0),
-        high: Number(d.high ?? 0),
-        low: Number(d.low ?? 0),
-        close: Number(d.close ?? 0),
-        volume: Number(d.tradeVolume ?? d.volume ?? 0),
-        oi: d.opnInterest != null ? Number(d.opnInterest) : undefined,
-        timestamp: new Date(),
-      };
+      // REST returned no data — usually 403 for index/MCX tokens that this
+      // API key isn't entitled to. Fall through to WS-cache fallback.
+      const restStatus = response?.status;
+      const restMessage = response?.message;
+      this.logger.debug(
+        `marketData REST returned no data for ${token}/${exchange} ` +
+          `(status=${restStatus} message="${restMessage}") — trying WS cache`,
+      );
+
+      const cached = this.wsTickCache.get(String(token));
+      if (cached) return cached;
+
+      // No REST data and no WS tick yet — surface the original REST error.
+      throw new Error(restMessage ?? 'Market data fetch failed');
     } catch (error) {
+      // Any error (network, 403, parse, etc.): try the WS cache before giving up.
+      const cached = this.wsTickCache.get(String(token));
+      if (cached) {
+        return cached;
+      }
       const msg = error instanceof Error ? error.message : String(error);
       this.logger.error(`Failed to get live quote for ${token}: ${msg}`);
       throw new Error(`Get live quote failed: ${msg}`);
