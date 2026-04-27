@@ -11,19 +11,25 @@ import 'reflect-metadata';
 import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
 import { createRequire } from 'module';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { dirname, resolve } from 'path';
 
 // tsx re-exports createRequire-based resolution for TS files, but with ESM
 // top-level await we can use dynamic import for the TS modules.
+// Note: Node ESM loader on Windows rejects bare `c:\...` paths — must be a
+// proper `file://` URL via pathToFileURL.
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 
 const { LevelBookService } = await import(
-  resolve(repoRoot, 'apps/api/src/modules/signal-generator/services/level-book.service.ts')
+  pathToFileURL(
+    resolve(repoRoot, 'apps/api/src/modules/signal-generator/services/level-book.service.ts'),
+  ).href
 );
 const { LevelsContextStrategy } = await import(
-  resolve(repoRoot, 'apps/api/src/modules/signal-generator/strategies/levels-context.strategy.ts')
+  pathToFileURL(
+    resolve(repoRoot, 'apps/api/src/modules/signal-generator/strategies/levels-context.strategy.ts'),
+  ).href
 );
 
 // ANSI helpers
@@ -91,6 +97,10 @@ async function main() {
   let sessionsProcessed = 0;
   let sessionsSkipped = 0;
 
+  // Diagnostic counters — show which gate is rejecting most candidates
+  const diag = {};
+  const bump = (k) => { diag[k] = (diag[k] ?? 0) + 1; };
+
   for (let i = 14; i < dailyCandles.length; i++) {
     const dayCandle = dailyCandles[i];
     // Session date: align to market open (09:15 IST = 03:45 UTC)
@@ -154,6 +164,10 @@ async function main() {
 
     // Replay bars 4 onward through the strategy
     const strategy = new LevelsContextStrategy();
+    // Default mode = strict (only A/B grades). RELAX_GRADE_C=1 includes C.
+    if (process.env.RELAX_GRADE_C === '1') {
+      strategy.setParameters({ includeGradeC: true });
+    }
     let openTrade = null;
 
     for (let j = 4; j < fiveMin.length; j++) {
@@ -193,8 +207,15 @@ async function main() {
       }));
 
       if (!openTrade) {
-        // Look for entry signal
-        const out = strategy.analyze({ candles: candleWindow, levelBook: lb, nowIst });
+        // Look for entry signal — pass replay clock so the staleness gate
+        // measures against historical bar time, not real wall-clock.
+        const out = strategy.analyze({
+          candles: candleWindow,
+          levelBook: lb,
+          nowIst,
+          nowMs: bar.timestamp.getTime(),
+          debug: (event) => bump(event),
+        });
         if (out) {
           // Apply entry slippage
           const slip = lb.atr14 * COSTS.slippageAtrFraction * (out.side === 'BUY' ? 1 : -1);
@@ -269,6 +290,11 @@ async function main() {
   }
 
   console.log(`${c.cyan}▶${c.reset} Sessions processed: ${sessionsProcessed}, skipped (thin data): ${sessionsSkipped}`);
+
+  console.log(`\n${c.bold}Gate diagnostics${c.reset}`);
+  for (const [k, v] of Object.entries(diag).sort((a, b) => b[1] - a[1])) {
+    console.log(`  ${k.padEnd(28)}: ${v}`);
+  }
 
   // ─── Aggregate ───────────────────────────────────────────────────────────
   const total = trades.length;

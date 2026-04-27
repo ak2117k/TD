@@ -34,6 +34,16 @@ export interface AnalyzeInput {
   levelBook: LevelBook;
   /** "HH:MM" 24h IST clock for the current scan tick. */
   nowIst: string;
+  /**
+   * Reference time in epoch-ms used by the staleness gate. Live mode omits
+   * this — the strategy falls back to Date.now(). Backtest replays must
+   * pass the replay-clock here (e.g. the bar's timestamp), otherwise the
+   * staleness check would compare wall-clock against historical ticks and
+   * bail every time.
+   */
+  nowMs?: number;
+  /** Optional gate-trace callback for backtest harnesses. */
+  debug?: (event: string, detail?: Record<string, unknown>) => void;
 }
 
 interface CandidateLevel {
@@ -52,6 +62,10 @@ export class LevelsContextStrategy implements TradingStrategy {
     rrFloor: RR_FLOOR_STRICT,
     distanceGateAtr: DISTANCE_GATE_ATR,
     volumeRatioMin: VOLUME_RATIO_MIN,
+    // Live default is strict — only A/B grades go to the auto-trader.
+    // Backtest harnesses can flip this to true to surface the ceiling
+    // (what the strategy *would* trade if Grade C were allowed).
+    includeGradeC: false,
   };
 
   // The TradingStrategy interface forces `analyze(MarketSnapshot)`. The
@@ -60,24 +74,30 @@ export class LevelsContextStrategy implements TradingStrategy {
   analyze(data: MarketSnapshot | AnalyzeInput): SignalOutput | null {
     const input: AnalyzeInput | null = this.unwrap(data);
     if (!input) return null;
-    const { candles, levelBook, nowIst } = input;
+    const { candles, levelBook, nowIst, nowMs, debug } = input;
 
-    if (candles.length < 25) return null;
-    if (this.isStale(levelBook)) return null;
-    if (!this.inTradingWindow(nowIst)) return null;
+    if (candles.length < 25) { debug?.('reject:not-enough-candles'); return null; }
+    if (this.isStale(levelBook, nowMs ?? Date.now())) { debug?.('reject:stale'); return null; }
+    if (!this.inTradingWindow(nowIst)) { debug?.('reject:outside-window', { nowIst }); return null; }
 
     const last = candles[candles.length - 1];
     const vma20 = this.vma(candles.slice(-21, -1)); // 20 prior bars
     const volumeRatio = vma20 > 0 ? last.volume / vma20 : 0;
+    debug?.('in-window', { atr14: levelBook.atr14, volumeRatio, spot: levelBook.spot });
 
     const candidates = this.collectLevels(levelBook);
     for (const lvl of candidates) {
       const dist = Math.abs(levelBook.spot - lvl.value);
-      if (dist > DISTANCE_GATE_ATR * levelBook.atr14) continue;
+      if (dist > DISTANCE_GATE_ATR * levelBook.atr14) {
+        debug?.('reject:distance', { type: lvl.type, value: lvl.value, dist, gate: DISTANCE_GATE_ATR * levelBook.atr14 });
+        continue;
+      }
+      debug?.('pass:distance', { type: lvl.type, value: lvl.value });
 
       const reversal = this.detectReversal(last, lvl, levelBook.atr14);
       const breakout = !reversal && this.detectBreakout(last, lvl, levelBook.atr14, volumeRatio, levelBook.spot);
-      if (!breakout && !reversal) continue;
+      if (!breakout && !reversal) { debug?.('reject:confirmation', { type: lvl.type, volumeRatio }); continue; }
+      debug?.('pass:confirmation', { type: lvl.type, kind: breakout ? 'BREAKOUT' : 'REVERSAL' });
 
       const setupType: SetupType = breakout ? 'BREAKOUT' : 'REVERSAL';
       const isLong = this.directionFromSetup(setupType, last, lvl.value);
@@ -90,13 +110,18 @@ export class LevelsContextStrategy implements TradingStrategy {
       const rr =
         Math.abs(slTarget.target - slTarget.entry) /
         Math.max(Math.abs(slTarget.entry - slTarget.stoploss), 1e-6);
-      if (rr < (this.params.rrFloor as number)) continue;
+      if (rr < (this.params.rrFloor as number)) { debug?.('reject:rr', { rr }); continue; }
+      debug?.('pass:rr', { rr });
 
       const grade = this.gradeSetup({
         candidates, level: lvl, atr: levelBook.atr14,
         volumeRatio, nowIst,
       });
-      if (grade === 'C') continue; // C-grade filtered out at strict threshold
+      if (grade === 'C' && !this.params.includeGradeC) {
+        debug?.('reject:grade-c', { volumeRatio });
+        continue;
+      }
+      debug?.('pass:grade', { grade });
 
       const window: TimeOfDayWindow =
         this.between(nowIst, MORNING_START, MORNING_END)
@@ -176,8 +201,8 @@ export class LevelsContextStrategy implements TradingStrategy {
     return { candles: snapshot.candles, levelBook: meta.levelBook, nowIst: meta.nowIst };
   }
 
-  private isStale(book: LevelBook): boolean {
-    return Date.now() - book.lastTickAt.getTime() > STALE_TICK_MS;
+  private isStale(book: LevelBook, nowMs: number): boolean {
+    return nowMs - book.lastTickAt.getTime() > STALE_TICK_MS;
   }
 
   private inTradingWindow(nowIst: string): boolean {
