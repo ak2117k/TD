@@ -108,14 +108,31 @@ export function useChartData(): UseChartDataReturn {
         return true;
       });
 
-      setCandles(deduped);
-      candlesRef.current = deduped;
+      // Drop "ghost" candles that have no real range AND no body movement.
+      // Lightweight-charts uses a continuous time axis, so without this the
+      // overnight/weekend stretches that the aggregator pads with last-known
+      // price render as horizontal tick marks between trading sessions.
+      // We also keep zero-volume candles when they have a real range — index
+      // candles (e.g. NIFTY) often have volume=0 by design.
+      const meaningful = deduped.filter((c) => {
+        const noRange = c.high === c.low;
+        const noBody = c.open === c.close;
+        if (noRange && noBody) return false;
+        // Sanity guard: drop any candle with zero/negative prices (occasional
+        // bad-data artifact from the aggregator; would render at the bottom
+        // of the chart and skew the price scale).
+        if (c.open <= 0 || c.close <= 0 || c.high <= 0 || c.low <= 0) return false;
+        return true;
+      });
 
-      if (deduped.length > 0) {
-        const last = deduped[deduped.length - 1];
+      setCandles(meaningful);
+      candlesRef.current = meaningful;
+
+      if (meaningful.length > 0) {
+        const last = meaningful[meaningful.length - 1];
         setCurrentPrice(last.close);
-        if (deduped.length > 1) {
-          const prev = deduped[0];
+        if (meaningful.length > 1) {
+          const prev = meaningful[0];
           setPriceChange(last.close - prev.open);
           setPriceChangePercent(((last.close - prev.open) / prev.open) * 100);
         }
