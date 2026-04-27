@@ -25,6 +25,7 @@
     "db:seed": "cd apps/api && npx prisma db seed",
     "db:studio": "cd apps/api && npx prisma studio",
     "db:generate": "cd apps/api && npx prisma generate",
+    "verify:m5": "node scripts/verify-m5.mjs",
     "clean": "turbo run clean && rm -rf node_modules"
   },
   "devDependencies": {
