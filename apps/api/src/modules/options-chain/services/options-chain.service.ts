@@ -1203,6 +1203,17 @@ export class OptionsChainService {
 
   /**
    * Map a single contract from optionGreek API response to our OptionData format.
+   *
+   * Field names actually returned by Angel One's optionGreek payload (per
+   * runtime sampling): name, expiry, strikePrice, optionType, delta, gamma,
+   * theta, vega, impliedVolatility, tradeVolume. NOTE the absences:
+   *   - no ltp / lastPrice    → we compute theoretical LTP from BS below
+   *   - no openInterest / oi  → optionGreek genuinely does not return OI;
+   *                             that's a separate paid Angel One product.
+   *                             Leave oi=0 and surface the gap to the user
+   *                             rather than fake it.
+   *   - volume key is `tradeVolume`, not `totalTradedVolume` — the older
+   *     fallback chain was missing this and silently zeroing volume.
    */
   private mapOptionGreekData(
     contract: any,
@@ -1211,11 +1222,18 @@ export class OptionsChainService {
     timeToExpiry: number,
     optionType: 'CE' | 'PE',
   ): OptionData {
-    const ltp = Number(contract.ltp ?? contract.lastPrice ?? 0);
+    const ltpRaw = Number(contract.ltp ?? contract.lastPrice ?? 0);
     const oi = Number(contract.openInterest ?? contract.opnInterest ?? contract.oi ?? 0);
     const oiChange = Number(contract.oiChange ?? contract.changeinOpenInterest ?? 0);
-    const volume = Number(contract.totalTradedVolume ?? contract.volume ?? 0);
-    const iv = Number(contract.impliedVolatility ?? contract.iv ?? 0);
+    // `tradeVolume` is the optionGreek-native key; the older variants are
+    // kept for forward-compat in case Angel One ever renames.
+    const volume = Number(
+      contract.tradeVolume ?? contract.totalTradedVolume ?? contract.volume ?? 0,
+    );
+    // optionGreek returns IV as a percentage (e.g. 33.36), not a decimal.
+    // Greeks calculator expects decimal (0.3336) for theoretical-price math.
+    const ivPercent = Number(contract.impliedVolatility ?? contract.iv ?? 0);
+    const ivDecimal = ivPercent > 1 ? ivPercent / 100 : ivPercent;
     const delta = Number(contract.delta ?? 0);
     const gamma = Number(contract.gamma ?? 0);
     const theta = Number(contract.theta ?? 0);
@@ -1223,9 +1241,41 @@ export class OptionsChainService {
     const bidPrice = Number(contract.bidprice ?? contract.bidPrice ?? 0);
     const askPrice = Number(contract.askprice ?? contract.askPrice ?? 0);
 
-    // If optionGreek provides Greeks directly, use them; otherwise compute
-    if (iv > 0 || delta !== 0) {
-      return { ltp, oi, oiChange, volume, iv, delta, gamma, theta, vega, bidPrice, askPrice };
+    // If we have Greeks but no LTP (the common optionGreek case), compute a
+    // theoretical LTP from Black-Scholes using the broker's IV. This gives
+    // the user a usable price column even when Angel One's quote API can't
+    // be hit (entitlement limits / 403s on indices). Mid-of-bid-ask is
+    // preferred when available.
+    let ltp = ltpRaw;
+    if (ltp <= 0 && bidPrice > 0 && askPrice > 0) {
+      ltp = (bidPrice + askPrice) / 2;
+    }
+    if (ltp <= 0 && ivDecimal > 0 && spotPrice > 0 && timeToExpiry > 0) {
+      ltp = this.greeksCalculator.blackScholesPrice(
+        spotPrice,
+        strike,
+        timeToExpiry,
+        DEFAULT_RISK_FREE_RATE,
+        ivDecimal,
+        optionType,
+      );
+    }
+
+    // If optionGreek provides Greeks directly, use them — otherwise compute.
+    if (ivPercent > 0 || delta !== 0) {
+      return {
+        ltp,
+        oi,
+        oiChange,
+        volume,
+        iv: ivPercent,
+        delta,
+        gamma,
+        theta,
+        vega,
+        bidPrice,
+        askPrice,
+      };
     }
 
     return this.computeGreeksAndIV(
