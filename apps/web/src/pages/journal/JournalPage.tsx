@@ -120,18 +120,22 @@ export default function JournalPage() {
       'Strategy', 'Type', 'Status', 'Duration',
       'VIX', 'Regime', 'PCR', 'Tags', 'Why', 'ExitReason', 'ExitNotes',
     ];
+    // Every nullable numeric needs `?? ''` so it serialises to an empty cell
+    // instead of the string 'null' (which is what String(null) produces).
+    // Open trades have entryPrice/pnl/pnlPercent set but quantity is also
+    // typed as nullable in the shared Trade — be safe across the board.
     const rows = trades.map((t) => [
       formatDate(t.createdAt),
-      t.symbol,
-      t.side,
-      t.entryPrice,
+      t.symbol ?? '',
+      t.side ?? '',
+      t.entryPrice ?? '',
       t.exitPrice ?? '',
-      t.quantity,
-      t.pnl,
-      t.pnlPercent,
-      t.strategy,
+      t.quantity ?? '',
+      t.pnl ?? '',
+      t.pnlPercent ?? '',
+      t.strategy ?? '',
       t.isPaper ? 'Paper' : 'Live',
-      t.status,
+      t.status ?? '',
       computeDuration(t.createdAt, t.closedAt),
       t.vixAtEntry ?? '',
       t.vixRegimeAtEntry ?? '',

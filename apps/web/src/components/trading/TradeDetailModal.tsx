@@ -266,10 +266,16 @@ export default function TradeDetailModal({
           </div>
         </div>
 
-        {/* M5: Market context at entry */}
+        {/* M5: Market context at entry. Show the block when ANY context
+            field is populated — the trader's reason + tag chips are valuable
+            on their own even if VIX / PCR fetches happened to fail at entry. */}
         {(trade.vixAtEntry != null ||
           trade.pcrAtEntry != null ||
-          trade.spotAtEntry != null) && (
+          trade.spotAtEntry != null ||
+          trade.adRatioAtEntry != null ||
+          trade.maxPainAtEntry != null ||
+          (trade.entryReason && trade.entryReason.trim().length > 0) ||
+          (trade.entryTags && trade.entryTags.length > 0)) && (
           <div className="rounded-lg border border-gray-700/60 bg-gray-800/40 p-3">
             <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wide mb-2">
               Market Context @ Entry

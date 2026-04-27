@@ -44,8 +44,11 @@ export function useTradeJournal() {
         page,
         limit: PAGE_SIZE,
       };
-      if (filters.dateFrom) params.dateFrom = filters.dateFrom;
-      if (filters.dateTo) params.dateTo = filters.dateTo;
+      // Backend JournalFilterDto extends DateRangeDto which expects `from`
+      // and `to` (NOT `dateFrom` / `dateTo`). The param-name mismatch made
+      // the date filter silently dead — sending the right keys now.
+      if (filters.dateFrom) params.from = filters.dateFrom;
+      if (filters.dateTo) params.to = filters.dateTo;
       if (filters.status !== 'all') params.status = filters.status;
       if (filters.strategy !== 'all') params.strategy = filters.strategy;
       if (filters.segment !== 'all') params.segment = filters.segment;
@@ -59,22 +62,34 @@ export function useTradeJournal() {
       }
 
       const { data } = await api.get('/portfolio/journal', { params });
+      // Defensive unwrap: backend returns { trades: [...], total: N }, but
+      // older shapes used { data: [...] } and a couple of legacy paths
+      // returned the bare array. The Array.isArray guard surfaces shape
+      // drift instead of silently calling .map on an object.
+      const rawCandidate = data?.trades ?? data?.data ?? data;
+      if (!Array.isArray(rawCandidate)) {
+        console.warn(
+          'useTradeJournal: unexpected response shape',
+          { keys: data && typeof data === 'object' ? Object.keys(data) : typeof data },
+        );
+        setTrades([]);
+        setTotalCount(0);
+        return;
+      }
       // Backend trade rows use `isPaperTrade` but the frontend Trade type
-      // and every consumer (TradeCard, JournalPage, TradeDetailModal) reads
-      // `isPaper`. Normalize at the fetch site so the rest of the page
+      // reads `isPaper`. Same for symbol/exchange (backend nests them on
+      // `.instrument`). Normalize at the fetch site so the rest of the page
       // never has to know about the field-name divergence.
-      const raw: any[] = data.trades ?? data.data ?? [];
-      setTrades(
-        raw.map((t) => ({
-          ...t,
-          isPaper: t.isPaper ?? t.isPaperTrade ?? false,
-          symbol: t.symbol ?? t.instrument?.symbol ?? '',
-          exchange: t.exchange ?? t.instrument?.exchange ?? '',
-        })),
-      );
-      setTotalCount(data.totalCount ?? data.total ?? 0);
-    } catch {
-      console.warn('Failed to fetch trade journal');
+      const normalized: Trade[] = rawCandidate.map((t: any) => ({
+        ...t,
+        isPaper: t.isPaper ?? t.isPaperTrade ?? false,
+        symbol: t.symbol ?? t.instrument?.symbol ?? '',
+        exchange: t.exchange ?? t.instrument?.exchange ?? '',
+      }));
+      setTrades(normalized);
+      setTotalCount(data?.totalCount ?? data?.total ?? normalized.length);
+    } catch (err) {
+      console.warn('useTradeJournal: fetch failed', err);
       setTrades([]);
       setTotalCount(0);
     } finally {
