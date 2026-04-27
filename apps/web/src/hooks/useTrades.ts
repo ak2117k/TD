@@ -40,12 +40,27 @@ export function useTrades() {
     wsService.connect();
 
     const unsubTrade = wsService.subscribe('trade-update', (data) => {
-      const event = data as TradeEvent;
-      addTradeEvent(event);
+      // Backend's TradeGateway emits raw Trade rows (Prisma model with a
+      // `status` field). Some auto-trade flows wrap them as TradeEvent
+      // (with an `eventType` field). Handle both shapes — refetch open
+      // trades on any close-equivalent state. This is what closes the
+      // "I closed positions but UI still shows them" loop, since the
+      // close-all path emits raw Trade rows with status='CLOSED' and
+      // the previous handler only refreshed on TradeEvent.eventType.
+      const payload = data as Partial<TradeEvent> & { status?: string };
+      if (payload.eventType) {
+        addTradeEvent(payload as TradeEvent);
+      }
 
-      // If a trade was closed, refresh open trades
-      if (event.eventType === 'CLOSED' || event.eventType === 'SL_HIT' || event.eventType === 'TARGET_HIT') {
+      const closedStatuses = ['CLOSED', 'CANCELLED', 'REJECTED'];
+      const closedEventTypes = ['CLOSED', 'SL_HIT', 'TARGET_HIT', 'CANCELLED'];
+      const isClose =
+        (payload.status && closedStatuses.includes(payload.status)) ||
+        (payload.eventType && closedEventTypes.includes(payload.eventType));
+
+      if (isClose) {
         fetchOpenTrades();
+        fetchPositions();
       }
     });
 
