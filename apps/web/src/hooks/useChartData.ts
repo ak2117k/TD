@@ -130,6 +130,17 @@ export function useChartData(): UseChartDataReturn {
 
   // Fetch historical candles
   const fetchCandles = useCallback(async () => {
+    // Reset state synchronously BEFORE awaiting the API. The previous
+    // symbol's candles must not be visible — and crucially, must not be
+    // mutated by incoming live ticks — while this fetch is in flight.
+    // Without this, switching from a high-priced symbol (e.g. NIFTY ~24k)
+    // to a low-priced one (CRUDEOIL ~9k) produces a hybrid candle:
+    // NIFTY's open/high preserved, CRUDEOIL's tick extending close/low.
+    setCandles([]);
+    candlesRef.current = [];
+    lastRealBucketRef.current = 0;
+    setRealTimeMap(new Map());
+
     setIsLoading(true);
     setError(null);
     try {
