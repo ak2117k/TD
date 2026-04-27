@@ -26,13 +26,15 @@
     "db:studio": "cd apps/api && npx prisma studio",
     "db:generate": "cd apps/api && npx prisma generate",
     "verify:m5": "node scripts/verify-m5.mjs",
+    "backtest:levels": "tsx scripts/backtest-levels-context.mjs",
     "clean": "turbo run clean && rm -rf node_modules"
   },
   "devDependencies": {
     "turbo": "^2.4.0",
     "prettier": "^3.4.0",
     "husky": "^9.1.0",
-    "lint-staged": "^15.4.0"
+    "lint-staged": "^15.4.0",
+    "tsx": "^4.19.0"
   },
   "lint-staged": {
     "*.{ts,tsx,js,jsx}": [
