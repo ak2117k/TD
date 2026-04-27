@@ -50,15 +50,23 @@ export default function ExitTradeModal({
       toast.success('Trade closed');
       onClosed?.();
       onClose();
-    } catch {
+    } catch (err) {
+      console.error('ExitTradeModal: close failed', err);
       toast.error('Failed to close trade');
     } finally {
       setIsSubmitting(false);
     }
   }, [tradeId, exitReasonTag, exitNotes, onClose, onClosed]);
 
+  // M5: prevent ESC / backdrop from dismissing the modal mid-POST — the
+  // success toast would otherwise fire on an unmounted component.
+  const handleClose = useCallback(() => {
+    if (isSubmitting) return;
+    onClose();
+  }, [isSubmitting, onClose]);
+
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Close Trade" size="md">
+    <Modal isOpen={isOpen} onClose={handleClose} title="Close Trade" size="md">
       <div className="space-y-4">
         <p className="text-xs text-gray-400">
           What actually happened? This is the most important field for journal

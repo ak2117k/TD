@@ -5,6 +5,7 @@ import type { Column } from '@/components/common';
 import TradeFilters from '@/components/trading/TradeFilters';
 import TradeStats from '@/components/trading/TradeStats';
 import TradeDetailModal from '@/components/trading/TradeDetailModal';
+import ExitTradeModal from '@/components/trading/ExitTradeModal';
 import StrategyBadge from '@/components/trading/StrategyBadge';
 import { useTradeJournal } from '@/hooks/useTradeJournal';
 import type { Trade } from '@/types';
@@ -82,6 +83,17 @@ export default function JournalPage() {
 
   const [selectedTrade, setSelectedTrade] = useState<Trade | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
+  // M5: exit-reason picker. Tracked here (not inside TradeDetailModal) so
+  // the two modals never overlap — they're siblings, not nested. When the
+  // user clicks "Close Trade" we close the detail modal and open the exit
+  // modal sequentially with the same trade id.
+  const [exitTradeId, setExitTradeId] = useState<string | null>(null);
+
+  const handleRequestExit = useCallback(() => {
+    if (!selectedTrade) return;
+    setExitTradeId(selectedTrade.id);
+    setModalOpen(false);
+  }, [selectedTrade]);
 
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
 
@@ -505,6 +517,18 @@ export default function JournalPage() {
         isOpen={modalOpen}
         onClose={() => setModalOpen(false)}
         onTradeUpdated={refetch}
+        onRequestExit={handleRequestExit}
+      />
+
+      {/* M5 Exit-reason picker (sibling, not nested — see TradeDetailModal note). */}
+      <ExitTradeModal
+        tradeId={exitTradeId}
+        isOpen={exitTradeId !== null}
+        onClose={() => setExitTradeId(null)}
+        onClosed={() => {
+          refetch();
+          setExitTradeId(null);
+        }}
       />
     </div>
   );

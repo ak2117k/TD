@@ -6,13 +6,17 @@ import { formatINR } from '@td/shared';
 import type { Trade } from '@/types';
 import api from '@/services/api';
 import toast from 'react-hot-toast';
-import ExitTradeModal from './ExitTradeModal';
 
 interface TradeDetailModalProps {
   trade: Trade | null;
   isOpen: boolean;
   onClose: () => void;
   onTradeUpdated?: () => void;
+  // M5: parent (JournalPage) handles the structured exit-reason picker.
+  // Nesting ExitTradeModal inside this Modal caused both Modal effects
+  // to fight over the body-scroll lock + ESC handler, so the picker
+  // is rendered as a sibling at the JournalPage level instead.
+  onRequestExit?: () => void;
 }
 
 function formatDateTime(d: Date | string | undefined): string {
@@ -81,14 +85,11 @@ export default function TradeDetailModal({
   trade,
   isOpen,
   onClose,
-  onTradeUpdated,
+  onTradeUpdated: _onTradeUpdated,
+  onRequestExit,
 }: TradeDetailModalProps) {
   const [notes, setNotes] = useState('');
   const [isSavingNotes, setIsSavingNotes] = useState(false);
-  // M5: the close flow now goes through ExitTradeModal so the trader is
-  // forced to pick a structured exitReasonTag. We just track the open
-  // state of that nested modal here.
-  const [exitModalOpen, setExitModalOpen] = useState(false);
 
   const handleSaveNotes = useCallback(async () => {
     if (!trade) return;
@@ -374,26 +375,15 @@ export default function TradeDetailModal({
         {isOpen_ && (
           <div className="flex justify-end pt-2 border-t border-gray-700/60">
             <button
-              onClick={() => setExitModalOpen(true)}
-              className="rounded-md bg-red-600 px-4 py-2 text-xs font-medium text-white hover:bg-red-500 transition-colors"
+              onClick={() => onRequestExit?.()}
+              disabled={!onRequestExit}
+              className="rounded-md bg-red-600 px-4 py-2 text-xs font-medium text-white hover:bg-red-500 transition-colors disabled:opacity-50"
             >
               Close Trade
             </button>
           </div>
         )}
       </div>
-
-      {/* M5: nested modal collects structured exit reason. onClosed
-          refreshes the parent list and dismisses this detail modal. */}
-      <ExitTradeModal
-        tradeId={trade.id}
-        isOpen={exitModalOpen}
-        onClose={() => setExitModalOpen(false)}
-        onClosed={() => {
-          onTradeUpdated?.();
-          onClose();
-        }}
-      />
     </Modal>
   );
 }

@@ -63,7 +63,9 @@ export interface Trade extends SharedTrade {
 }
 
 // M5: Tag chip options shown on ExecuteTradeModal — the trader picks zero
-// or more of these to characterise *why* they entered the trade.
+// or more of these to characterise *why* they entered the trade. The
+// free-text "Why this trade?" textarea handles anything not covered by
+// these chips, so a "Custom" option would just duplicate that surface.
 export const ENTRY_TAG_OPTIONS = [
   { value: 'OI_BUILDUP', label: 'OI buildup at S/R' },
   { value: 'VWAP_RECLAIM', label: 'VWAP reclaim' },
@@ -73,7 +75,6 @@ export const ENTRY_TAG_OPTIONS = [
   { value: 'EXPIRY_PIN', label: 'Expiry pin play' },
   { value: 'VOL_CRUSH', label: 'Volatility crush' },
   { value: 'NEWS_DRIVEN', label: 'News-driven' },
-  { value: 'CUSTOM', label: 'Custom' },
 ] as const;
 
 // M5: Exit-reason picker options shown on ExitTradeModal. Values mirror
