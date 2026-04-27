@@ -52,8 +52,16 @@ export default function ChartsPage() {
     }
   }, [searchParams, setSymbol]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const { candles, oiData, isLoading, error, currentPrice, priceChange, priceChangePercent } =
-    useChartData();
+  const {
+    candles,
+    oiData,
+    isLoading,
+    error,
+    currentPrice,
+    priceChange,
+    priceChangePercent,
+    realTimeMap,
+  } = useChartData();
 
   const handleCrosshairMove = useCallback((params: unknown) => {
     const p = params as { seriesData?: Map<unknown, unknown> };
@@ -173,6 +181,7 @@ export default function ChartsPage() {
             candles={candles}
             onCrosshairMove={handleCrosshairMove}
             showVolume={indicators.volume}
+            realTimeMap={realTimeMap}
           />
 
           {/* OI Overlay (renders onto the chart, no DOM) */}

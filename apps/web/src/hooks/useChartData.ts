@@ -26,6 +26,49 @@ interface UseChartDataReturn {
   currentPrice: number | null;
   priceChange: number | null;
   priceChangePercent: number | null;
+  // Maps compressed candle times (what's actually plotted) back to the real
+  // unix timestamps. Used by CandlestickChart to format axis labels and
+  // crosshair tooltips so they show actual market times even though the
+  // chart's time axis is gap-collapsed for visual continuity.
+  realTimeMap: Map<number, number>;
+}
+
+/**
+ * Walk the time-sorted candle list and collapse any inter-candle gap that
+ * exceeds 2× the timeframe (i.e. anything bigger than a normal "next bar")
+ * down to a single timeframe. Result: overnight + weekend + holiday gaps
+ * become one-bar visual breaks instead of huge empty stretches that make
+ * intraday charts look broken.
+ *
+ * Returns the remapped candles plus a Map from compressed time → real time
+ * so the chart can label axes/crosshairs with the actual market time.
+ */
+function compressTimes<T extends { time: number }>(
+  items: T[],
+  tfSec: number,
+): { compressed: T[]; realByCompressed: Map<number, number> } {
+  const realByCompressed = new Map<number, number>();
+  if (items.length === 0) return { compressed: [], realByCompressed };
+
+  const compressed: T[] = [];
+  let offset = 0;
+  let prevReal = items[0].time;
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (i > 0) {
+      const gap = item.time - prevReal;
+      if (gap > tfSec * 2) {
+        // Collapse the oversized gap down to one timeframe.
+        offset += gap - tfSec;
+      }
+    }
+    prevReal = item.time;
+    const compressedTime = item.time - offset;
+    compressed.push({ ...item, time: compressedTime });
+    realByCompressed.set(compressedTime, item.time);
+  }
+  return { compressed, realByCompressed };
 }
 
 function getTimeframeDurationMs(timeframe: string): number {
@@ -80,6 +123,10 @@ export function useChartData(): UseChartDataReturn {
   const [priceChangePercent, setPriceChangePercent] = useState<number | null>(null);
   const candlesRef = useRef<ChartCandle[]>([]);
   const timeframeMsRef = useRef(getTimeframeDurationMs(timeframe));
+  const [realTimeMap, setRealTimeMap] = useState<Map<number, number>>(new Map());
+  // Live-update path needs to know the real-time bucket of the most-recent
+  // bar so a new tick can decide "extend last bar" vs "append a new one".
+  const lastRealBucketRef = useRef<number>(0);
 
   // Fetch historical candles
   const fetchCandles = useCallback(async () => {
@@ -109,9 +156,6 @@ export function useChartData(): UseChartDataReturn {
       });
 
       // Drop "ghost" candles that have no real range AND no body movement.
-      // Lightweight-charts uses a continuous time axis, so without this the
-      // overnight/weekend stretches that the aggregator pads with last-known
-      // price render as horizontal tick marks between trading sessions.
       // We also keep zero-volume candles when they have a real range — index
       // candles (e.g. NIFTY) often have volume=0 by design.
       const meaningful = deduped.filter((c) => {
@@ -119,14 +163,27 @@ export function useChartData(): UseChartDataReturn {
         const noBody = c.open === c.close;
         if (noRange && noBody) return false;
         // Sanity guard: drop any candle with zero/negative prices (occasional
-        // bad-data artifact from the aggregator; would render at the bottom
-        // of the chart and skew the price scale).
+        // bad-data artifact; would skew the price scale).
         if (c.open <= 0 || c.close <= 0 || c.high <= 0 || c.low <= 0) return false;
         return true;
       });
 
-      setCandles(meaningful);
-      candlesRef.current = meaningful;
+      // Compress overnight/weekend gaps so candles render contiguously.
+      const tfSec = timeframeMsRef.current / 1000;
+      const { compressed, realByCompressed } = compressTimes(meaningful, tfSec);
+
+      setCandles(compressed);
+      candlesRef.current = compressed;
+      setRealTimeMap(realByCompressed);
+
+      // Track the most-recent bar's real-time bucket so the WebSocket tick
+      // handler can decide whether a new tick extends it or starts a new bar.
+      if (meaningful.length > 0) {
+        const lastReal = meaningful[meaningful.length - 1].time;
+        lastRealBucketRef.current = Math.floor(lastReal / tfSec) * tfSec;
+      } else {
+        lastRealBucketRef.current = 0;
+      }
 
       if (meaningful.length > 0) {
         const last = meaningful[meaningful.length - 1];
@@ -171,12 +228,14 @@ export function useChartData(): UseChartDataReturn {
     fetchOI();
   }, [fetchCandles, fetchOI, timeframe]);
 
-  // Subscribe to WebSocket tick updates for real-time candle building
+  // Subscribe to WebSocket tick updates for real-time candle building.
+  // Live updates have to play nicely with the compressed-time axis: a tick
+  // arriving at real time T either extends the current bar (same real-time
+  // bucket as the last bar's bucket) or starts a new bar appended at
+  // lastCompressedTime + tfSec, regardless of how much real time elapsed.
   useEffect(() => {
     const unsubTick = wsService.subscribe('tick', (data) => {
       const quote = data as Quote;
-      // Filter by token (reliable unique identifier) instead of symbol name
-      // which can vary between data sources (WebSocket vs REST, broker formats)
       if (quote.token !== selectedSymbol.token) return;
 
       const price = quote.ltp;
@@ -189,12 +248,12 @@ export function useChartData(): UseChartDataReturn {
 
         const tickTime = new Date(quote.timestamp).getTime() / 1000;
         const tfSec = timeframeMsRef.current / 1000;
-        const candleTime = Math.floor(tickTime / tfSec) * tfSec;
+        const tickRealBucket = Math.floor(tickTime / tfSec) * tfSec;
 
         const last = prev[prev.length - 1];
 
-        if (last.time === candleTime) {
-          // Update existing candle
+        if (tickRealBucket === lastRealBucketRef.current) {
+          // Same real-time bucket → extend the last bar in place.
           const updated: ChartCandle = {
             ...last,
             high: Math.max(last.high, price),
@@ -205,10 +264,18 @@ export function useChartData(): UseChartDataReturn {
           const next = [...prev.slice(0, -1), updated];
           candlesRef.current = next;
           return next;
-        } else if (candleTime > last.time) {
-          // New candle
+        } else if (tickRealBucket > lastRealBucketRef.current) {
+          // New real-time bucket → append at the next compressed slot
+          // (regardless of whether real time skipped overnight/weekend).
+          const newCompressedTime = last.time + tfSec;
+          setRealTimeMap((m) => {
+            const next = new Map(m);
+            next.set(newCompressedTime, tickRealBucket);
+            return next;
+          });
+          lastRealBucketRef.current = tickRealBucket;
           const newCandle: ChartCandle = {
-            time: candleTime,
+            time: newCompressedTime,
             open: price,
             high: price,
             low: price,
@@ -224,7 +291,10 @@ export function useChartData(): UseChartDataReturn {
       });
     });
 
-    // Subscribe to server-side closed candle events (emitted by CandleAggregator)
+    // Subscribe to server-side closed candle events (emitted by CandleAggregator).
+    // These also need to land on the compressed time axis. We map the real
+    // candle timestamp to its bucket, then either replace (if it matches the
+    // most-recent bar's bucket) or append at the next compressed slot.
     const unsubCandle = wsService.subscribe('candle', (data) => {
       const candle = data as {
         token: string;
@@ -239,29 +309,69 @@ export function useChartData(): UseChartDataReturn {
       if (candle.token !== selectedSymbol.token) return;
       if (candle.timeframe !== timeframe) return;
 
-      const chartCandle: ChartCandle = {
-        time: new Date(candle.timestamp).getTime() / 1000,
-        open: candle.open,
-        high: candle.high,
-        low: candle.low,
-        close: candle.close,
-        volume: candle.volume,
-      };
+      const tfSec = timeframeMsRef.current / 1000;
+      const realBucket = Math.floor(new Date(candle.timestamp).getTime() / 1000 / tfSec) * tfSec;
 
       setCandles((prev) => {
-        // Replace if same timestamp, or append if new
-        const existing = prev.findIndex((c) => c.time === chartCandle.time);
-        if (existing >= 0) {
-          const next = [...prev];
-          next[existing] = chartCandle;
+        if (prev.length === 0) {
+          // First bar — synthesize a starting compressed time.
+          const start = realBucket;
+          const newCandle: ChartCandle = {
+            time: start,
+            open: candle.open,
+            high: candle.high,
+            low: candle.low,
+            close: candle.close,
+            volume: candle.volume,
+          };
+          setRealTimeMap((m) => {
+            const nm = new Map(m);
+            nm.set(start, realBucket);
+            return nm;
+          });
+          lastRealBucketRef.current = realBucket;
+          candlesRef.current = [newCandle];
+          return [newCandle];
+        }
+
+        const last = prev[prev.length - 1];
+
+        if (realBucket === lastRealBucketRef.current) {
+          // Replace last bar (server may emit final values for the still-open bar).
+          const updated: ChartCandle = {
+            time: last.time,
+            open: candle.open,
+            high: candle.high,
+            low: candle.low,
+            close: candle.close,
+            volume: candle.volume,
+          };
+          const next = [...prev.slice(0, -1), updated];
           candlesRef.current = next;
           return next;
         }
-        if (prev.length === 0 || chartCandle.time > prev[prev.length - 1].time) {
-          const next = [...prev, chartCandle];
+
+        if (realBucket > lastRealBucketRef.current) {
+          const newCompressedTime = last.time + tfSec;
+          setRealTimeMap((m) => {
+            const nm = new Map(m);
+            nm.set(newCompressedTime, realBucket);
+            return nm;
+          });
+          lastRealBucketRef.current = realBucket;
+          const newCandle: ChartCandle = {
+            time: newCompressedTime,
+            open: candle.open,
+            high: candle.high,
+            low: candle.low,
+            close: candle.close,
+            volume: candle.volume,
+          };
+          const next = [...prev, newCandle];
           candlesRef.current = next;
           return next;
         }
+
         return prev;
       });
     });
@@ -272,5 +382,14 @@ export function useChartData(): UseChartDataReturn {
     };
   }, [selectedSymbol.symbol, selectedSymbol.token, timeframe]);
 
-  return { candles, oiData, isLoading, error, currentPrice, priceChange, priceChangePercent };
+  return {
+    candles,
+    oiData,
+    isLoading,
+    error,
+    currentPrice,
+    priceChange,
+    priceChangePercent,
+    realTimeMap,
+  };
 }

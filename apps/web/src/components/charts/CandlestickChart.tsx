@@ -32,16 +32,51 @@ interface CandlestickChartProps {
   height?: number;
   onCrosshairMove?: (params: MouseEventParams<Time>) => void;
   showVolume?: boolean;
+  // Maps the compressed time on the chart's axis to the real (unix) time
+  // of the underlying candle. When provided, the time-axis labels and
+  // crosshair tooltips show real market times instead of the synthetic
+  // gap-collapsed timestamps.
+  realTimeMap?: Map<number, number>;
+}
+
+function formatRealTime(realSec: number): string {
+  const d = new Date(realSec * 1000);
+  return d.toLocaleString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function formatRealTimeShort(realSec: number): string {
+  const d = new Date(realSec * 1000);
+  return d.toLocaleTimeString('en-IN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
 }
 
 const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProps>(
-  function CandlestickChart({ candles, width, height, onCrosshairMove, showVolume = true }, ref) {
+  function CandlestickChart(
+    { candles, width, height, onCrosshairMove, showVolume = true, realTimeMap },
+    ref,
+  ) {
     const containerRef = useRef<HTMLDivElement>(null);
     const chartRef = useRef<IChartApi | null>(null);
     const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
     const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
     const prevCandlesLenRef = useRef(0);
     const prevFirstCandleTimeRef = useRef<number | null>(null);
+    // Hold the latest realTimeMap in a ref so chart-level formatters (created
+    // once at mount) can always read the current map without re-creating the
+    // chart on every prop change.
+    const realTimeMapRef = useRef<Map<number, number> | undefined>(realTimeMap);
+    useEffect(() => {
+      realTimeMapRef.current = realTimeMap;
+    }, [realTimeMap]);
 
     useImperativeHandle(ref, () => ({
       get chart() {
@@ -93,6 +128,22 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
           secondsVisible: false,
           rightOffset: 5,
           barSpacing: 8,
+          // Translate the chart's compressed time back to the real market
+          // time when labelling the bottom axis. If no map is provided
+          // (e.g. very early during initial load), fall back to formatting
+          // the raw value so labels never go blank.
+          tickMarkFormatter: (time: Time) => {
+            const t = time as number;
+            const real = realTimeMapRef.current?.get(t) ?? t;
+            return formatRealTimeShort(real);
+          },
+        },
+        localization: {
+          // Same translation for the crosshair tooltip on the time axis.
+          timeFormatter: (time: number) => {
+            const real = realTimeMapRef.current?.get(time) ?? time;
+            return formatRealTime(real);
+          },
         },
         width: width ?? containerRef.current.clientWidth,
         height: height ?? containerRef.current.clientHeight,
