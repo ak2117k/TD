@@ -105,6 +105,7 @@ model Signal {
   reason          String
   marketStatus    String   @default("LIVE")
   isActive        Boolean  @default(true)
+  setupContext    Json?    // levels-context strategy payload (level type, setup type, grade, level book snapshot, etc.) — see SetupContext type
   createdAt       DateTime @default(now())
   expiresAt       DateTime?
 
