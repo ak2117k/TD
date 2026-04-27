@@ -1,0 +1,154 @@
+import { LevelBookService } from './level-book.service';
+
+describe('LevelBookService', () => {
+  let service: LevelBookService;
+
+  beforeEach(() => {
+    service = new LevelBookService();
+  });
+
+  // Helper: build a single daily candle
+  const candle = (ts: string, o: number, h: number, l: number, c: number) => ({
+    timestamp: new Date(ts),
+    open: o, high: h, low: l, close: c, volume: 1000,
+  });
+
+  describe('seedSession', () => {
+    it('seeds PDH/PDL/prevClose from the most recent candle', () => {
+      service.seedSession({
+        token: '99926000',
+        symbol: 'NIFTY',
+        exchange: 'NSE',
+        recentDailyCandles: [
+          candle('2026-04-25', 23900, 24050, 23800, 24020),
+          candle('2026-04-26', 24020, 24180, 24000, 24100),
+        ],
+      });
+      const lb = service.getLevels('99926000')!;
+      expect(lb.pdh).toBe(24180);
+      expect(lb.pdl).toBe(24000);
+      expect(lb.prevClose).toBe(24100);
+    });
+
+    it('computes atr14 from the trailing 14 daily candles (Wilder)', () => {
+      const candles = Array.from({ length: 14 }, (_, i) =>
+        candle(`2026-04-${String(i + 1).padStart(2, '0')}`, 24000, 24100, 23900, 24050),
+      );
+      service.seedSession({
+        token: '99926000', symbol: 'NIFTY', exchange: 'NSE',
+        recentDailyCandles: candles,
+      });
+      const lb = service.getLevels('99926000')!;
+      // All bars have range=200; SMA-of-TR = 200
+      expect(lb.atr14).toBeCloseTo(200, 0);
+    });
+
+    it('initialises VWAP/today H/L to 0 and ORLocked=false', () => {
+      service.seedSession({
+        token: '99926000', symbol: 'NIFTY', exchange: 'NSE',
+        recentDailyCandles: [candle('2026-04-26', 24020, 24180, 24000, 24100)],
+      });
+      const lb = service.getLevels('99926000')!;
+      expect(lb.vwap).toBe(0);
+      expect(lb.todayHigh).toBe(0);
+      expect(lb.todayLow).toBe(0);
+      expect(lb.orh).toBeNull();
+      expect(lb.orl).toBeNull();
+      expect(lb.orLocked).toBe(false);
+    });
+  });
+
+  describe('updateFromTick', () => {
+    beforeEach(() => {
+      service.seedSession({
+        token: '99926000', symbol: 'NIFTY', exchange: 'NSE',
+        recentDailyCandles: [candle('2026-04-26', 24020, 24180, 24000, 24100)],
+      });
+    });
+
+    it('rolls VWAP across multiple ticks (volume-weighted)', () => {
+      service.updateFromTick({ token: '99926000', ltp: 24100, volume: 100, timestamp: new Date() });
+      service.updateFromTick({ token: '99926000', ltp: 24150, volume: 100, timestamp: new Date() });
+      const lb = service.getLevels('99926000')!;
+      // (24100*100 + 24150*100) / 200 = 24125
+      expect(lb.vwap).toBeCloseTo(24125, 1);
+    });
+
+    it('updates spot, todayHigh, todayLow', () => {
+      service.updateFromTick({ token: '99926000', ltp: 24050, volume: 50, timestamp: new Date() });
+      service.updateFromTick({ token: '99926000', ltp: 24200, volume: 50, timestamp: new Date() });
+      service.updateFromTick({ token: '99926000', ltp: 23990, volume: 50, timestamp: new Date() });
+      const lb = service.getLevels('99926000')!;
+      expect(lb.spot).toBe(23990);
+      expect(lb.todayHigh).toBe(24200);
+      expect(lb.todayLow).toBe(23990);
+    });
+
+    it('ignores ticks for tokens not yet seeded', () => {
+      // No throw, no side effects
+      expect(() =>
+        service.updateFromTick({ token: 'unknown', ltp: 100, volume: 1, timestamp: new Date() }),
+      ).not.toThrow();
+      expect(service.getLevels('unknown')).toBeNull();
+    });
+  });
+
+  describe('lockOpeningRange', () => {
+    beforeEach(() => {
+      service.seedSession({
+        token: '99926000', symbol: 'NIFTY', exchange: 'NSE',
+        recentDailyCandles: [candle('2026-04-26', 24020, 24180, 24000, 24100)],
+      });
+    });
+
+    it('locks ORH/ORL from the supplied 15-min candle', () => {
+      service.lockOpeningRange('99926000', { high: 24165, low: 24115 });
+      const lb = service.getLevels('99926000')!;
+      expect(lb.orh).toBe(24165);
+      expect(lb.orl).toBe(24115);
+      expect(lb.orLocked).toBe(true);
+    });
+
+    it('is idempotent — second call does not overwrite', () => {
+      service.lockOpeningRange('99926000', { high: 24165, low: 24115 });
+      service.lockOpeningRange('99926000', { high: 24999, low: 23999 });
+      const lb = service.getLevels('99926000')!;
+      expect(lb.orh).toBe(24165);
+      expect(lb.orl).toBe(24115);
+    });
+  });
+
+  describe('staleness', () => {
+    it('marks level book stale when last tick > 60s old', () => {
+      service.seedSession({
+        token: '99926000', symbol: 'NIFTY', exchange: 'NSE',
+        recentDailyCandles: [candle('2026-04-26', 24020, 24180, 24000, 24100)],
+      });
+      const oldTickTime = new Date(Date.now() - 90_000);
+      service.updateFromTick({ token: '99926000', ltp: 24100, volume: 100, timestamp: oldTickTime });
+      expect(service.isStale('99926000')).toBe(true);
+    });
+
+    it('marks fresh after a recent tick', () => {
+      service.seedSession({
+        token: '99926000', symbol: 'NIFTY', exchange: 'NSE',
+        recentDailyCandles: [candle('2026-04-26', 24020, 24180, 24000, 24100)],
+      });
+      service.updateFromTick({ token: '99926000', ltp: 24100, volume: 100, timestamp: new Date() });
+      expect(service.isStale('99926000')).toBe(false);
+    });
+  });
+
+  describe('roundNumbers', () => {
+    it('returns nearest 50-step round numbers around spot for NIFTY', () => {
+      service.seedSession({
+        token: '99926000', symbol: 'NIFTY', exchange: 'NSE',
+        recentDailyCandles: [candle('2026-04-26', 24020, 24180, 24000, 24100)],
+      });
+      service.updateFromTick({ token: '99926000', ltp: 24100, volume: 1, timestamp: new Date() });
+      const lb = service.getLevels('99926000')!;
+      // Default round-step for NIFTY is 50; expect 24050, 24100, 24150 within ±100 of spot
+      expect(lb.roundNumbers).toEqual(expect.arrayContaining([24050, 24100, 24150]));
+    });
+  });
+});
