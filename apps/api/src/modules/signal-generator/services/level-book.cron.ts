@@ -1,23 +1,28 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { LevelBookService } from './level-book.service';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { TIMEFRAMES } from '@td/shared/constants';
 
-const UNIVERSE: Array<{ token: string; symbol: string; exchange: string }> = [
-  // Indices
+/**
+ * Index tokens are stable (NIFTY = 99926000 forever) so we hardcode them.
+ * MCX commodity tokens roll monthly — leave them token-less and the cron
+ * resolves the current front-month from the DB by (symbol, exchange) at
+ * run time. The roll script keeps that DB row pointing at whatever the
+ * active contract is.
+ */
+const UNIVERSE: Array<{ token?: string; symbol: string; exchange: string }> = [
+  // Indices — stable tokens
   { token: '99926000', symbol: 'NIFTY', exchange: 'NSE' },
   { token: '99926009', symbol: 'BANKNIFTY', exchange: 'NSE' },
   { token: '99926037', symbol: 'FINNIFTY', exchange: 'NSE' },
-  // MCX commodities (top by liquidity)
-  { token: '486502', symbol: 'CRUDEOIL', exchange: 'MCX' },
-  { token: '488791', symbol: 'COPPER', exchange: 'MCX' },
-  // Stocks: keep small in v1; expand once stocks-options decision lands
-  // (Decision Log #9 in spec: cash market or stock-future, not stock options)
+  // MCX commodities — token resolved from DB (front-month rolls monthly)
+  { symbol: 'CRUDEOIL', exchange: 'MCX' },
+  { symbol: 'COPPER', exchange: 'MCX' },
 ];
 
 @Injectable()
-export class LevelBookCron {
+export class LevelBookCron implements OnModuleInit {
   private readonly logger = new Logger(LevelBookCron.name);
 
   constructor(
@@ -25,22 +30,42 @@ export class LevelBookCron {
     private readonly prisma: PrismaService,
   ) {}
 
+  /**
+   * Seed level books at boot. Without this, an API restart between
+   * 09:15 IST cron firings (e.g. mid-session restart) leaves all
+   * universe books empty until the next morning. With it, every
+   * universe symbol has a populated, live-fed book the moment the
+   * service boots — so the /signals/analyze endpoint and the chart
+   * analysis panel work immediately.
+   */
+  async onModuleInit(): Promise<void> {
+    this.logger.log('Boot-seeding level books');
+    await this.seedSession();
+    await this.lockOpeningRange();
+  }
+
   /** 09:15 IST Mon-Fri — seed PDH/PDL/ATR for the day's universe. */
   @Cron('0 15 9 * * 1-5', { timeZone: 'Asia/Kolkata' })
   async seedSession(): Promise<void> {
     this.logger.log('Seeding level books for the session');
     for (const u of UNIVERSE) {
       try {
+        // Resolve token from DB when not hardcoded (MCX commodities roll
+        // monthly; the roll script keeps the DB row's token current).
+        const where = u.token
+          ? { token: u.token, exchange: u.exchange }
+          : { symbol: u.symbol, exchange: u.exchange };
         const inst = await this.prisma.instrument.findFirst({
-          where: { token: u.token, exchange: u.exchange },
-          select: { id: true },
+          where,
+          select: { id: true, token: true },
         });
         if (!inst) {
           this.logger.warn(`No instrument row for ${u.symbol}; skipping`);
           continue;
         }
+        const resolvedToken = inst.token;
         const recent = await this.prisma.candle.findMany({
-          where: { instrumentId: inst.id, timeframe: TIMEFRAMES.ONE_DAY },
+          where: { instrumentId: inst.id, timeframe: TIMEFRAMES.DAILY },
           orderBy: { timestamp: 'desc' },
           take: 16,
         });
@@ -49,7 +74,7 @@ export class LevelBookCron {
           continue;
         }
         this.levelBook.seedSession({
-          token: u.token, symbol: u.symbol, exchange: u.exchange,
+          token: resolvedToken, symbol: u.symbol, exchange: u.exchange,
           recentDailyCandles: recent
             .reverse()
             .map((c) => ({
@@ -58,6 +83,8 @@ export class LevelBookCron {
               volume: Number(c.volume),
             })),
         });
+        this.levelBook.markAsLive(resolvedToken);
+        await this.levelBook.replaySessionToBook(resolvedToken, u.exchange, inst.id);
       } catch (err) {
         this.logger.error(
           `seedSession ${u.symbol} failed: ${err instanceof Error ? err.message : err}`,
@@ -73,11 +100,15 @@ export class LevelBookCron {
     this.logger.log('Locking opening ranges');
     for (const u of UNIVERSE) {
       try {
+        const where = u.token
+          ? { token: u.token, exchange: u.exchange }
+          : { symbol: u.symbol, exchange: u.exchange };
         const inst = await this.prisma.instrument.findFirst({
-          where: { token: u.token, exchange: u.exchange },
-          select: { id: true },
+          where,
+          select: { id: true, token: true },
         });
         if (!inst) continue;
+        const resolvedToken = inst.token;
         // The 09:15-09:30 IST candle is timestamp = 03:45 UTC of today
         const today = new Date();
         today.setUTCHours(3, 45, 0, 0);
@@ -94,7 +125,7 @@ export class LevelBookCron {
           this.logger.warn(`No OR 15m candle for ${u.symbol} yet; skipping`);
           continue;
         }
-        this.levelBook.lockOpeningRange(u.token, {
+        this.levelBook.lockOpeningRange(resolvedToken, {
           high: orCandle.high, low: orCandle.low,
         });
       } catch (err) {

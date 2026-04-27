@@ -22,11 +22,75 @@ interface BookState extends LevelBook {
 export class LevelBookService {
   private readonly logger = new Logger(LevelBookService.name);
   private readonly books = new Map<string, BookState>();
+  /**
+   * Tokens whose books are kept current by the live tick path
+   * (seeded by the cron, then updated on every WS tick via
+   * MarketFeedService.updateFromTick). For these, lazyLoad can return
+   * the cached book without rebuilding from DB — the in-memory book
+   * is fresher than any DB snapshot would be.
+   */
+  private readonly liveBooks = new Set<string>();
 
   constructor(
     private readonly instrumentService?: InstrumentService,
     private readonly marketDataRepository?: MarketDataRepository,
   ) {}
+
+  /** Cron + boot path call this so lazyLoad knows to trust the in-memory book. */
+  markAsLive(token: string): void {
+    this.liveBooks.add(token);
+  }
+
+  /**
+   * Replay the most-recent session's 5m candles into a freshly-seeded
+   * book to populate VWAP / todayHigh / todayLow / OR. Without this, a
+   * book seeded by the cron has correct PDH/PDL/ATR (from daily candles)
+   * but VWAP=0 and todayH/L=0 until the first live tick — which during
+   * overnight is hours away. This routine fills in the gap from DB.
+   *
+   * "Most-recent session" definition: if `now` is past today's open,
+   * use today's session; otherwise (overnight gap) use yesterday's. So
+   * a chart opened at 02:00 IST shows yesterday's session VWAP, and
+   * one opened at 11:00 IST shows today's accumulating session VWAP.
+   */
+  async replaySessionToBook(token: string, exchange: string, instrumentId: string): Promise<void> {
+    if (!this.marketDataRepository) return;
+
+    const now = new Date();
+    const istOffsetMs = 5.5 * 60 * 60 * 1000;
+    const istNow = new Date(now.getTime() + istOffsetMs);
+    const isMcx = exchange === 'MCX';
+    const openH = isMcx ? 9 : 9;
+    const openM = isMcx ? 0 : 15;
+    const todayOpenIst = new Date(Date.UTC(
+      istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate(),
+      openH, openM, 0, 0,
+    ));
+    const todayOpenUtc = new Date(todayOpenIst.getTime() - istOffsetMs);
+    const sessionStart = now.getTime() >= todayOpenUtc.getTime()
+      ? todayOpenUtc
+      : new Date(todayOpenUtc.getTime() - 24 * 3600 * 1000);
+
+    const fiveMinRows = await this.marketDataRepository.getCandles(
+      instrumentId, TIMEFRAMES.FIVE_MIN, sessionStart, now,
+    );
+
+    if (fiveMinRows.length >= 3 && this.books.has(token)) {
+      const orBars = fiveMinRows.slice(0, 3);
+      const orHigh = Math.max(...orBars.map((b) => b.high));
+      const orLow = Math.min(...orBars.map((b) => b.low));
+      this.lockOpeningRange(token, { high: orHigh, low: orLow });
+    }
+
+    for (const bar of fiveMinRows) {
+      this.updateFromTick({
+        token,
+        ltp: bar.close,
+        volume: typeof bar.volume === 'bigint' ? Number(bar.volume) : bar.volume,
+        timestamp: bar.timestamp,
+      });
+    }
+  }
 
   seedSession(input: SeedSessionInput): void {
     const candles = [...input.recentDailyCandles].sort(
@@ -117,6 +181,22 @@ export class LevelBookService {
     symbol: string,
   ): Promise<LevelBook | null> {
     const cached = this.books.get(token);
+
+    // Live-fed books (universe symbols updated by the WS tick path) are
+    // always fresher than any DB rebuild — return them directly without
+    // the LAZY_FRESH_MS staleness check. This makes the chart analysis
+    // reflect tick-by-tick reality during market hours and retains the
+    // in-session VWAP/today's-H-L through overnight (when the lazy-build
+    // path would otherwise rebuild and reset them to 0 because the new
+    // session hasn't started yet).
+    if (cached && this.liveBooks.has(token)) {
+      const { cumPV: _pv, cumV: _v, ...publicBook } = cached;
+      void _pv; void _v;
+      return publicBook;
+    }
+
+    // Non-live (lazy-built) books still use the 5-min TTL — the snapshot
+    // they were built from is only as fresh as the DB at build time.
     if (cached && Date.now() - cached.lastTickAt.getTime() < LAZY_FRESH_MS) {
       const { cumPV: _pv, cumV: _v, ...publicBook } = cached;
       void _pv; void _v;
