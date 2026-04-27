@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, Global } from '@nestjs/common';
 import { BullModule } from '@nestjs/bull';
 import { HttpModule } from '@nestjs/axios';
 import { MarketDataModule } from '../market-data/market-data.module';
@@ -25,6 +25,11 @@ import { AnandSniperV25CombinedStrategy } from './strategies/anand-sniper-v25-co
 import { LevelBookService } from './services/level-book.service';
 import { LevelBookCron } from './services/level-book.cron';
 
+// @Global so LevelBookService is injectable from MarketFeedService
+// (in MarketDataModule) without MarketDataModule needing to import this
+// module — that would be a bootstrap cycle since SignalGeneratorModule
+// already imports MarketDataModule.
+@Global()
 @Module({
   imports: [
     BullModule.registerQueue({ name: 'signal-scan' }),

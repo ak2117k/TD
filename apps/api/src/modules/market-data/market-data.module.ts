@@ -14,7 +14,9 @@ import { AngelOneAdapterService } from './services/angel-one-adapter.service';
 import { YahooFinanceService } from './services/yahoo-finance.service';
 import { MarketContextService } from './services/market-context.service';
 import { OptionsChainModule } from '../options-chain/options-chain.module';
-import { SignalGeneratorModule } from '../signal-generator/signal-generator.module';
+// LevelBookService comes from SignalGeneratorModule which is @Global —
+// no import needed here. Importing the module would create a bootstrap
+// cycle because SignalGeneratorModule already imports MarketDataModule.
 
 @Module({
   imports: [
@@ -25,10 +27,6 @@ import { SignalGeneratorModule } from '../signal-generator/signal-generator.modu
     // MarketDataModule (for MarketFeedService) and we now need
     // OptionsChainService here for MarketContextService.
     forwardRef(() => OptionsChainModule),
-    // forwardRef avoids the circular import: SignalGeneratorModule imports
-    // MarketDataModule (for MarketFeedService) and we need LevelBookService
-    // here so MarketFeedService can push ticks into it.
-    forwardRef(() => SignalGeneratorModule),
   ],
   controllers: [MarketDataController],
   providers: [
