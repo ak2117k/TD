@@ -172,6 +172,14 @@ export function useChartData(): UseChartDataReturn {
       const tfSec = timeframeMsRef.current / 1000;
       const { compressed, realByCompressed } = compressTimes(meaningful, tfSec);
 
+      // Visible signal in devtools console so we can confirm the compression
+      // path is running on a hard refresh — if you don't see this line, the
+      // tab is serving a stale build.
+      // eslint-disable-next-line no-console
+      console.log(
+        `[useChartData] ${selectedSymbol.symbol} ${timeframe}: raw=${rawCandles.length} kept=${meaningful.length} compressed=${compressed.length} realGapsCollapsed=${realByCompressed.size > 0 ? realByCompressed.size - 1 : 0}`,
+      );
+
       setCandles(compressed);
       candlesRef.current = compressed;
       setRealTimeMap(realByCompressed);
