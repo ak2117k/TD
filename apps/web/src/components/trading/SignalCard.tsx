@@ -56,6 +56,12 @@ export default function SignalCard({
     }
   }, [isNew]);
 
+  // Expired signals stay visible (so a trader checking in mid-afternoon
+  // can still see the morning's setups) but get a distinct faded look
+  // and an EXPIRED badge so they're not confused with currently-actionable
+  // signals.
+  const isExpired = !signal.isActive;
+
   return (
     <div
       ref={cardRef}
@@ -64,12 +70,14 @@ export default function SignalCard({
         isBuy
           ? 'border-l-[3px] border-l-emerald-500 border-t-gray-700/60 border-r-gray-700/60 border-b-gray-700/60'
           : 'border-l-[3px] border-l-red-500 border-t-gray-700/60 border-r-gray-700/60 border-b-gray-700/60',
-        // Glow effect for high confidence
-        signal.confidenceScore >= 75 &&
+        // Glow effect for high confidence (active only)
+        !isExpired &&
+          signal.confidenceScore >= 75 &&
           (isBuy
             ? 'shadow-[0_0_15px_-5px_rgba(16,185,129,0.15)]'
             : 'shadow-[0_0_15px_-5px_rgba(239,68,68,0.15)]'),
         isNew && 'ring-1 ring-amber-400/30',
+        isExpired && 'opacity-55 grayscale-[40%]',
         className,
       )}
     >
@@ -82,6 +90,11 @@ export default function SignalCard({
             </span>
             <Badge label={signal.exchange} variant="info" size="sm" />
             <StrategyBadge strategy={signal.strategy} />
+            {isExpired && (
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 bg-gray-700/60 px-1.5 py-0.5 rounded">
+                Expired
+              </span>
+            )}
           </div>
           {/* Side indicator */}
           <div

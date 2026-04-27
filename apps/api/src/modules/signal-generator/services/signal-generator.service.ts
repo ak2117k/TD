@@ -26,8 +26,57 @@ import {
 } from '@td/shared/constants';
 import { Exchange } from '@td/shared/types';
 
-/** Default signal expiry for intraday in minutes. */
-const DEFAULT_EXPIRY_MINUTES = 30;
+/**
+ * Floor on signal lifetime — even a signal created near session close
+ * should stay actionable long enough for a manual trader to react. We
+ * always give the trader at least this much window.
+ */
+const MIN_SIGNAL_TTL_MINUTES = 120;
+
+/**
+ * Hard cap on signal lifetime. If the session-end calculation would
+ * push expiry beyond this, we clamp. Prevents weekend-generated signals
+ * from staying "active" through Monday.
+ */
+const MAX_SIGNAL_TTL_HOURS = 14;
+
+/**
+ * Compute when a signal should expire based on its exchange's session
+ * close. NSE/BSE: 15:30 IST. MCX: 23:30 IST. Signals get a 2h floor
+ * so end-of-session generation still gives the trader a window. If the
+ * session is already closed for today (e.g. scan-now after hours),
+ * defaults to MAX_SIGNAL_TTL_HOURS.
+ */
+function computeExpiry(exchange: string, now: Date = new Date()): Date {
+  const isMcx = exchange === 'MCX';
+  const closeHour = isMcx ? MCX_CLOSE_HOUR : MARKET_CLOSE_HOUR;
+  const closeMinute = isMcx ? MCX_CLOSE_MINUTE : MARKET_CLOSE_MINUTE;
+
+  // IST is UTC+5:30. Build today's session-close in UTC.
+  const istOffsetMs = 5.5 * 60 * 60 * 1000;
+  const istNow = new Date(now.getTime() + istOffsetMs);
+  const istClose = new Date(
+    Date.UTC(
+      istNow.getUTCFullYear(),
+      istNow.getUTCMonth(),
+      istNow.getUTCDate(),
+      closeHour,
+      closeMinute,
+      0,
+      0,
+    ),
+  );
+  const utcClose = new Date(istClose.getTime() - istOffsetMs);
+
+  const floor = new Date(now.getTime() + MIN_SIGNAL_TTL_MINUTES * 60 * 1000);
+  const cap = new Date(now.getTime() + MAX_SIGNAL_TTL_HOURS * 60 * 60 * 1000);
+
+  // Take the later of (session-close, floor) so end-of-day signals get
+  // their 2h window. Then clamp to the hard cap so off-hours signals
+  // (weekends, late-night) don't live forever.
+  const candidate = utcClose.getTime() > floor.getTime() ? utcClose : floor;
+  return candidate.getTime() > cap.getTime() ? cap : candidate;
+}
 
 /** Minimum number of timeframes that must agree for signal confirmation. */
 const MIN_TIMEFRAME_AGREEMENT = 2;
@@ -208,10 +257,13 @@ export class SignalGeneratorService {
   }
 
   /**
-   * Get all currently active (non-expired) signals sorted by confidence.
+   * Get currently active signals, plus optionally recently-expired ones
+   * from the last `recentHours` window. The Signals page uses the recent
+   * window so a trader checking in mid-afternoon can still see the
+   * morning's signals (now expired but still informative).
    */
-  async getActiveSignals() {
-    return this.signalRepository.getActiveSignals();
+  async getActiveSignals(recentHours = 0) {
+    return this.signalRepository.getActiveSignals(recentHours);
   }
 
   /**
@@ -231,20 +283,16 @@ export class SignalGeneratorService {
   }
 
   /**
-   * Cron job to expire old signals.
-   * Runs every 5 minutes during market hours.
+   * Cron job to deactivate signals whose expiresAt has passed.
+   * Fires every 5 minutes between 09:00–23:35 IST (Mon-Fri) so it
+   * covers both NSE close (15:30) and MCX close (23:30). Each signal's
+   * TTL is set at creation time by computeExpiry() — this cron just
+   * sweeps the ones that are past due.
    */
-  @Cron('*/5 9-15 * * 1-5')
+  @Cron('*/5 9-23 * * 1-5', { timeZone: 'Asia/Kolkata' })
   async expireOldSignals(): Promise<void> {
-    if (!this.marketFeedService.isMarketOpen()) {
-      return;
-    }
-
     try {
-      const settings = await this.settingsService.getSettings();
-      const maxAgeMinutes = DEFAULT_EXPIRY_MINUTES;
-
-      const count = await this.signalRepository.deactivateExpiredSignals(maxAgeMinutes);
+      const count = await this.signalRepository.deactivateExpiredSignals();
 
       if (count > 0) {
         this.logger.log(`Expired ${count} old signals`);
@@ -448,9 +496,7 @@ export class SignalGeneratorService {
     const expectedLoss = Math.abs(signal.entryPrice - signal.stoplossPrice);
     const riskRewardRatio = expectedLoss > 0 ? expectedProfit / expectedLoss : 0;
 
-    const expiresAt = new Date(
-      Date.now() + DEFAULT_EXPIRY_MINUTES * 60 * 1000,
-    );
+    const expiresAt = computeExpiry(signal.exchange);
 
     const input: CreateSignalInput = {
       instrumentId,

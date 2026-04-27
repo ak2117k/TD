@@ -65,11 +65,31 @@ export class SignalRepository {
     }
   }
 
-  async getActiveSignals() {
+  /**
+   * Active signals plus, optionally, recently-expired ones. The Signals
+   * page uses `recentHours > 0` so users can see what fired earlier in
+   * the day even after a signal's session-end TTL kicked in. Each row
+   * still carries its true `isActive` flag — the frontend renders
+   * expired ones with a faded badge.
+   */
+  async getActiveSignals(recentHours = 0) {
+    if (recentHours <= 0) {
+      return this.prisma.signal.findMany({
+        where: { isActive: true },
+        include: { instrument: true },
+        orderBy: { confidenceScore: 'desc' },
+      });
+    }
+    const since = new Date(Date.now() - recentHours * 60 * 60 * 1000);
     return this.prisma.signal.findMany({
-      where: { isActive: true },
+      where: {
+        OR: [
+          { isActive: true },
+          { isActive: false, createdAt: { gte: since } },
+        ],
+      },
       include: { instrument: true },
-      orderBy: { confidenceScore: 'desc' },
+      orderBy: [{ isActive: 'desc' }, { confidenceScore: 'desc' }],
     });
   }
 
@@ -139,17 +159,18 @@ export class SignalRepository {
     }
   }
 
-  async deactivateExpiredSignals(maxAgeMinutes: number): Promise<number> {
-    const cutoff = new Date(Date.now() - maxAgeMinutes * 60 * 1000);
-
+  /**
+   * Mark active signals as inactive once their expiresAt has passed.
+   * Each signal carries its own session-aware TTL (set at creation time
+   * by SignalGeneratorService.computeExpiry), so we just trust that field
+   * here — no global maxAge override.
+   */
+  async deactivateExpiredSignals(): Promise<number> {
     try {
       const result = await this.prisma.signal.updateMany({
         where: {
           isActive: true,
-          OR: [
-            { createdAt: { lt: cutoff } },
-            { expiresAt: { lt: new Date() } },
-          ],
+          expiresAt: { lt: new Date() },
         },
         data: { isActive: false },
       });

@@ -58,7 +58,11 @@ export const useSignalStore = create<SignalState>((set, get) => ({
   fetchSignals: async () => {
     set({ isLoading: true });
     try {
-      const res = await api.get('/signals/active');
+      // recentHours=12 — also include signals that expired within the
+      // last 12h. With session-aware TTLs (NSE 15:30 / MCX 23:30 IST),
+      // 12h covers a full session of context. Each signal still carries
+      // its own isActive flag so the UI can fade expired ones.
+      const res = await api.get('/signals/active', { params: { recentHours: 12 } });
       const signals: TradeSignal[] = (res.data?.data ?? res.data ?? []).map(
         (s: TradeSignal) => ({
           ...s,
@@ -88,8 +92,14 @@ export const useSignalStore = create<SignalState>((set, get) => ({
   },
 
   removeSignal: (id) => {
+    // Don't drop the row when a signal expires — flip its isActive flag
+    // instead so the SignalCard fades to "EXPIRED" but stays visible
+    // for the rest of the recent-window. Drop it from state only on
+    // re-fetch when it falls outside the 12h recent window.
     set((state) => ({
-      signals: state.signals.filter((s) => s.id !== id),
+      signals: state.signals.map((s) =>
+        s.id === id ? { ...s, isActive: false } : s,
+      ),
     }));
   },
 
@@ -155,11 +165,15 @@ export function selectFilteredSignals(state: SignalState): TradeSignal[] {
 }
 
 export function selectActiveCount(state: SignalState): number {
-  return state.signals.length;
+  // Only true-active signals count toward the headline metric. Expired
+  // ones are kept in state for visibility but shouldn't inflate the
+  // "active" KPI.
+  return state.signals.filter((s) => s.isActive).length;
 }
 
 export function selectAvgConfidence(state: SignalState): number {
-  if (state.signals.length === 0) return 0;
-  const sum = state.signals.reduce((acc, s) => acc + s.confidenceScore, 0);
-  return Math.round(sum / state.signals.length);
+  const active = state.signals.filter((s) => s.isActive);
+  if (active.length === 0) return 0;
+  const sum = active.reduce((acc, s) => acc + s.confidenceScore, 0);
+  return Math.round(sum / active.length);
 }

@@ -70,10 +70,18 @@ export class SignalGeneratorController {
 
   /**
    * GET /api/signals/active — currently active signals.
+   *
+   * `?recentHours=N` also returns signals that expired within the last
+   * N hours. The Signals page uses N=12 so traders can see the day's
+   * earlier signals after their session-end TTL has flipped them to
+   * inactive.
    */
   @Get('active')
-  async getActiveSignals() {
-    return this.signalGeneratorService.getActiveSignals();
+  async getActiveSignals(@Query('recentHours') recentHours?: string) {
+    const hours = recentHours ? Number(recentHours) : 0;
+    return this.signalGeneratorService.getActiveSignals(
+      Number.isFinite(hours) && hours > 0 ? hours : 0,
+    );
   }
 
   /**
