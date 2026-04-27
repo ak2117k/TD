@@ -5,7 +5,6 @@ export type {
   OIData,
   OptionsChainEntry,
   OptionData,
-  TradeSignal,
   OrderRequest,
   Position,
   PortfolioSummary,
@@ -16,6 +15,8 @@ export type {
   TradeEventType,
   RiskStatus,
 } from '@td/shared';
+
+import type { TradeSignal as SharedTradeSignal } from '@td/shared';
 
 import type { Trade as SharedTrade } from '@td/shared';
 
@@ -103,4 +104,38 @@ export interface NavItem {
   path: string;
   label: string;
   icon: React.ComponentType<{ size?: number; className?: string }>;
+}
+
+// Levels-context strategy: structured signal payload.
+// Mirrors apps/api/src/modules/signal-generator/types/setup-context.types.ts —
+// keep them in lockstep.
+export type LevelType =
+  | 'PDH' | 'PDL' | 'ORH' | 'ORL'
+  | 'VWAP' | 'ROUND' | 'VOL_STRIKE';
+export type SetupType = 'BREAKOUT' | 'REVERSAL';
+export type SetupGrade = 'A' | 'B' | 'C';
+export type TimeOfDayWindow = 'morning-trend' | 'afternoon-trend';
+
+export interface SetupContext {
+  levelType: LevelType;
+  setupType: SetupType;
+  levelValue: number;
+  grade: SetupGrade;
+  entry: number;
+  stoploss: number;
+  target: number;
+  triggerCandle: { time: number; ohlc: [number, number, number, number] };
+  levelBookSnapshot: {
+    pdh: number; pdl: number;
+    orh: number | null; orl: number | null;
+    vwap: number; todayHigh: number; todayLow: number;
+  };
+  atr14: number;
+  volumeRatio: number;
+  timeOfDayWindow: TimeOfDayWindow;
+  expiryDayWarning?: boolean;
+}
+
+export interface TradeSignal extends SharedTradeSignal {
+  setupContext?: SetupContext | null;
 }
