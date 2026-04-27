@@ -33,19 +33,31 @@ export default function SymbolSearch() {
       const response = await api.get('/market-data/instruments', {
         params: { search: searchQuery },
       });
-      const data: InstrumentResult[] = response.data?.data ?? response.data ?? [];
-      setResults(data.slice(0, 10));
-    } catch {
-      // If API fails, show some default indices
-      setResults([
-        { symbol: 'NIFTY', token: '99926000', exchange: 'NSE', name: 'NIFTY 50' },
-        { symbol: 'BANKNIFTY', token: '99926009', exchange: 'NSE', name: 'BANK NIFTY' },
-        { symbol: 'FINNIFTY', token: '99926037', exchange: 'NSE', name: 'FIN NIFTY' },
-        { symbol: 'SENSEX', token: '99919000', exchange: 'BSE', name: 'SENSEX' },
-      ].filter((i) =>
-        i.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        i.name.toLowerCase().includes(searchQuery.toLowerCase()),
-      ));
+      // The market-data API wraps results as `{ instruments: [...] }`. Older
+      // shapes used `{ data: [...] }` or a bare array — handle all three.
+      const payload = response.data;
+      const raw =
+        (payload?.instruments as InstrumentResult[] | undefined) ??
+        (payload?.data as InstrumentResult[] | undefined) ??
+        payload;
+      const list: InstrumentResult[] = Array.isArray(raw) ? raw : [];
+      setResults(list.slice(0, 10));
+    } catch (err) {
+      // Log so contract drift / network failures aren't invisible — silent
+      // fallback was hiding a real shape mismatch in the past.
+      console.warn('SymbolSearch: instrument lookup failed', err);
+      setResults(
+        [
+          { symbol: 'NIFTY', token: '99926000', exchange: 'NSE', name: 'NIFTY 50' },
+          { symbol: 'BANKNIFTY', token: '99926009', exchange: 'NSE', name: 'BANK NIFTY' },
+          { symbol: 'FINNIFTY', token: '99926037', exchange: 'NSE', name: 'FIN NIFTY' },
+          { symbol: 'SENSEX', token: '99919000', exchange: 'BSE', name: 'SENSEX' },
+        ].filter(
+          (i) =>
+            i.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            i.name.toLowerCase().includes(searchQuery.toLowerCase()),
+        ),
+      );
     } finally {
       setIsSearching(false);
     }
