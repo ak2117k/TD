@@ -212,13 +212,23 @@ export function useChartData(): UseChartDataReturn {
     }
   }, [selectedSymbol.token, selectedSymbol.exchange, timeframe]);
 
-  // Fetch OI data
+  // Fetch OI data. Defensive unwrap with Array.isArray guard so a backend
+  // shape change (e.g. wrapping in `{ oi: [...] }`) surfaces as a console
+  // warning instead of silently calling .map on a non-array.
   const fetchOI = useCallback(async () => {
     try {
       const response = await api.get(
         `/market-data/instruments/${selectedSymbol.token}/oi`,
       );
-      const rawOI: OIData[] = response.data?.data ?? response.data ?? [];
+      const payload = response.data;
+      const candidate =
+        (payload?.oi as OIData[] | undefined) ??
+        (payload?.data as OIData[] | undefined) ??
+        payload;
+      const rawOI: OIData[] = Array.isArray(candidate) ? candidate : [];
+      if (!Array.isArray(candidate) && payload != null) {
+        console.warn('useChartData: unexpected OI response shape');
+      }
       setOiData(
         rawOI.map((o) => ({
           time: new Date(o.timestamp).getTime() / 1000,
@@ -226,7 +236,7 @@ export function useChartData(): UseChartDataReturn {
         })),
       );
     } catch {
-      // OI data is optional, fail silently
+      // OI data is optional, fail silently — no chart blocker.
     }
   }, [selectedSymbol.token]);
 

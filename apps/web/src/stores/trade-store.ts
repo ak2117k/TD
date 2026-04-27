@@ -123,7 +123,19 @@ export const useTradeStore = create<TradeState>((set) => ({
 
   closeTrade: async (id) => {
     try {
-      const { data } = await api.post<Trade>(`/trades/${id}/close`);
+      // M5 invariant: every closed trade must have a structured exit reason.
+      // The proper UX is the ExitTradeModal (used from JournalPage), which
+      // forces the trader to pick HIT_TARGET / STOPPED_OUT / etc. This
+      // store action is a *fallback* invoked from the auto-trade page kill
+      // path where there's no human present to pick a reason — we tag it
+      // OTHER + exitNotes so the journal stays queryable rather than
+      // collecting null exit reasons that would distort post-trade
+      // analytics. Manual closes from the journal go through ExitTradeModal
+      // and pass real reasons.
+      const { data } = await api.post<Trade>(`/trades/${id}/close`, {
+        exitReasonTag: 'OTHER',
+        exitNotes: 'Closed via store action (auto-trade kill / non-modal path)',
+      });
       set((state) => ({
         openTrades: state.openTrades.filter((t) => t.id !== id),
         recentTrades: [data, ...state.recentTrades].slice(0, 20),
