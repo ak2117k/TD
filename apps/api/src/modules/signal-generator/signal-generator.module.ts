@@ -23,6 +23,7 @@ import { EmaCrossoverStrategy } from './strategies/ema-crossover.strategy';
 import { VwapDeviationStrategy } from './strategies/vwap-deviation.strategy';
 import { AnandSniperV25CombinedStrategy } from './strategies/anand-sniper-v25-combined.strategy';
 import { LevelBookService } from './services/level-book.service';
+import { LevelBookCron } from './services/level-book.cron';
 
 @Module({
   imports: [
@@ -67,6 +68,9 @@ import { LevelBookService } from './services/level-book.service';
 
     // Level book — per-instrument VWAP / today H/L / spot tracker
     LevelBookService,
+
+    // Cron jobs — pre-market session seeder (09:15) + opening range locker (09:30)
+    LevelBookCron,
   ],
   exports: [
     SignalGeneratorService,
