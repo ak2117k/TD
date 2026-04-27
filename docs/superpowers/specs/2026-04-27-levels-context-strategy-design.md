@@ -112,7 +112,10 @@ interface LevelBook {
   spot: number;
   vwap: number;
   todayHigh: number; todayLow: number;
-  atr14: number;        // 14-period ATR — sizes SL buffers + distance gates
+  atr14: number;        // 14-period DAILY ATR (computed from last 14 daily
+                        // candles at session start). Daily-scale because the
+                        // levels themselves are daily-scale (PDH/PDL etc.).
+                        // Drives all distance gates and SL-buffer sizing.
 
   // Computed on demand
   roundNumbers: number[];     // nearest 50/100/500 step (instrument-aware)
@@ -142,7 +145,7 @@ Walks each level in the book, applies these gates in order; bails at first failu
 | # | Gate | Threshold |
 |---|---|---|
 | 1 | **Distance** | `|spot - level| ≤ 0.3 × ATR14` |
-| 2 | **Confirmation** | **Breakout**: candle close > level + 0.1·ATR AND volume > 1.2 × VMA20.<br>**Reversal**: pinbar (body < 30% of range, wick toward level) OR engulfing |
+| 2 | **Confirmation** | All candle/volume references below are the **most-recent closed 5-min candle** (the strategy runs on the 5m timeframe). VMA20 is the trailing 20-period 5-min volume average.<br>**Breakout**: 5m close > level + 0.1·ATR (daily) AND 5m volume > 1.2 × VMA20.<br>**Reversal**: 5m pinbar (body < 30% of candle range, wick toward level) OR engulfing |
 | 3 | **Time-of-day** | Within 9:45-11:00 IST OR 14:30-15:30 IST |
 | 4 | **Stop-loss** | Just past level + `0.25 × ATR` buffer (asymmetric: tighter on breakouts, wider on reversals) |
 | 5 | **Target** | Next opposing level *or* `2.0 × SL distance`, whichever is closer to current price |
@@ -214,7 +217,10 @@ A JSON column is chosen over discrete columns so the `setupContext` shape can ev
 
 09:30 IST  ▼ opening range locks
            cron fires lockOpeningRange() for each NSE instrument
-           ORH/ORL frozen from first 15-min candle
+           ORH/ORL frozen from the single 15-min candle covering 09:15-09:30
+           (NOT the highest of three 5-min candles — one 15-min bar pulled
+           from the candles table or built by aggregating the period's ticks
+           if the 15m bar hasn't closed in DB yet)
 
 09:45 IST  ▼ scanner becomes active (time-of-day gate opens)
            every 30s during 09:45-11:00 + 14:30-15:30:
