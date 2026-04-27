@@ -107,6 +107,38 @@ export class InstrumentService implements OnModuleInit {
   }
 
   /**
+   * Return tokens from the in-memory cache filtered by exchange and segment.
+   * Used by MarketFeedService at boot to seed WebSocket subscriptions for
+   * symbol classes whose tokens roll over time (e.g. MCX FUTCOM contracts) —
+   * the DB is the source of truth, the constants file is not.
+   */
+  getTokensByExchangeSegment(exchange: string, segment: string): string[] {
+    const tokens: string[] = [];
+    for (const inst of this.instrumentsByToken.values()) {
+      if (inst.exchange === exchange && inst.segment === segment) {
+        tokens.push(inst.token);
+      }
+    }
+    return tokens;
+  }
+
+  /**
+   * MCX commodity instruments from the cache. Used by MarketFeedService
+   * to sync the in-process COMMODITIES constants with whatever the DB
+   * currently says — the broker adapter's exchange-routing logic keys
+   * off those constants.
+   */
+  getCommodityInstruments(): Array<{ symbol: string; token: string }> {
+    const out: Array<{ symbol: string; token: string }> = [];
+    for (const inst of this.instrumentsByToken.values()) {
+      if (inst.exchange === 'MCX' && inst.segment === 'COMMODITY') {
+        out.push({ symbol: inst.symbol, token: inst.token });
+      }
+    }
+    return out;
+  }
+
+  /**
    * Get major market indices (NIFTY 50, BANK NIFTY, etc.) with their instrument data.
    */
   getIndices(): Array<{

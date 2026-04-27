@@ -490,4 +490,10 @@ export class MarketDataController {
       marketOpen: this.marketFeedService.isMarketOpen(),
     };
   }
+
+  @Get('debug/subscribed')
+  @ApiOperation({ summary: 'Debug: list all currently subscribed tokens' })
+  getSubscribedTokens() {
+    return { tokens: this.marketFeedService.getSubscribedTokens() };
+  }
 }

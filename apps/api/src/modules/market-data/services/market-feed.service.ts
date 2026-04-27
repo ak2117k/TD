@@ -169,12 +169,31 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
     try {
       this.feedCallback = (tick: TickData) => this.handleTick(tick);
 
-      // Subscribe to major indices, sector indices, major stocks, and commodities
+      // Sync the COMMODITIES constants to whatever the DB currently says
+      // (the roll script and the runtime resolveCommodityTokens both keep
+      // the DB current). This matters because the broker adapter routes
+      // tokens to the right exchange WS by checking membership in
+      // Object.values(COMMODITIES) — if a rolled token isn't in there,
+      // it gets misrouted to NSE_CM and Angel One drops it silently.
+      const dbCommodities = this.instrumentService.getCommodityInstruments();
+      for (const inst of dbCommodities) {
+        const constEntry = (COMMODITIES as Record<string, { symbol: string; token: string }>)[inst.symbol];
+        if (constEntry && constEntry.token !== inst.token) {
+          this.logger.log(
+            `Syncing COMMODITIES.${inst.symbol} token ${constEntry.token} → ${inst.token} (from DB)`,
+          );
+          constEntry.token = inst.token;
+        }
+      }
+
       const allDefaultTokens = [
         ...(Object.values(INDICES) as Array<{ token: string }>).map((idx) => idx.token),
         ...(Object.values(SECTOR_INDICES) as Array<{ token: string }>).map((s) => s.token),
         ...(Object.values(MAJOR_STOCKS) as Array<{ token: string }>).map((s) => s.token),
         ...(Object.values(COMMODITIES) as Array<{ token: string }>).map((c) => c.token),
+        // Also include any commodity tokens that exist in DB but not in
+        // the constants file (e.g. future additions before constant updates)
+        ...dbCommodities.map((c) => c.token),
       ];
       // Deduplicate and filter out unresolved placeholder tokens ('0')
       const uniqueTokens = [...new Set(allDefaultTokens)].filter((t) => t !== '0');
@@ -624,13 +643,11 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
     this.logger.log('Resolving dynamic MCX commodity tokens...');
 
     for (const [key, commodity] of Object.entries(COMMODITIES)) {
-      // Skip commodities that already have a resolved (non-placeholder) token
-      if (commodity.token !== '0') {
-        this.logger.log(
-          `Skipping ${commodity.symbol} — already has token ${commodity.token}`,
-        );
-        continue;
-      }
+      // Always re-resolve: MCX FUTCOM contracts roll every month, so a
+      // hardcoded token in the constants file goes stale within weeks of
+      // any contract expiry. We previously short-circuited if the constant
+      // was non-'0', which meant CRUDEOIL stayed pinned to the April
+      // contract long after expiry — visible chart gaps and wrong prices.
 
       try {
         // Try multiple search patterns to find futures contracts.
