@@ -17,11 +17,11 @@ const INDICATORS: IndicatorConfig[] = [
   { key: 'ema20', label: 'EMA 20', description: 'Exponential MA (20)', color: '#3b82f6', ready: true },
   { key: 'ema50', label: 'EMA 50', description: 'Exponential MA (50)', color: '#a855f7', ready: true },
   { key: 'ema200', label: 'EMA 200', description: 'Exponential MA (200)', color: '#f59e0b', ready: true },
+  { key: 'vwap', label: 'VWAP', description: 'Volume Weighted Avg Price', color: '#10b981', ready: true },
+  { key: 'bollinger', label: 'Bollinger', description: 'Bollinger Bands (20, 2σ)', color: '#ec4899', ready: true },
+  { key: 'rsi', label: 'RSI', description: 'Relative Strength Index (14)', color: '#06b6d4', ready: true },
   { key: 'volume', label: 'Volume', description: 'Volume histogram', color: '#64748b', ready: true },
   { key: 'oi', label: 'OI', description: 'Open Interest overlay', color: '#fbbf24', ready: true },
-  { key: 'rsi', label: 'RSI', description: 'Relative Strength Index', color: '#06b6d4', ready: false },
-  { key: 'bollinger', label: 'Bollinger', description: 'Bollinger Bands', color: '#ec4899', ready: false },
-  { key: 'vwap', label: 'VWAP', description: 'Volume Weighted Avg Price', color: '#10b981', ready: false },
 ];
 
 interface IndicatorPanelProps {
@@ -55,6 +55,76 @@ function calculateEMA(closes: number[], period: number): (number | null)[] {
   return ema;
 }
 
+// Cumulative VWAP across the loaded dataset.
+// Trader-grade VWAP would reset per session; full-period VWAP is the
+// pragmatic starting point and still useful for swing reference.
+function calculateVWAP(
+  candles: Array<{ high: number; low: number; close: number; volume: number }>,
+): (number | null)[] {
+  let cumPV = 0;
+  let cumV = 0;
+  return candles.map((c) => {
+    const typical = (c.high + c.low + c.close) / 3;
+    cumPV += typical * c.volume;
+    cumV += c.volume;
+    return cumV > 0 ? cumPV / cumV : null;
+  });
+}
+
+// Wilder's RSI (period 14 by default).
+function calculateRSI(closes: number[], period = 14): (number | null)[] {
+  const rsi: (number | null)[] = new Array(closes.length).fill(null);
+  if (closes.length <= period) return rsi;
+
+  let gainSum = 0;
+  let lossSum = 0;
+  for (let i = 1; i <= period; i++) {
+    const ch = closes[i] - closes[i - 1];
+    if (ch >= 0) gainSum += ch;
+    else lossSum -= ch;
+  }
+  let avgGain = gainSum / period;
+  let avgLoss = lossSum / period;
+  rsi[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+
+  for (let i = period + 1; i < closes.length; i++) {
+    const ch = closes[i] - closes[i - 1];
+    const gain = ch > 0 ? ch : 0;
+    const loss = ch < 0 ? -ch : 0;
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
+    rsi[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  }
+  return rsi;
+}
+
+// Bollinger Bands — SMA ± stdDevMult * stddev over `period` closes.
+function calculateBollinger(
+  closes: number[],
+  period = 20,
+  stdDevMult = 2,
+): { upper: (number | null)[]; middle: (number | null)[]; lower: (number | null)[] } {
+  const upper: (number | null)[] = new Array(closes.length).fill(null);
+  const middle: (number | null)[] = new Array(closes.length).fill(null);
+  const lower: (number | null)[] = new Array(closes.length).fill(null);
+
+  for (let i = period - 1; i < closes.length; i++) {
+    let sum = 0;
+    for (let j = i - period + 1; j <= i; j++) sum += closes[j];
+    const mean = sum / period;
+
+    let varSum = 0;
+    for (let j = i - period + 1; j <= i; j++) varSum += (closes[j] - mean) ** 2;
+    const std = Math.sqrt(varSum / period);
+
+    middle[i] = mean;
+    upper[i] = mean + stdDevMult * std;
+    lower[i] = mean - stdDevMult * std;
+  }
+
+  return { upper, middle, lower };
+}
+
 export default function IndicatorPanel({ onClose, chart, candles }: IndicatorPanelProps) {
   const indicators = useChartStore((s) => s.indicators);
   const toggleIndicator = useChartStore((s) => s.toggleIndicator);
@@ -75,62 +145,78 @@ export default function IndicatorPanel({ onClose, chart, candles }: IndicatorPan
     toggleIndicator(indicator.key);
   };
 
-  // Manage EMA line series on the chart
+  // Manage all line-series indicators on the chart.
+  // Each spec is a single line; Bollinger registers as 3 specs (upper/middle/lower).
+  // RSI uses its own price scale so it doesn't fight the price-axis range.
   useEffect(() => {
     if (!chart || candles.length === 0) return;
 
     const closes = candles.map((c) => c.close);
-    const emaConfigs = [
-      { key: 'ema20', period: 20, color: '#3b82f6' },
-      { key: 'ema50', period: 50, color: '#a855f7' },
-      { key: 'ema200', period: 200, color: '#f59e0b' },
+    const bb = calculateBollinger(closes, 20, 2);
+    const rsiValues = calculateRSI(closes, 14);
+    const vwapValues = calculateVWAP(candles);
+
+    type LineSpec = {
+      mapKey: string;
+      enabled: boolean;
+      color: string;
+      lineWidth?: 1 | 2 | 3 | 4;
+      lineStyle?: number;
+      priceScaleId?: string;
+      values: (number | null)[];
+    };
+
+    const specs: LineSpec[] = [
+      // Price-scale overlays (share the main candle scale)
+      { mapKey: 'ema20', enabled: indicators.ema20, color: '#3b82f6', values: calculateEMA(closes, 20) },
+      { mapKey: 'ema50', enabled: indicators.ema50, color: '#a855f7', values: calculateEMA(closes, 50) },
+      { mapKey: 'ema200', enabled: indicators.ema200, color: '#f59e0b', values: calculateEMA(closes, 200) },
+      { mapKey: 'vwap', enabled: indicators.vwap, color: '#10b981', lineWidth: 2, values: vwapValues },
+      { mapKey: 'bb-upper', enabled: indicators.bollinger, color: '#ec4899', lineWidth: 1, values: bb.upper },
+      { mapKey: 'bb-middle', enabled: indicators.bollinger, color: '#ec4899', lineWidth: 1, lineStyle: 2, values: bb.middle },
+      { mapKey: 'bb-lower', enabled: indicators.bollinger, color: '#ec4899', lineWidth: 1, values: bb.lower },
+      // RSI lives on its own price scale (0–100) so it doesn't crush the candle axis.
+      { mapKey: 'rsi', enabled: indicators.rsi, color: '#06b6d4', lineWidth: 1, priceScaleId: 'rsi', values: rsiValues },
     ];
 
-    for (const config of emaConfigs) {
-      const enabled = indicators[config.key as keyof IndicatorState];
-      const existing = emaSeriesRef.current.get(config.key);
+    for (const spec of specs) {
+      const existing = emaSeriesRef.current.get(spec.mapKey);
+      const lineData = candles
+        .map((c, i) =>
+          spec.values[i] !== null
+            ? { time: Math.floor(c.time) as Time, value: spec.values[i] as number }
+            : null,
+        )
+        .filter(Boolean) as Array<{ time: Time; value: number }>;
 
-      if (enabled && !existing) {
-        // Add EMA series
+      if (spec.enabled && !existing) {
         const series = chart.addLineSeries({
-          color: config.color,
-          lineWidth: 1,
+          color: spec.color,
+          lineWidth: spec.lineWidth ?? 1,
+          lineStyle: spec.lineStyle ?? 0,
           priceLineVisible: false,
           lastValueVisible: false,
           crosshairMarkerVisible: false,
+          ...(spec.priceScaleId ? { priceScaleId: spec.priceScaleId } : {}),
         });
-
-        const emaValues = calculateEMA(closes, config.period);
-        const lineData = candles
-          .map((c, i) =>
-            emaValues[i] !== null
-              ? { time: c.time as Time, value: emaValues[i] as number }
-              : null,
-          )
-          .filter(Boolean) as Array<{ time: Time; value: number }>;
-
+        // Configure dedicated RSI scale once when its first series appears.
+        if (spec.priceScaleId === 'rsi') {
+          chart.priceScale('rsi').applyOptions({
+            scaleMargins: { top: 0.7, bottom: 0.05 },
+            borderVisible: false,
+          });
+        }
         series.setData(lineData);
-        emaSeriesRef.current.set(config.key, series);
-      } else if (enabled && existing) {
-        // Update data
-        const emaValues = calculateEMA(closes, config.period);
-        const lineData = candles
-          .map((c, i) =>
-            emaValues[i] !== null
-              ? { time: c.time as Time, value: emaValues[i] as number }
-              : null,
-          )
-          .filter(Boolean) as Array<{ time: Time; value: number }>;
-
+        emaSeriesRef.current.set(spec.mapKey, series);
+      } else if (spec.enabled && existing) {
         existing.setData(lineData);
-      } else if (!enabled && existing) {
-        // Remove series
+      } else if (!spec.enabled && existing) {
         try {
           chart.removeSeries(existing);
         } catch {
           // Chart may be disposed
         }
-        emaSeriesRef.current.delete(config.key);
+        emaSeriesRef.current.delete(spec.mapKey);
       }
     }
   }, [chart, candles, indicators]);
