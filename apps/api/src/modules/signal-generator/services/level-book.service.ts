@@ -1,7 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { LevelBook, SeedSessionInput, TickInput } from '../types/level-book.types';
+import { InstrumentService } from '../../market-data/services/instrument.service';
+import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
+import { TIMEFRAMES } from '@td/shared/constants';
 
 const STALE_THRESHOLD_MS = 60_000;
+const LAZY_FRESH_MS = 5 * 60 * 1000;
 const ATR_PERIOD = 14;
 const DEFAULT_ROUND_STEP: Record<string, number> = {
   NIFTY: 50, BANKNIFTY: 100, FINNIFTY: 50, MIDCPNIFTY: 25,
@@ -18,6 +22,11 @@ interface BookState extends LevelBook {
 export class LevelBookService {
   private readonly logger = new Logger(LevelBookService.name);
   private readonly books = new Map<string, BookState>();
+
+  constructor(
+    private readonly instrumentService?: InstrumentService,
+    private readonly marketDataRepository?: MarketDataRepository,
+  ) {}
 
   seedSession(input: SeedSessionInput): void {
     const candles = [...input.recentDailyCandles].sort(
@@ -100,6 +109,106 @@ export class LevelBookService {
     const book = this.books.get(token);
     if (!book) return;
     book.topVolStrikes = strikes;
+  }
+
+  async lazyLoad(
+    token: string,
+    exchange: string,
+    symbol: string,
+  ): Promise<LevelBook | null> {
+    const cached = this.books.get(token);
+    if (cached && Date.now() - cached.lastTickAt.getTime() < LAZY_FRESH_MS) {
+      const { cumPV: _pv, cumV: _v, ...publicBook } = cached;
+      void _pv; void _v;
+      return publicBook;
+    }
+
+    if (!this.instrumentService || !this.marketDataRepository) {
+      this.logger.warn(
+        `lazyLoad(${symbol}) called without DI deps — service was instantiated bare`,
+      );
+      return null;
+    }
+
+    const instrument = await this.instrumentService.getByToken(token);
+    if (!instrument) {
+      this.logger.debug(`lazyLoad: no instrument found for token ${token}`);
+      return null;
+    }
+
+    const now = new Date();
+    const istOffsetMs = 5.5 * 60 * 60 * 1000;
+    const istNow = new Date(now.getTime() + istOffsetMs);
+    const sessionOpenIst = new Date(
+      Date.UTC(
+        istNow.getUTCFullYear(),
+        istNow.getUTCMonth(),
+        istNow.getUTCDate(),
+        9, 15, 0, 0,
+      ),
+    );
+    const sessionOpen = new Date(sessionOpenIst.getTime() - istOffsetMs);
+
+    const dailyFrom = new Date(sessionOpen.getTime() - 21 * 24 * 60 * 60 * 1000);
+    const dailyRows = await this.marketDataRepository.getCandles(
+      instrument.id,
+      TIMEFRAMES.DAILY,
+      dailyFrom,
+      sessionOpen,
+    );
+    const dailyCandles = dailyRows
+      .filter((c) => c.timestamp.getTime() < sessionOpen.getTime())
+      .slice(-14)
+      .map((c) => ({
+        timestamp: c.timestamp,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        volume: typeof c.volume === 'bigint' ? Number(c.volume) : c.volume,
+      }));
+
+    if (dailyCandles.length < 14) {
+      this.logger.debug(
+        `lazyLoad: ${symbol} has only ${dailyCandles.length} daily candles, need 14`,
+      );
+      return null;
+    }
+
+    this.seedSession({ token, symbol, exchange, recentDailyCandles: dailyCandles });
+
+    const fiveMinRows = await this.marketDataRepository.getCandles(
+      instrument.id,
+      TIMEFRAMES.FIVE_MIN,
+      sessionOpen,
+      now,
+    );
+    const fiveMinBars = fiveMinRows.map((c) => ({
+      timestamp: c.timestamp,
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+      volume: typeof c.volume === 'bigint' ? Number(c.volume) : c.volume,
+    }));
+
+    if (fiveMinBars.length >= 3) {
+      const orBars = fiveMinBars.slice(0, 3);
+      const orHigh = Math.max(...orBars.map((b) => b.high));
+      const orLow = Math.min(...orBars.map((b) => b.low));
+      this.lockOpeningRange(token, { high: orHigh, low: orLow });
+    }
+
+    for (const bar of fiveMinBars) {
+      this.updateFromTick({
+        token,
+        ltp: bar.close,
+        volume: bar.volume,
+        timestamp: bar.timestamp,
+      });
+    }
+
+    return this.getLevels(token);
   }
 
   /** Wilder-smoothed ATR over the last ATR_PERIOD candles. */

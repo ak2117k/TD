@@ -9,6 +9,7 @@ import {
   HttpStatus,
   Logger,
   NotFoundException,
+  BadRequestException,
 } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
@@ -90,6 +91,24 @@ export class SignalGeneratorController {
   @Get('strategies')
   async listStrategies() {
     return this.strategyRegistry.getAllStrategies();
+  }
+
+  @Get('analyze')
+  async analyzeChart(
+    @Query('token') token: string,
+    @Query('exchange') exchange: string,
+    @Query('symbol') symbol: string,
+    @Query('timeframe') timeframe?: string,
+  ) {
+    if (!token || !exchange || !symbol) {
+      throw new BadRequestException('token, exchange, symbol are required');
+    }
+    return this.signalGeneratorService.analyze(
+      token,
+      exchange,
+      symbol,
+      timeframe ?? '5m',
+    );
   }
 
   /**

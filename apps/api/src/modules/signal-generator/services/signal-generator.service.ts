@@ -13,6 +13,10 @@ import { SignalScoringService } from './signal-scoring.service';
 import { SignalRepository, CreateSignalInput } from '../repositories/signal.repository';
 import { SignalGateway } from '../gateways/signal.gateway';
 import { SignalFilterDto } from '../dto/signal.dto';
+import { LevelBookService } from './level-book.service';
+import { LevelsContextStrategy } from '../strategies/levels-context.strategy';
+import { SetupContext } from '../types/setup-context.types';
+import { LevelBook } from '../types/level-book.types';
 import {
   TIMEFRAMES,
   MARKET_OPEN_HOUR,
@@ -81,6 +85,52 @@ function computeExpiry(exchange: string, now: Date = new Date()): Date {
 /** Minimum number of timeframes that must agree for signal confirmation. */
 const MIN_TIMEFRAME_AGREEMENT = 2;
 
+export interface LevelsSnapshot {
+  pdh: number;
+  pdl: number;
+  orh: number | null;
+  orl: number | null;
+  vwap: number;
+  todayHigh: number;
+  todayLow: number;
+  atr14: number;
+}
+
+export type AnalyzeResult =
+  | {
+      kind: 'setup';
+      symbol: string;
+      side: 'BUY' | 'SELL';
+      entry: number;
+      stoploss: number;
+      target: number;
+      levelType: SetupContext['levelType'];
+      setupType: SetupContext['setupType'];
+      grade: SetupContext['grade'];
+      atr14: number;
+      volumeRatio: number;
+      levels: LevelsSnapshot;
+      reason: string;
+    }
+  | {
+      kind: 'no-setup';
+      reason: string;
+      levels: LevelsSnapshot | null;
+    };
+
+function snapshotFromBook(book: LevelBook): LevelsSnapshot {
+  return {
+    pdh: book.pdh,
+    pdl: book.pdl,
+    orh: book.orh,
+    orl: book.orl,
+    vwap: book.vwap,
+    todayHigh: book.todayHigh,
+    todayLow: book.todayLow,
+    atr14: book.atr14,
+  };
+}
+
 @Injectable()
 export class SignalGeneratorService {
   private readonly logger = new Logger(SignalGeneratorService.name);
@@ -94,7 +144,112 @@ export class SignalGeneratorService {
     private readonly angelOneAdapter: AngelOneAdapterService,
     private readonly settingsService: SettingsService,
     private readonly signalGateway: SignalGateway,
+    private readonly levelBookService: LevelBookService,
   ) {}
+
+  async analyze(
+    token: string,
+    exchange: string,
+    symbol: string,
+    timeframe: string = '5m',
+  ): Promise<AnalyzeResult> {
+    const book = await this.levelBookService.lazyLoad(token, exchange, symbol);
+    if (!book) {
+      return {
+        kind: 'no-setup',
+        reason: 'no level book available — symbol has no historical data',
+        levels: null,
+      };
+    }
+
+    const instrument = await this.marketDataRepository.getInstrumentByToken(token);
+    if (!instrument) {
+      return {
+        kind: 'no-setup',
+        reason: 'instrument not found',
+        levels: snapshotFromBook(book),
+      };
+    }
+
+    const now = new Date();
+    const fiveDaysAgo = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
+    const candleRows = await this.marketDataRepository.getCandles(
+      instrument.id,
+      timeframe,
+      fiveDaysAgo,
+      now,
+      25,
+    );
+    const candles = candleRows.map((c) => ({
+      timestamp: c.timestamp,
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+      volume: typeof c.volume === 'bigint' ? Number(c.volume) : c.volume,
+    }));
+
+    const istParts = new Intl.DateTimeFormat('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(now);
+    const hh = istParts.find((p) => p.type === 'hour')?.value ?? '00';
+    const mm = istParts.find((p) => p.type === 'minute')?.value ?? '00';
+    const nowIst = `${hh === '24' ? '00' : hh}:${mm}`;
+
+    const strategy = new LevelsContextStrategy();
+    strategy.setParameters({ includeGradeC: true });
+
+    let lastReject = '<gates not evaluated>';
+    const debug = (event: string, detail?: Record<string, unknown>) => {
+      if (event.startsWith('reject:')) {
+        lastReject = detail ? `${event} ${JSON.stringify(detail)}` : event;
+      }
+    };
+
+    // Bypass staleness here. analyze is invoked on demand by the chart;
+    // we're explicitly running historical-or-recent analysis, not waiting
+    // for a fresh tick. Pin nowMs to the book's lastTickAt so the
+    // staleness gate (1min wall-clock window) always passes. The
+    // time-of-day gate still uses real IST so "market closed" returns
+    // a useful no-setup reason ("reject:outside-window") instead of a
+    // misleading "reject:stale".
+    const nowMsForStrategy = book.lastTickAt.getTime() + 1000;
+    const output = strategy.analyze({
+      candles,
+      levelBook: book,
+      nowIst,
+      nowMs: nowMsForStrategy,
+      debug,
+    });
+
+    if (!output) {
+      return {
+        kind: 'no-setup',
+        reason: lastReject,
+        levels: snapshotFromBook(book),
+      };
+    }
+
+    const ctx = output.metadata as SetupContext;
+    return {
+      kind: 'setup',
+      symbol: output.symbol,
+      side: output.side,
+      entry: ctx.entry,
+      stoploss: ctx.stoploss,
+      target: ctx.target,
+      levelType: ctx.levelType,
+      setupType: ctx.setupType,
+      grade: ctx.grade,
+      atr14: ctx.atr14,
+      volumeRatio: ctx.volumeRatio,
+      levels: snapshotFromBook(book),
+      reason: output.reason,
+    };
+  }
 
   /**
    * Run all active strategies against a market snapshot.

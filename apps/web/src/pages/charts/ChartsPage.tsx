@@ -5,7 +5,10 @@ import { CandlestickChart, ChartToolbar, IndicatorPanel, OIOverlay } from '@/com
 import type { CandlestickChartHandle } from '@/components/charts';
 import LevelOverlay, { LEVEL_COLORS } from '@/components/charts/LevelOverlay';
 import SetupMarker from '@/components/charts/SetupMarker';
+import EntryTargetOverlay from '@/components/charts/EntryTargetOverlay';
+import AnalysisPanel from '@/components/charts/AnalysisPanel';
 import { useChartData } from '@/hooks/useChartData';
+import { useChartAnalysis } from '@/hooks/useChartAnalysis';
 import { useChartStore, type SelectedSymbol } from '@/stores/chart-store';
 import api from '@/services/api';
 import type { SetupContext } from '@/types';
@@ -40,6 +43,20 @@ export default function ChartsPage() {
   const setSymbol = useChartStore((s) => s.setSymbol);
   const indicators = useChartStore((s) => s.indicators);
   const isFullscreen = useChartStore((s) => s.isFullscreen);
+  const timeframe = useChartStore((s) => s.timeframe);
+
+  // Live always-on chart analysis. Polls /signals/analyze every 60s and
+  // returns either a setup payload (entry/SL/target/grade) or a no-setup
+  // result with the current PDH/PDL/VWAP context. Distinct from
+  // signal-mode (?signal=<id>) — analyze runs continuously on whatever
+  // the user is looking at, signal-mode only fires when navigated from
+  // a SignalCard's "View Chart" link.
+  const { analysis, loading: analysisLoading } = useChartAnalysis(
+    selectedSymbol.token,
+    selectedSymbol.exchange,
+    selectedSymbol.symbol,
+    timeframe,
+  );
 
   // Sync chart store with URL query params (e.g. navigating from Market page)
   useEffect(() => {
@@ -78,6 +95,22 @@ export default function ChartsPage() {
       { type: 'VWAP', value: lb.vwap, color: LEVEL_COLORS.VWAP, label: 'VWAP' },
     ];
   }, [setupContext]);
+
+  // Always-on level lines derived from the live analysis. Drawn whenever
+  // we're not in signal-mode and the analyze endpoint returned a level
+  // book — works for both setup and no-setup states. VWAP is omitted
+  // when 0 since the lazy-build path leaves it at 0 outside market hours.
+  const analysisOverlayLevels = useMemo(() => {
+    if (setupContext || !analysis?.levels) return [];
+    const lb = analysis.levels;
+    return [
+      { type: 'PDH', value: lb.pdh, color: LEVEL_COLORS.PDH, label: 'PDH' },
+      { type: 'PDL', value: lb.pdl, color: LEVEL_COLORS.PDL, label: 'PDL' },
+      ...(lb.orh !== null ? [{ type: 'ORH', value: lb.orh, color: LEVEL_COLORS.ORH, label: 'ORH' }] : []),
+      ...(lb.orl !== null ? [{ type: 'ORL', value: lb.orl, color: LEVEL_COLORS.ORL, label: 'ORL' }] : []),
+      ...(lb.vwap > 0 ? [{ type: 'VWAP', value: lb.vwap, color: LEVEL_COLORS.VWAP, label: 'VWAP' }] : []),
+    ];
+  }, [analysis, setupContext]);
 
   const {
     candles,
@@ -229,6 +262,30 @@ export default function ChartsPage() {
                 text={`${setupContext.setupType} · ${setupContext.grade}`}
               />
             </>
+          )}
+
+          {/* Always-on analysis overlays — only when not in signal-mode.
+              Levels render in both setup and no-setup states; entry/SL/target
+              lines only when there's a setup. */}
+          {!setupContext && analysisOverlayLevels.length > 0 && (
+            <LevelOverlay
+              series={chartRef.current?.candleSeries ?? null}
+              levels={analysisOverlayLevels}
+            />
+          )}
+          {!setupContext && analysis?.kind === 'setup' && (
+            <EntryTargetOverlay
+              series={chartRef.current?.candleSeries ?? null}
+              entry={analysis.entry}
+              stoploss={analysis.stoploss}
+              target={analysis.target}
+            />
+          )}
+
+          {/* Live analysis panel — top-right of chart area. Hidden when
+              signal-mode is showing the persisted SetupContext instead. */}
+          {!setupContext && (
+            <AnalysisPanel analysis={analysis} loading={analysisLoading} />
           )}
 
           {/* Indicator panel overlay */}

@@ -151,4 +151,74 @@ describe('LevelBookService', () => {
       expect(lb.roundNumbers).toEqual(expect.arrayContaining([24050, 24100, 24150]));
     });
   });
+
+  describe('lazyLoad', () => {
+    const mkDaily = (offsetDays: number, h: number, l: number, c: number) => {
+      const ts = new Date();
+      ts.setUTCDate(ts.getUTCDate() - offsetDays);
+      ts.setUTCHours(0, 0, 0, 0);
+      return {
+        timestamp: ts,
+        open: c, high: h, low: l, close: c,
+        volume: BigInt(1000),
+      };
+    };
+
+    it('cache-hit returns existing book without DB call', async () => {
+      const instrumentService = { getByToken: jest.fn() } as any;
+      const repo = { getCandles: jest.fn() } as any;
+      const svc = new LevelBookService(instrumentService, repo);
+
+      svc.seedSession({
+        token: 'TKN', symbol: 'X', exchange: 'NSE',
+        recentDailyCandles: [candle('2026-04-26', 100, 110, 90, 105)],
+      });
+      svc.updateFromTick({ token: 'TKN', ltp: 105, volume: 10, timestamp: new Date() });
+
+      const book = await svc.lazyLoad('TKN', 'NSE', 'X');
+      expect(book).not.toBeNull();
+      expect(book!.symbol).toBe('X');
+      expect(instrumentService.getByToken).not.toHaveBeenCalled();
+      expect(repo.getCandles).not.toHaveBeenCalled();
+    });
+
+    it('cache-miss builds from mocked repo + instrument service', async () => {
+      const dailyRows = Array.from({ length: 16 }, (_, i) =>
+        mkDaily(16 - i, 110 + i, 90 + i, 100 + i),
+      );
+      const instrumentService = {
+        getByToken: jest.fn().mockResolvedValue({ id: 'inst1' }),
+      } as any;
+      const repo = {
+        getCandles: jest.fn().mockImplementation(
+          async (_id: string, tf: string) =>
+            tf === '1d' ? dailyRows : [],
+        ),
+      } as any;
+      const svc = new LevelBookService(instrumentService, repo);
+
+      const book = await svc.lazyLoad('TKN2', 'NSE', 'NIFTY');
+      expect(book).not.toBeNull();
+      expect(book!.pdh).toBe(125);
+      expect(book!.pdl).toBe(105);
+      expect(instrumentService.getByToken).toHaveBeenCalledWith('TKN2');
+      expect(repo.getCandles).toHaveBeenCalled();
+    });
+
+    it('insufficient daily candles returns null', async () => {
+      const instrumentService = {
+        getByToken: jest.fn().mockResolvedValue({ id: 'inst1' }),
+      } as any;
+      const repo = {
+        getCandles: jest.fn().mockResolvedValue([
+          mkDaily(2, 110, 90, 100),
+          mkDaily(1, 115, 95, 105),
+        ]),
+      } as any;
+      const svc = new LevelBookService(instrumentService, repo);
+
+      const book = await svc.lazyLoad('TKN3', 'NSE', 'X');
+      expect(book).toBeNull();
+    });
+  });
 });
