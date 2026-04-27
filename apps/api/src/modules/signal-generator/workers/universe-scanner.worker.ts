@@ -8,6 +8,8 @@ import { OptionsChainService } from '../../options-chain/services/options-chain.
 import { OptionStrikeSelectorService } from '../../options-chain/services/option-strike-selector.service';
 import { TradeExecutionService } from '../../trade-engine/services/trade-execution.service';
 import { AnandSniperV25CombinedStrategy } from '../strategies/anand-sniper-v25-combined.strategy';
+import { LevelsContextStrategy } from '../strategies/levels-context.strategy';
+import { LevelBookService } from '../services/level-book.service';
 import {
   CandleData,
   MarketSnapshot,
@@ -32,6 +34,7 @@ interface WatchedSymbol {
   exchange: string;       // 'NSE'
   lotSize: number;        // quantity per lot for option orders
   instrumentId?: string;  // resolved at OnModuleInit
+  token?: string;         // broker token, used as LevelBookService key; resolved at OnModuleInit
 }
 
 const WATCHED: WatchedSymbol[] = [
@@ -57,6 +60,9 @@ const STALENESS_THRESHOLD_MIN = 96 * 60;
 export class UniverseScannerWorker implements OnModuleInit {
   private readonly logger = new Logger(UniverseScannerWorker.name);
 
+  /** Instantiated directly — no NestJS deps needed. */
+  private readonly levelsContextStrategy = new LevelsContextStrategy();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly marketDataRepo: MarketDataRepository,
@@ -64,6 +70,7 @@ export class UniverseScannerWorker implements OnModuleInit {
     private readonly strikeSelector: OptionStrikeSelectorService,
     private readonly strategy: AnandSniperV25CombinedStrategy,
     private readonly tradeExecutionService: TradeExecutionService,
+    private readonly levelBookService: LevelBookService,
     @InjectQueue('signal-review') private readonly reviewQueue: Queue,
   ) {}
 
@@ -94,8 +101,9 @@ export class UniverseScannerWorker implements OnModuleInit {
       });
       if (inst) {
         w.instrumentId = inst.id;
+        w.token = inst.token;
         this.logger.log(
-          `Resolved ${w.underlying} (${w.exchange}) → instrumentId=${inst.id} segment=${inst.segment}`,
+          `Resolved ${w.underlying} (${w.exchange}) → instrumentId=${inst.id} token=${inst.token} segment=${inst.segment}`,
         );
       } else {
         this.logger.warn(
@@ -213,6 +221,63 @@ export class UniverseScannerWorker implements OnModuleInit {
     const candles15m = mtfCandles['15m'];
     const ltp = candles15m[candles15m.length - 1].close;
     const volume = candles15m[candles15m.length - 1].volume;
+
+    // 2a. Levels-Context strategy — uses the 5m series + a live LevelBook.
+    //     Runs independently of the Sniper+V25 path; only persists a signal
+    //     row (no trade execution — that's a Phase-2 extension once the live
+    //     LevelBook has a full session's worth of ticks).
+    if (w.token) {
+      const levelBook = this.levelBookService.getLevels(w.token);
+      const isStale = this.levelBookService.isStale(w.token);
+      if (levelBook && !isStale) {
+        const nowIst = new Date().toLocaleTimeString('en-GB', {
+          timeZone: 'Asia/Kolkata',
+          hour: '2-digit', minute: '2-digit', hour12: false,
+        });
+        const candles5m = mtfCandles['5m'] ?? [];
+        const lcSignal = this.levelsContextStrategy.analyze({ candles: candles5m, levelBook, nowIst });
+        if (lcSignal) {
+          this.logger.log(
+            `[${w.underlying}] levels-context signal: ${lcSignal.side} @ ${lcSignal.entryPrice} grade=${(lcSignal.metadata as any)?.grade ?? '?'}`,
+          );
+          try {
+            const rr = Math.abs(lcSignal.targetPrice - lcSignal.entryPrice) /
+              Math.max(Math.abs(lcSignal.entryPrice - lcSignal.stoplossPrice), 1e-6);
+            await (this.prisma.signal.create as Function)({
+              data: {
+                instrumentId: w.instrumentId,
+                side: lcSignal.side,
+                entryPrice: lcSignal.entryPrice,
+                targetPrice: lcSignal.targetPrice,
+                stoplossPrice: lcSignal.stoplossPrice,
+                expectedProfit: Math.abs(lcSignal.targetPrice - lcSignal.entryPrice),
+                expectedLoss: Math.abs(lcSignal.entryPrice - lcSignal.stoplossPrice),
+                riskRewardRatio: rr,
+                confidence: (lcSignal.metadata as any)?.grade ?? 'B',
+                confidenceScore: lcSignal.confidence,
+                strategy: this.levelsContextStrategy.name,
+                timeframe: lcSignal.timeframe ?? '5m',
+                reason: lcSignal.reason,
+                isActive: true,
+                // setupContext carries the full SetupContext (level type, setup
+                // type, grade, level-book snapshot, etc.). Prisma accepts Json? —
+                // the Prisma client was regenerated in Task 8 to include this field.
+                setupContext: lcSignal.metadata ?? null,
+              },
+            });
+            this.logger.log(`[${w.underlying}] levels-context signal persisted`);
+          } catch (err) {
+            this.logger.warn(
+              `[${w.underlying}] failed to persist levels-context signal: ${err instanceof Error ? err.message : err}`,
+            );
+          }
+        }
+      } else {
+        this.logger.debug(
+          `[${w.underlying}] levels-context skipped — levelBook ${levelBook ? 'stale' : 'not seeded'}`,
+        );
+      }
+    }
 
     // 2. Run the strategy. The strategy itself handles transition firing,
     //    so calling it on every cron tick is safe — it dedupes internally.
