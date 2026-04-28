@@ -82,6 +82,15 @@ export interface BrokerAdapter {
   /** Unsubscribe from live feed */
   unsubscribeFromFeed(tokens: string[]): void;
 
+  /**
+   * Subscribe a single token to the live feed with an explicit exchange.
+   * Used by the ad-hoc "viewing" subscription path so an arbitrary
+   * stock the user opens on the chart gets routed to the right WS
+   * exchange (NSE_CM, BSE_CM, MCX_FO etc.) without depending on the
+   * hardcoded membership tests in subscribeToFeed.
+   */
+  subscribeAdHoc?(token: string, exchange: string): Promise<void> | void;
+
   /** Get historical candle data */
   getHistoricalData(
     symbol: string,

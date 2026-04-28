@@ -7,6 +7,7 @@ import {
   Body,
   HttpException,
   HttpStatus,
+  HttpCode,
   Logger,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiQuery, ApiParam } from '@nestjs/swagger';
@@ -535,5 +536,28 @@ export class MarketDataController {
   @ApiOperation({ summary: 'Debug: list all currently subscribed tokens' })
   getSubscribedTokens() {
     return { tokens: this.marketFeedService.getSubscribedTokens() };
+  }
+
+  /**
+   * POST /api/market-data/instruments/:token/watch
+   * Add a token to the live-feed "viewing" pool. Called by the chart
+   * when the user opens a symbol that isn't in the universe-scanner or
+   * primary watchlist (e.g. ONGC, SBIN, any stock via search). LRU-
+   * managed, capped at 10 concurrent viewing subscriptions.
+   */
+  @Post('instruments/:token/watch')
+  @HttpCode(HttpStatus.OK)
+  async watchInstrument(
+    @Param('token') token: string,
+    @Query('exchange') exchange?: string,
+  ) {
+    if (!token || token === '0') {
+      return { ok: false, reason: 'invalid token' };
+    }
+    if (!exchange) {
+      return { ok: false, reason: 'exchange query param required' };
+    }
+    await this.marketFeedService.addViewing(token, exchange);
+    return { ok: true, token, exchange };
   }
 }

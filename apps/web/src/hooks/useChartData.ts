@@ -257,6 +257,26 @@ export function useChartData(): UseChartDataReturn {
     fetchOI();
   }, [fetchCandles, fetchOI, timeframe]);
 
+  // Ensure the symbol is subscribed to the live tick feed. The backend
+  // boots with a hardcoded universe (~30 tokens) so anything outside
+  // that — ONGC, SBIN, any stock from search — has no live tick stream
+  // unless we explicitly ask the backend to subscribe it. POST is
+  // idempotent and managed by an LRU pool on the backend; opening many
+  // charts won't run away with broker slot budget.
+  useEffect(() => {
+    if (!selectedSymbol.token || selectedSymbol.token === '0') return;
+    api
+      .post(
+        `/market-data/instruments/${selectedSymbol.token}/watch`,
+        null,
+        { params: { exchange: selectedSymbol.exchange } },
+      )
+      .catch(() => {
+        // Soft failure — historical chart still works, live updates
+        // just won't flow for this symbol. Don't surface to user.
+      });
+  }, [selectedSymbol.token, selectedSymbol.exchange]);
+
   // Subscribe to WebSocket tick updates for real-time candle building.
   // Live updates have to play nicely with the compressed-time axis: a tick
   // arriving at real time T either extends the current bar (same real-time

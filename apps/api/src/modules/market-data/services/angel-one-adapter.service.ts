@@ -490,6 +490,37 @@ export class AngelOneAdapterService implements BrokerAdapter {
     });
   }
 
+  /**
+   * Single-token subscription with explicit exchange. Maps a string
+   * exchange code (NSE / BSE / MCX / NFO) to the Angel One ExchangeType
+   * enum, then registers the WS feed. Used by the chart's ad-hoc
+   * "viewing" subscription path.
+   */
+  async subscribeAdHoc(token: string, exchange: string): Promise<void> {
+    const exType = this.mapExchangeToWsType(exchange);
+    if (!exType) {
+      this.logger.warn(`subscribeAdHoc: unknown exchange "${exchange}" — skipping`);
+      return;
+    }
+    try {
+      await this.wsService.subscribe([token], WsFeedMode.SNAP_QUOTE, exType);
+    } catch (error) {
+      this.logger.error(
+        `Ad-hoc feed subscription failed for ${token}/${exchange}: ${error instanceof Error ? error.message : error}`,
+      );
+    }
+  }
+
+  private mapExchangeToWsType(exchange: string): ExchangeType | null {
+    switch (exchange.toUpperCase()) {
+      case 'NSE': return ExchangeType.NSE_CM;
+      case 'BSE': return ExchangeType.BSE_CM;
+      case 'MCX': return ExchangeType.MCX_FO;
+      case 'NFO': return ExchangeType.NSE_FO;
+      default: return null;
+    }
+  }
+
   // ─────────────────────────────────────────────────────
   // Instrument master (OpenAPI ScripMaster)
   // ─────────────────────────────────────────────────────

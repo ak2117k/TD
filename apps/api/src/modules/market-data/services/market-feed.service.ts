@@ -67,6 +67,18 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
   /** Tokens currently subscribed for scan rotation. */
   private readonly scanTokens = new Set<string>();
 
+  /**
+   * Ad-hoc "viewing" subscriptions — tokens the user is currently
+   * looking at on a chart but that aren't in the universe-scanner or
+   * primary watchlist. LRU eviction at MAX_VIEWING_TOKENS so opening
+   * many charts doesn't run away with the broker's 50-token slot
+   * budget. Map preserves insertion order; on access we delete-then-set
+   * to bump to the head (most-recent). The value is the exchange,
+   * which we need at unsubscribe time.
+   */
+  private readonly viewingTokens = new Map<string, string>();
+  private readonly MAX_VIEWING_TOKENS = 10;
+
   /** Whether the feed is actively running. */
   private feedActive = false;
 
@@ -338,6 +350,47 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Ad-hoc viewing subscription. Called when the user opens a chart for
+   * a token that isn't in the universe-scanner or primary watchlist —
+   * any arbitrary stock from search. Routes the token to the right WS
+   * exchange via brokerAdapter.subscribeAdHoc, then tracks it in an
+   * LRU pool capped at MAX_VIEWING_TOKENS. When the pool is full, the
+   * oldest viewing token is evicted (unsubscribed) to make room.
+   *
+   * Idempotent: if the token is already subscribed via any path
+   * (primary, scan, or viewing) this is a no-op except for moving the
+   * viewing entry to the LRU head.
+   */
+  async addViewing(token: string, exchange: string): Promise<void> {
+    if (!token || token === '0') return;
+    if (this.primaryTokens.has(token) || this.scanTokens.has(token)) {
+      return; // already covered by the scanner / watchlist paths
+    }
+    // Already viewing — bump to head of LRU.
+    if (this.viewingTokens.has(token)) {
+      this.viewingTokens.delete(token);
+      this.viewingTokens.set(token, exchange);
+      return;
+    }
+    // Make room if at capacity. Evict the oldest entry (Map iteration
+    // order = insertion order, so first key is the LRU tail).
+    if (this.viewingTokens.size >= this.MAX_VIEWING_TOKENS) {
+      const oldest = this.viewingTokens.keys().next().value as string | undefined;
+      if (oldest) {
+        this.viewingTokens.delete(oldest);
+        this.brokerAdapter?.unsubscribeFromFeed?.([oldest]);
+        this.logger.log(`Evicted viewing token ${oldest} (LRU)`);
+      }
+    }
+    this.viewingTokens.set(token, exchange);
+    if (this.brokerAdapter?.subscribeAdHoc) {
+      await this.brokerAdapter.subscribeAdHoc(token, exchange);
+      this.logger.log(`Viewing-subscribed ${token} on ${exchange} (pool ${this.viewingTokens.size}/${this.MAX_VIEWING_TOKENS})`);
+    }
+    await this.ensureInstrumentMappings([token]);
+  }
+
+  /**
    * Get the latest cached quote for a token.
    */
   getQuote(token: string): Quote | null {
@@ -488,6 +541,7 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
     return [
       ...Array.from(this.primaryTokens),
       ...Array.from(this.scanTokens),
+      ...Array.from(this.viewingTokens.keys()),
     ];
   }
 
