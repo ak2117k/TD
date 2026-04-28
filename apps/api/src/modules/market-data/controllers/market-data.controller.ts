@@ -152,12 +152,52 @@ export class MarketDataController {
         }
       }
 
-      const combined = [...localResults, ...brokerResults].slice(0, 50);
+      // Third-tier fallback: search the cached ScripMaster by company
+      // NAME as well as trading symbol. Angel One's searchScrip API
+      // matches symbol only — so a user typing "Varun Beverages" finds
+      // nothing because the trading symbol is "VBL". This catches it.
+      let masterResults: typeof brokerResults = [];
+      const combinedSoFar = [...localResults, ...brokerResults];
+      if (combinedSoFar.length < 5 && (!exchange || exchange === 'NSE' || exchange === 'BSE')) {
+        try {
+          const raw = await this.angelOneAdapter.searchInMaster(trimmed, {
+            exchanges: exchange ? [exchange] : ['NSE', 'BSE'],
+            limit: 20,
+          });
+          for (const item of raw) {
+            const token = String(item.token ?? '');
+            if (!token || seenTokens.has(token)) continue;
+            seenTokens.add(token);
+            masterResults.push({
+              symbol: String(item.symbol ?? ''),
+              token,
+              name: String(item.name ?? item.symbol ?? ''),
+              exchange: String(item.exch_seg ?? ''),
+              segment: String(item.exch_seg ?? ''),
+              lotSize: parseInt(String(item.lotsize ?? '1')) || 1,
+              tickSize: parseFloat(String(item.tick_size ?? '0.05')) || 0.05,
+              expiry: null,
+              strike: null,
+              optionType: null,
+            });
+          }
+        } catch (err) {
+          this.logger.warn(
+            `ScripMaster name-search failed: ${err instanceof Error ? err.message : err}`,
+          );
+        }
+      }
+
+      const combined = [...localResults, ...brokerResults, ...masterResults].slice(0, 50);
+      const sourceParts: string[] = [];
+      if (localResults.length > 0) sourceParts.push('local');
+      if (brokerResults.length > 0) sourceParts.push('angel_one');
+      if (masterResults.length > 0) sourceParts.push('master');
 
       return {
         instruments: combined,
         count: combined.length,
-        source: brokerResults.length > 0 ? 'local+angel_one' : 'local',
+        source: sourceParts.join('+') || 'local',
       };
     } catch (error) {
       this.logger.error(

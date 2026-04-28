@@ -505,35 +505,143 @@ export class AngelOneAdapterService implements BrokerAdapter {
    * instrumenttype for options: "OPTIDX" (index options) or "OPTSTK" (stock options)
    * exch_seg: "NFO" for F&O segment
    */
-  async fetchInstrumentMaster(
-    exchange: string = 'NFO',
+  /** In-memory cache for the public ScripMaster (~200k rows). Reused by
+   * fetchInstrumentMaster() and searchInMaster(); refreshed lazily. */
+  private masterCache: any[] | null = null;
+  private masterCacheLoadedAt: number = 0;
+  private static readonly MASTER_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+  private masterCacheLoading: Promise<any[]> | null = null;
+
+  private async ensureMasterCache(): Promise<any[]> {
+    const fresh =
+      this.masterCache &&
+      Date.now() - this.masterCacheLoadedAt < AngelOneAdapterService.MASTER_CACHE_TTL_MS;
+    if (fresh) return this.masterCache!;
+    if (this.masterCacheLoading) return this.masterCacheLoading;
+
+    this.masterCacheLoading = (async () => {
+      const url =
+        'https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json';
+      this.logger.log('Downloading instrument master from Angel One CDN');
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Failed to download instrument master: HTTP ${response.status}`);
+      }
+      const all: any[] = await response.json();
+      this.logger.log(`Downloaded ${all.length} total instruments from Angel One`);
+      this.masterCache = all;
+      this.masterCacheLoadedAt = Date.now();
+      return all;
+    })();
+
+    try {
+      return await this.masterCacheLoading;
+    } finally {
+      this.masterCacheLoading = null;
+    }
+  }
+
+  async fetchInstrumentMaster(exchange: string = 'NFO'): Promise<any[]> {
+    const all = await this.ensureMasterCache();
+    const filtered = all.filter((i: any) => i.exch_seg === exchange);
+    this.logger.log(`Filtered to ${filtered.length} instruments for ${exchange}`);
+    return filtered;
+  }
+
+  /**
+   * Resolve company-name searches via Yahoo Finance. Angel One's master
+   * carries only trading symbols (the `name` field for NSE-EQ rows is
+   * just the symbol again), so a user typing "Varun Beverages" finds
+   * nothing locally. Yahoo's free search API maps the company name to
+   * a ticker like VBL.NS, which we then look up in the master.
+   *
+   * Returns an array of trading-symbol prefixes (no exchange suffix)
+   * that the caller can use to filter the master cache.
+   */
+  private async resolveNameToSymbols(query: string): Promise<Array<{ symbol: string; exchange: 'NSE' | 'BSE' }>> {
+    const url = `https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&quotesCount=10&newsCount=0`;
+    try {
+      const resp = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      if (!resp.ok) return [];
+      const data = (await resp.json()) as { quotes?: Array<{ symbol?: string }> };
+      const out: Array<{ symbol: string; exchange: 'NSE' | 'BSE' }> = [];
+      for (const q of data.quotes ?? []) {
+        const yahooSym = q.symbol ?? '';
+        if (yahooSym.endsWith('.NS')) {
+          out.push({ symbol: yahooSym.slice(0, -3), exchange: 'NSE' });
+        } else if (yahooSym.endsWith('.BO')) {
+          out.push({ symbol: yahooSym.slice(0, -3), exchange: 'BSE' });
+        }
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Search the cached ScripMaster by symbol OR company name. Combines
+   * three matchers:
+   * 1. Direct symbol match in the master (cash-equity NSE/BSE).
+   * 2. Yahoo-resolved name → symbol → master lookup (covers "Varun
+   *    Beverages" → VBL → token 18921).
+   *
+   * Filters to EQ on NSE/BSE by default; F&O contracts would swamp.
+   */
+  async searchInMaster(
+    query: string,
+    options: { exchanges?: string[]; limit?: number } = {},
   ): Promise<any[]> {
-    const url =
-      'https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json';
+    const exchanges = options.exchanges ?? ['NSE', 'BSE'];
+    const limit = options.limit ?? 25;
+    const q = query.trim().toUpperCase();
+    if (q.length < 2) return [];
 
-    this.logger.log(`Downloading instrument master from Angel One CDN`);
+    const all = await this.ensureMasterCache();
+    const isEqRow = (inst: any): boolean => {
+      const sym = String(inst.symbol ?? '').toUpperCase();
+      return inst.exch_seg === 'NSE' ? sym.endsWith('-EQ') : inst.exch_seg === 'BSE';
+    };
 
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(
-        `Failed to download instrument master: HTTP ${response.status}`,
-      );
+    const matches: any[] = [];
+    const seen = new Set<string>();
+
+    for (const inst of all) {
+      if (!exchanges.includes(inst.exch_seg)) continue;
+      if (!isEqRow(inst)) continue;
+      const sym = String(inst.symbol ?? '').toUpperCase();
+      const name = String(inst.name ?? '').toUpperCase();
+      if (sym.includes(q) || name.includes(q)) {
+        matches.push(inst);
+        seen.add(String(inst.token ?? ''));
+        if (matches.length >= limit) break;
+      }
     }
 
-    const allInstruments: any[] = await response.json();
-    this.logger.log(
-      `Downloaded ${allInstruments.length} total instruments from Angel One`,
-    );
+    // If we have headroom, ask Yahoo to map the query to tickers and
+    // pull the matching master rows. Skips when query is short or
+    // already produced enough matches.
+    if (matches.length < limit && q.length >= 3) {
+      const resolved = await this.resolveNameToSymbols(query);
+      for (const r of resolved) {
+        if (!exchanges.includes(r.exchange)) continue;
+        const wanted = r.exchange === 'NSE' ? `${r.symbol}-EQ` : r.symbol;
+        const wantedUpper = wanted.toUpperCase();
+        for (const inst of all) {
+          if (inst.exch_seg !== r.exchange) continue;
+          if (!isEqRow(inst)) continue;
+          if (String(inst.symbol ?? '').toUpperCase() !== wantedUpper) continue;
+          const tk = String(inst.token ?? '');
+          if (seen.has(tk)) break;
+          matches.push(inst);
+          seen.add(tk);
+          break;
+        }
+        if (matches.length >= limit) break;
+      }
+    }
 
-    // Filter to requested exchange segment
-    const filtered = allInstruments.filter(
-      (i: any) => i.exch_seg === exchange,
-    );
-    this.logger.log(
-      `Filtered to ${filtered.length} instruments for ${exchange}`,
-    );
-
-    return filtered;
+    return matches;
   }
 
   /**
