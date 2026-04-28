@@ -53,6 +53,16 @@ export interface SetupAnalysis {
   levels: LevelsSnapshot;
   reason: string;
   indicators?: IndicatorReadings;
+  /**
+   * Higher-timeframe trend snapshot used by the MTF gate. The frontend
+   * only needs the bias label + the higher-TF identifier for the chip;
+   * ema9/ema21 numbers can be omitted from the type without affecting
+   * runtime (they're still on the wire).
+   */
+  higherTimeframeTrend?: {
+    tf: string;
+    bias: 'bullish' | 'bearish' | 'neutral';
+  } | null;
   // Locked-setup fields. Once a setup is detected, the backend freezes
   // entry/SL/target and returns the same numbers across every poll until
   // it transitions to a closed state — so the chart panel becomes a
@@ -243,6 +253,32 @@ export default function AnalysisPanel({ analysis, loading }: AnalysisPanelProps)
           vol {analysis.volumeRatio.toFixed(2)}×
         </span>
       </div>
+
+      {analysis.higherTimeframeTrend && (() => {
+        const mtf = analysis.higherTimeframeTrend!;
+        const label =
+          mtf.bias === 'bullish'
+            ? 'BULLISH'
+            : mtf.bias === 'bearish'
+              ? 'BEARISH'
+              : 'NEUTRAL';
+        const arrow = mtf.bias === 'bullish' ? '↑' : mtf.bias === 'bearish' ? '↓' : '—';
+        const tone = clsx(
+          mtf.bias === 'bullish' && 'text-emerald-400',
+          mtf.bias === 'bearish' && 'text-red-400',
+          mtf.bias === 'neutral' && 'text-gray-400',
+        );
+        return (
+          <div className="mt-2 flex items-center justify-between border-t border-gray-700/60 pt-2 text-[10px]">
+            <span className="font-semibold uppercase tracking-wider text-gray-500">
+              {mtf.tf.toUpperCase()} Trend
+            </span>
+            <span className={clsx('font-semibold uppercase tracking-wider', tone)}>
+              {label} {arrow}
+            </span>
+          </div>
+        );
+      })()}
 
       {analysis.indicators && (() => {
         const ind = analysis.indicators;

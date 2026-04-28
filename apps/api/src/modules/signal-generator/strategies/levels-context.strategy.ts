@@ -62,6 +62,19 @@ export interface AnalyzeInput {
    * bail every time.
    */
   nowMs?: number;
+  /**
+   * Pre-computed higher-timeframe trend bias. The strategy never recomputes
+   * this internally — the caller (SignalGeneratorService) fetches the
+   * higher-TF candles and runs ema9/ema21 on the closed bar. Null when the
+   * working TF has no higher TF (1d) or when the higher TF couldn't be
+   * computed (insufficient candles).
+   */
+  higherTimeframeTrend?: {
+    tf: string;
+    ema9: number;
+    ema21: number;
+    bias: 'bullish' | 'bearish' | 'neutral';
+  } | null;
   /** Optional gate-trace callback for backtest harnesses. */
   debug?: (event: string, detail?: Record<string, unknown>) => void;
 }
@@ -101,6 +114,7 @@ export class LevelsContextStrategy implements TradingStrategy {
     const input: AnalyzeInput | null = this.unwrap(data);
     if (!input) return null;
     const { candles, levelBook, nowIst, nowMs, debug } = input;
+    const higherTimeframeTrend = input.higherTimeframeTrend ?? null;
 
     if (candles.length < 25) { debug?.('reject:not-enough-candles'); return null; }
     if (this.isStale(levelBook, nowMs ?? Date.now())) { debug?.('reject:stale'); return null; }
@@ -169,6 +183,23 @@ export class LevelsContextStrategy implements TradingStrategy {
       if (rr < (this.params.rrFloor as number)) { debug?.('reject:rr', { rr }); continue; }
       debug?.('pass:rr', { rr });
 
+      // Multi-timeframe trend filter — last gate before grading. Runs only
+      // on pre-computed higher-TF bias (see AnalyzeInput.higherTimeframeTrend).
+      // Strategy stays pure: no DB / broker calls here.
+      if (higherTimeframeTrend && higherTimeframeTrend.bias !== 'neutral') {
+        const conflict =
+          (isLong && higherTimeframeTrend.bias === 'bearish') ||
+          (!isLong && higherTimeframeTrend.bias === 'bullish');
+        if (conflict) {
+          debug?.('reject:mtf-conflict', {
+            tf: higherTimeframeTrend.tf,
+            bias: higherTimeframeTrend.bias,
+            side: isLong ? 'BUY' : 'SELL',
+          });
+          continue;
+        }
+      }
+
       const indicators = this.computeIndicators(candles, levelBook.spot, isLong);
       debug?.('pass:indicators', { agreement: indicators.agreement });
 
@@ -212,6 +243,7 @@ export class LevelsContextStrategy implements TradingStrategy {
         volumeRatio,
         timeOfDayWindow: window,
         indicators,
+        higherTimeframeTrend,
       };
 
       const reason = this.buildReason(setupContext, levelBook);
@@ -274,7 +306,12 @@ export class LevelsContextStrategy implements TradingStrategy {
     const snapshot = data as MarketSnapshot;
     const meta = (snapshot as unknown as { metadata?: AnalyzeInput }).metadata;
     if (!meta || !meta.levelBook || !meta.nowIst) return null;
-    return { candles: snapshot.candles, levelBook: meta.levelBook, nowIst: meta.nowIst };
+    return {
+      candles: snapshot.candles,
+      levelBook: meta.levelBook,
+      nowIst: meta.nowIst,
+      higherTimeframeTrend: meta.higherTimeframeTrend ?? null,
+    };
   }
 
   private isStale(book: LevelBook, nowMs: number): boolean {

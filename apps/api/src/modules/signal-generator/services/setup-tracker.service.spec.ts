@@ -43,6 +43,7 @@ const buyInput = (overrides?: Partial<LockInput>): LockInput => ({
   grade: 'A',
   atr14: 10,
   indicators: baseIndicators,
+  higherTimeframeTrend: null,
   reason: 'test',
   ...overrides,
 });

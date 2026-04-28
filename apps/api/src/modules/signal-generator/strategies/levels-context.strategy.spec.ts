@@ -217,6 +217,107 @@ describe('LevelsContextStrategy.analyze', () => {
     expect(['B', 'C']).toContain(meta.grade);
   });
 
+  // The MTF gate tests use REVERSAL-pattern fixtures (a pinbar wick into
+  // PDH for SELL, a pinbar wick into PDL for BUY) — the same fixture
+  // shape the existing pinbar-rejection test uses. We keep the gate
+  // assertion narrow: gate-event presence + setup direction.
+  const buyReversalFixture = (): { book: LevelBook; candles: CandleData[] } => {
+    const book = baseLevelBook({ spot: 23965, pdl: 23950 });
+    const lastCandle: CandleData = {
+      timestamp: new Date('2026-04-27T10:30:00+05:30'),
+      open: 23960,
+      high: 23975,
+      low: 23942,    // wick INTO PDL from above
+      close: 23972,  // body small + back above level
+      volume: 130_000,
+    };
+    const earlier = buildCandles(24, {
+      closes: Array(24).fill(23960),
+      volumes: Array(24).fill(100_000),
+    });
+    return { book, candles: [...earlier, lastCandle] };
+  };
+
+  const sellReversalFixture = (): { book: LevelBook; candles: CandleData[] } => {
+    const book = baseLevelBook({ spot: 24165 });
+    const lastCandle: CandleData = {
+      timestamp: new Date('2026-04-27T10:30:00+05:30'),
+      open: 24160,
+      high: 24182,    // wick into PDH
+      low: 24150,
+      close: 24158,   // body small + back below level
+      volume: 130_000,
+    };
+    const earlier = buildCandles(24, {
+      closes: Array(24).fill(24160),
+      volumes: Array(24).fill(100_000),
+    });
+    return { book, candles: [...earlier, lastCandle] };
+  };
+
+  // ---- MTF gate: bullish higher-TF allows BUY ----
+  it('fires BUY setup when higher-TF trend is bullish (no conflict)', () => {
+    const { book, candles } = buyReversalFixture();
+    const out = strategy.analyze({
+      candles, levelBook: book, nowIst: '10:30',
+      higherTimeframeTrend: { tf: '1h', ema9: 24050, ema21: 23980, bias: 'bullish' },
+    });
+    expect(out).not.toBeNull();
+    expect(out!.side).toBe('BUY');
+    const meta = out!.metadata as { higherTimeframeTrend: { bias: string } };
+    expect(meta.higherTimeframeTrend.bias).toBe('bullish');
+  });
+
+  // ---- MTF gate: bearish higher-TF rejects BUY ----
+  it('rejects BUY setup when higher-TF trend is bearish (mtf-conflict)', () => {
+    const { book, candles } = buyReversalFixture();
+    const events: string[] = [];
+    const out = strategy.analyze({
+      candles, levelBook: book, nowIst: '10:30',
+      higherTimeframeTrend: { tf: '1h', ema9: 23900, ema21: 24050, bias: 'bearish' },
+      debug: (e) => events.push(e),
+    });
+    expect(out).toBeNull();
+    expect(events).toContain('reject:mtf-conflict');
+  });
+
+  // ---- MTF gate: bullish higher-TF rejects SELL ----
+  it('rejects SELL setup when higher-TF trend is bullish (mtf-conflict)', () => {
+    const { book, candles } = sellReversalFixture();
+    const events: string[] = [];
+    const out = strategy.analyze({
+      candles, levelBook: book, nowIst: '10:30',
+      higherTimeframeTrend: { tf: '1h', ema9: 24180, ema21: 24100, bias: 'bullish' },
+      debug: (e) => events.push(e),
+    });
+    expect(out).toBeNull();
+    expect(events).toContain('reject:mtf-conflict');
+  });
+
+  // ---- MTF gate: neutral higher-TF allows setup ----
+  it('fires BUY setup when higher-TF trend is neutral (gate skipped)', () => {
+    const { book, candles } = buyReversalFixture();
+    const out = strategy.analyze({
+      candles, levelBook: book, nowIst: '10:30',
+      higherTimeframeTrend: { tf: '1h', ema9: 24000, ema21: 24000, bias: 'neutral' },
+    });
+    expect(out).not.toBeNull();
+    expect(out!.side).toBe('BUY');
+  });
+
+  // ---- MTF gate: null higher-TF skips the gate ----
+  it('fires BUY setup when higher-TF trend is null (no MTF data)', () => {
+    const { book, candles } = buyReversalFixture();
+    const out = strategy.analyze({
+      candles, levelBook: book, nowIst: '10:30',
+      higherTimeframeTrend: null,
+    });
+    expect(out).not.toBeNull();
+    expect(out!.side).toBe('BUY');
+    const meta = out!.metadata as { higherTimeframeTrend: unknown };
+    expect(meta.higherTimeframeTrend).toBeNull();
+  });
+
   // ---- SetupContext.indicators populated ----
   it('populates SetupContext.indicators with non-null readings when history is sufficient', () => {
     const closes: number[] = [];

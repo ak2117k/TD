@@ -61,5 +61,18 @@ export interface SetupContext {
   volumeRatio: number; // 5m volume / VMA20
   timeOfDayWindow: TimeOfDayWindow;
   indicators: IndicatorReadings;
+  /**
+   * Higher-timeframe trend bias snapshot used by the MTF gate. Computed by
+   * SignalGeneratorService from the closed bar of the next-higher TF (e.g.
+   * 1H when working on 15m). Null when the working TF has no defined
+   * higher TF (e.g. 1d) or when not enough higher-TF candles were
+   * available to compute it.
+   */
+  higherTimeframeTrend: {
+    tf: string;
+    ema9: number;
+    ema21: number;
+    bias: 'bullish' | 'bearish' | 'neutral';
+  } | null;
   expiryDayWarning?: boolean;
 }

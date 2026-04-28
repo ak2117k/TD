@@ -16,6 +16,7 @@ import { SignalFilterDto } from '../dto/signal.dto';
 import { LevelBookService } from './level-book.service';
 import { SetupTrackerService, SetupStatus, LockedSetup } from './setup-tracker.service';
 import { LevelsContextStrategy } from '../strategies/levels-context.strategy';
+import { ema } from '../strategies/indicators';
 import { SetupContext } from '../types/setup-context.types';
 import { LevelBook } from '../types/level-book.types';
 import {
@@ -86,6 +87,29 @@ function computeExpiry(exchange: string, now: Date = new Date()): Date {
 /** Minimum number of timeframes that must agree for signal confirmation. */
 const MIN_TIMEFRAME_AGREEMENT = 2;
 
+/**
+ * Map a working timeframe to the next-higher timeframe used for the MTF
+ * trend filter. Daily has no higher TF — null short-circuits the check.
+ */
+const HIGHER_TF_MAP: Record<string, string | null> = {
+  '1m': '5m',
+  '5m': '15m',
+  '15m': '1h',
+  '1h': '4h',
+  '4h': '1d',
+  '1d': null,
+};
+
+/** Number of higher-TF candles to fetch for the EMA9/EMA21 computation. */
+const HIGHER_TF_CANDLE_TARGET = 30;
+
+/**
+ * Look-back window when fetching higher-TF candles. Generous because the
+ * higher TF spans larger chunks of time per bar — 30 daily candles = 30
+ * trading days, 30 hourly candles = ~5 trading days.
+ */
+const HIGHER_TF_LOOKBACK_DAYS = 60;
+
 export interface LevelsSnapshot {
   pdh: number;
   pdl: number;
@@ -115,6 +139,7 @@ export type AnalyzeResult =
       levels: LevelsSnapshot;
       reason: string;
       indicators: SetupContext['indicators'];
+      higherTimeframeTrend: SetupContext['higherTimeframeTrend'];
       status: SetupStatus;
       setupId: string;
       triggeredAt: string | null;
@@ -124,6 +149,7 @@ export type AnalyzeResult =
       kind: 'no-setup';
       reason: string;
       levels: LevelsSnapshot | null;
+      higherTimeframeTrend: SetupContext['higherTimeframeTrend'];
     };
 
 function snapshotFromBook(book: LevelBook): LevelsSnapshot {
@@ -189,6 +215,7 @@ export class SignalGeneratorService {
         kind: 'no-setup',
         reason: 'no level book available — symbol has no historical data',
         levels: null,
+        higherTimeframeTrend: null,
       };
     }
 
@@ -233,8 +260,22 @@ export class SignalGeneratorService {
         kind: 'no-setup',
         reason: `not enough candles (got ${candles.length}, need 25 for ${timeframe})`,
         levels: snapshotFromBook(book),
+        higherTimeframeTrend: null,
       };
     }
+
+    // Compute the higher-TF trend bias for the MTF gate. If the working
+    // TF is daily (no defined higher TF) or if the higher-TF candle fetch
+    // can't return enough data, this stays null and the strategy skips the
+    // gate (defensive — never let a transient broker error suppress
+    // signals).
+    const higherTimeframeTrend = await this.computeHigherTimeframeTrend(
+      token,
+      exchange,
+      timeframe,
+      instrument?.id ?? null,
+      now,
+    );
 
     const istParts = new Intl.DateTimeFormat('en-IN', {
       timeZone: 'Asia/Kolkata',
@@ -269,6 +310,7 @@ export class SignalGeneratorService {
       levelBook: book,
       nowIst,
       nowMs: nowMsForStrategy,
+      higherTimeframeTrend,
       debug,
     });
 
@@ -277,6 +319,7 @@ export class SignalGeneratorService {
         kind: 'no-setup',
         reason: lastReject,
         levels: snapshotFromBook(book),
+        higherTimeframeTrend,
       };
     }
 
@@ -296,6 +339,7 @@ export class SignalGeneratorService {
       grade: ctx.grade,
       atr14: ctx.atr14,
       indicators: ctx.indicators,
+      higherTimeframeTrend: ctx.higherTimeframeTrend,
       reason: output.reason,
     });
     // lock() returns null when there's already an active setup — fall back
@@ -307,6 +351,7 @@ export class SignalGeneratorService {
         kind: 'no-setup',
         reason: 'failed to lock setup',
         levels: snapshotFromBook(book),
+        higherTimeframeTrend,
       };
     }
     return this.lockedToResult(final, book);
@@ -340,6 +385,7 @@ export class SignalGeneratorService {
           },
       reason: setup.reason,
       indicators: setup.indicators,
+      higherTimeframeTrend: setup.higherTimeframeTrend,
       status: setup.status,
       setupId: setup.id,
       triggeredAt: setup.triggeredAt ? setup.triggeredAt.toISOString() : null,
@@ -683,6 +729,87 @@ export class SignalGeneratorService {
         volume: typeof c.volume === 'bigint' ? Number(c.volume) : c.volume,
       })),
     };
+  }
+
+  /**
+   * Compute the higher-TF trend bias (bullish/bearish/neutral) from EMA9
+   * vs EMA21 on the most-recent CLOSED candle of the higher TF. Returns
+   * null when:
+   *   • the working TF has no defined higher TF (e.g. 1d)
+   *   • we couldn't fetch enough higher-TF candles
+   *   • EMA computation fails (insufficient series length)
+   *
+   * The strategy treats null as "skip the gate" so a transient broker
+   * failure here never suppresses signals.
+   */
+  private async computeHigherTimeframeTrend(
+    token: string,
+    exchange: string,
+    workingTimeframe: string,
+    instrumentId: string | null,
+    now: Date,
+  ): Promise<SetupContext['higherTimeframeTrend']> {
+    const higherTf = HIGHER_TF_MAP[workingTimeframe];
+    if (!higherTf) return null;
+
+    const from = new Date(
+      now.getTime() - HIGHER_TF_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
+    );
+
+    let candles: Array<{ close: number }> = [];
+
+    if (instrumentId) {
+      try {
+        const dbRows = await this.marketDataRepository.getCandles(
+          instrumentId,
+          higherTf,
+          from,
+          now,
+          HIGHER_TF_CANDLE_TARGET,
+        );
+        candles = dbRows.map((c) => ({ close: c.close }));
+      } catch (err) {
+        this.logger.debug(
+          `MTF DB fetch failed for token ${token} ${higherTf}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
+    if (candles.length < 22) {
+      try {
+        const broker = await this.angelOneAdapter.getHistoricalData(
+          token, exchange, higherTf, from, now,
+        );
+        candles = (broker as Array<{ close: number | string }>).slice(
+          -HIGHER_TF_CANDLE_TARGET,
+        ).map((c) => ({ close: Number(c.close) }));
+      } catch (err) {
+        this.logger.debug(
+          `MTF broker fetch failed for token ${token} ${higherTf}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
+    if (candles.length < 22) return null;
+
+    // Use the most-recent CLOSED bar (length-2). If only one bar is
+    // present we can't safely drop the in-progress one; fall back to the
+    // last available close.
+    const closesUpToClosed =
+      candles.length >= 2
+        ? candles.slice(0, -1).map((c) => c.close)
+        : candles.map((c) => c.close);
+
+    const ema9Val = ema(closesUpToClosed, 9);
+    const ema21Val = ema(closesUpToClosed, 21);
+    if (ema9Val == null || ema21Val == null) return null;
+
+    let bias: 'bullish' | 'bearish' | 'neutral';
+    if (ema9Val > ema21Val * 1.001) bias = 'bullish';
+    else if (ema9Val < ema21Val * 0.999) bias = 'bearish';
+    else bias = 'neutral';
+
+    return { tf: higherTf, ema9: ema9Val, ema21: ema21Val, bias };
   }
 
   /**
