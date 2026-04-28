@@ -1,5 +1,7 @@
+import { useEffect } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { AppLayout } from '@/components/layout';
+import { wsService } from '@/services/websocket';
 import DashboardPage from '@/pages/dashboard/DashboardPage';
 import ChartsPage from '@/pages/charts/ChartsPage';
 import MarketPage from '@/pages/market/MarketPage';
@@ -15,6 +17,16 @@ import StrategyBuilderPage from '@/pages/strategy-builder/StrategyBuilderPage';
 import SettingsPage from '@/pages/settings/SettingsPage';
 
 export default function App() {
+  // Open the live-data WebSocket once at app boot. wsService.connect() is
+  // idempotent — repeat calls are no-ops once sockets are open. Without
+  // this, only the AutoTrade page (which calls connect itself) would
+  // ever bring up live ticks; charts and signals would silently fall
+  // back to historical-only data and require a page refresh to pick up
+  // anything new.
+  useEffect(() => {
+    wsService.connect();
+  }, []);
+
   return (
     <Routes>
       <Route element={<AppLayout />}>
