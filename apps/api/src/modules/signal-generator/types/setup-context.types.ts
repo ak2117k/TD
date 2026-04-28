@@ -11,6 +11,13 @@ export type SetupGrade = 'A' | 'B' | 'C';
 
 export type TimeOfDayWindow = 'morning-trend' | 'afternoon-trend';
 
+/**
+ * Daily regime classification — drives per-setup-type bias in gradeSetup
+ * and the regime-mismatch reject gate. Computed once per analyze() call
+ * from the LevelBook (todayHigh/todayLow vs atr14).
+ */
+export type Regime = 'trending' | 'choppy' | 'normal';
+
 export interface IndicatorReadings {
   ema9: number | null;
   ema21: number | null;
@@ -74,5 +81,13 @@ export interface SetupContext {
     ema21: number;
     bias: 'bullish' | 'bearish' | 'neutral';
   } | null;
+  /**
+   * Daily regime classification. Null when not computed (defensive — legacy
+   * callers without LevelBook range/ATR data). Drives the per-setup-type
+   * bias applied in gradeSetup() and the regime-mismatch reject gate.
+   */
+  regime: Regime | null;
+  /** intradayRange / atr14 — diagnostic ratio backing the regime label. */
+  intradayRangeRatio: number;
   expiryDayWarning?: boolean;
 }

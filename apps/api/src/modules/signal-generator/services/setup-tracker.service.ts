@@ -43,6 +43,8 @@ export interface LockedSetup {
   low: number;
   indicators: SetupContext['indicators'];
   higherTimeframeTrend: SetupContext['higherTimeframeTrend'];
+  regime: SetupContext['regime'];
+  intradayRangeRatio: number;
   reason: string;
 }
 
@@ -62,6 +64,8 @@ export interface LockInput {
   atr14: number;
   indicators: SetupContext['indicators'];
   higherTimeframeTrend: SetupContext['higherTimeframeTrend'];
+  regime: SetupContext['regime'];
+  intradayRangeRatio: number;
   reason: string;
 }
 
@@ -124,6 +128,8 @@ export class SetupTrackerService {
       low: input.entry,
       indicators: input.indicators,
       higherTimeframeTrend: input.higherTimeframeTrend,
+      regime: input.regime,
+      intradayRangeRatio: input.intradayRangeRatio,
       reason: input.reason,
     };
     this.active.set(input.token, setup);

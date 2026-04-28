@@ -63,6 +63,13 @@ export interface SetupAnalysis {
     tf: string;
     bias: 'bullish' | 'bearish' | 'neutral';
   } | null;
+  /**
+   * Daily regime classification (intraday range vs ATR14). Optional — older
+   * backend builds may not emit this, so the chip is rendered only when
+   * the field is present.
+   */
+  regime?: 'trending' | 'choppy' | 'normal' | null;
+  intradayRangeRatio?: number;
   // Locked-setup fields. Once a setup is detected, the backend freezes
   // entry/SL/target and returns the same numbers across every poll until
   // it transitions to a closed state — so the chart panel becomes a
@@ -275,6 +282,28 @@ export default function AnalysisPanel({ analysis, loading }: AnalysisPanelProps)
             </span>
             <span className={clsx('font-semibold uppercase tracking-wider', tone)}>
               {label} {arrow}
+            </span>
+          </div>
+        );
+      })()}
+
+      {analysis.regime && (() => {
+        const regime = analysis.regime!;
+        const ratio = analysis.intradayRangeRatio ?? 0;
+        const label =
+          regime === 'trending' ? 'TRENDING' : regime === 'choppy' ? 'CHOPPY' : 'NORMAL';
+        const tone = clsx(
+          regime === 'trending' && 'text-emerald-400',
+          regime === 'choppy' && 'text-amber-400',
+          regime === 'normal' && 'text-gray-400',
+        );
+        return (
+          <div className="mt-2 flex items-center justify-between border-t border-gray-700/60 pt-2 text-[10px]">
+            <span className="font-semibold uppercase tracking-wider text-gray-500">
+              Regime
+            </span>
+            <span className={clsx('font-semibold uppercase tracking-wider', tone)}>
+              {label} ({ratio.toFixed(1)}×)
             </span>
           </div>
         );

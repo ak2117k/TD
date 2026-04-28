@@ -15,7 +15,7 @@ import { SignalGateway } from '../gateways/signal.gateway';
 import { SignalFilterDto } from '../dto/signal.dto';
 import { LevelBookService } from './level-book.service';
 import { SetupTrackerService, SetupStatus, LockedSetup } from './setup-tracker.service';
-import { LevelsContextStrategy } from '../strategies/levels-context.strategy';
+import { LevelsContextStrategy, classifyRegime } from '../strategies/levels-context.strategy';
 import { ema } from '../strategies/indicators';
 import { SetupContext } from '../types/setup-context.types';
 import { LevelBook } from '../types/level-book.types';
@@ -140,6 +140,8 @@ export type AnalyzeResult =
       reason: string;
       indicators: SetupContext['indicators'];
       higherTimeframeTrend: SetupContext['higherTimeframeTrend'];
+      regime: SetupContext['regime'];
+      intradayRangeRatio: number;
       status: SetupStatus;
       setupId: string;
       triggeredAt: string | null;
@@ -150,6 +152,8 @@ export type AnalyzeResult =
       reason: string;
       levels: LevelsSnapshot | null;
       higherTimeframeTrend: SetupContext['higherTimeframeTrend'];
+      regime: SetupContext['regime'];
+      intradayRangeRatio: number;
     };
 
 function snapshotFromBook(book: LevelBook): LevelsSnapshot {
@@ -216,8 +220,17 @@ export class SignalGeneratorService {
         reason: 'no level book available — symbol has no historical data',
         levels: null,
         higherTimeframeTrend: null,
+        regime: null,
+        intradayRangeRatio: 0,
       };
     }
+
+    // Daily regime — driven by today's intraday range vs ATR14. Computed
+    // once per analyze() call and threaded into the strategy via AnalyzeInput.
+    const { regime, intradayRangeRatio } = classifyRegime({
+      intradayRange: book.todayHigh - book.todayLow,
+      atr14: book.atr14,
+    });
 
     const instrument = await this.marketDataRepository.getInstrumentByToken(token);
     const now = new Date();
@@ -261,6 +274,8 @@ export class SignalGeneratorService {
         reason: `not enough candles (got ${candles.length}, need 25 for ${timeframe})`,
         levels: snapshotFromBook(book),
         higherTimeframeTrend: null,
+        regime,
+        intradayRangeRatio,
       };
     }
 
@@ -311,6 +326,7 @@ export class SignalGeneratorService {
       nowIst,
       nowMs: nowMsForStrategy,
       higherTimeframeTrend,
+      regime,
       debug,
     });
 
@@ -320,6 +336,8 @@ export class SignalGeneratorService {
         reason: lastReject,
         levels: snapshotFromBook(book),
         higherTimeframeTrend,
+        regime,
+        intradayRangeRatio,
       };
     }
 
@@ -340,6 +358,8 @@ export class SignalGeneratorService {
       atr14: ctx.atr14,
       indicators: ctx.indicators,
       higherTimeframeTrend: ctx.higherTimeframeTrend,
+      regime: ctx.regime,
+      intradayRangeRatio: ctx.intradayRangeRatio,
       reason: output.reason,
     });
     // lock() returns null when there's already an active setup — fall back
@@ -352,6 +372,8 @@ export class SignalGeneratorService {
         reason: 'failed to lock setup',
         levels: snapshotFromBook(book),
         higherTimeframeTrend,
+        regime,
+        intradayRangeRatio,
       };
     }
     return this.lockedToResult(final, book);
@@ -386,6 +408,8 @@ export class SignalGeneratorService {
       reason: setup.reason,
       indicators: setup.indicators,
       higherTimeframeTrend: setup.higherTimeframeTrend,
+      regime: setup.regime,
+      intradayRangeRatio: setup.intradayRangeRatio,
       status: setup.status,
       setupId: setup.id,
       triggeredAt: setup.triggeredAt ? setup.triggeredAt.toISOString() : null,

@@ -14,6 +14,7 @@ import {
   SetupContext,
   TimeOfDayWindow,
   IndicatorReadings,
+  Regime,
 } from '../types/setup-context.types';
 import { ema, rsi, macd, bollinger, roc } from './indicators';
 
@@ -49,6 +50,36 @@ const PRIME_AFTERNOON_END = '15:15';
 const CONFLUENCE_RADIUS_ATR = 0.1;
 const VOLUME_RATIO_GRADE_A = 1.4;
 
+// Regime thresholds — intraday-range / atr14. Above TRENDING, breakouts
+// are the "trade-with-the-day" play; below CHOPPY, reversals dominate.
+const REGIME_TRENDING_RATIO = 1.5;
+const REGIME_CHOPPY_RATIO = 0.7;
+
+/**
+ * Classify the day's regime from intraday range vs ATR14. Pure function;
+ * used by the service to label every analyze() call. When the input range
+ * is zero (very early in the session before bars accumulate, or off-hours
+ * data) we return 'normal' rather than fabricate a bias.
+ */
+export function classifyRegime(input: {
+  intradayRange: number;
+  atr14: number;
+}): { regime: Regime; intradayRangeRatio: number } {
+  const { intradayRange, atr14 } = input;
+  if (
+    !Number.isFinite(intradayRange) ||
+    !Number.isFinite(atr14) ||
+    atr14 <= 0 ||
+    intradayRange <= 0
+  ) {
+    return { regime: 'normal', intradayRangeRatio: 0 };
+  }
+  const ratio = intradayRange / atr14;
+  if (ratio >= REGIME_TRENDING_RATIO) return { regime: 'trending', intradayRangeRatio: ratio };
+  if (ratio <= REGIME_CHOPPY_RATIO) return { regime: 'choppy', intradayRangeRatio: ratio };
+  return { regime: 'normal', intradayRangeRatio: ratio };
+}
+
 export interface AnalyzeInput {
   candles: CandleData[];
   levelBook: LevelBook;
@@ -75,6 +106,12 @@ export interface AnalyzeInput {
     ema21: number;
     bias: 'bullish' | 'bearish' | 'neutral';
   } | null;
+  /**
+   * Daily regime classification produced by classifyRegime() in the service
+   * layer. Optional — undefined is treated as 'normal' (no bias) so legacy
+   * callers and unit fixtures keep working unchanged.
+   */
+  regime?: Regime;
   /** Optional gate-trace callback for backtest harnesses. */
   debug?: (event: string, detail?: Record<string, unknown>) => void;
 }
@@ -115,6 +152,11 @@ export class LevelsContextStrategy implements TradingStrategy {
     if (!input) return null;
     const { candles, levelBook, nowIst, nowMs, debug } = input;
     const higherTimeframeTrend = input.higherTimeframeTrend ?? null;
+    const regime: Regime = input.regime ?? 'normal';
+    // Diagnostic ratio echoed into setup metadata (intradayRange / atr14).
+    const intradayRange = Math.max(0, levelBook.todayHigh - levelBook.todayLow);
+    const intradayRangeRatio =
+      levelBook.atr14 > 0 && intradayRange > 0 ? intradayRange / levelBook.atr14 : 0;
 
     if (candles.length < 25) { debug?.('reject:not-enough-candles'); return null; }
     if (this.isStale(levelBook, nowMs ?? Date.now())) { debug?.('reject:stale'); return null; }
@@ -183,6 +225,19 @@ export class LevelsContextStrategy implements TradingStrategy {
       if (rr < (this.params.rrFloor as number)) { debug?.('reject:rr', { rr }); continue; }
       debug?.('pass:rr', { rr });
 
+      // Regime gate — counter-regime setups (REVERSAL on trending day,
+      // BREAKOUT on choppy day) historically lose; reject outright instead
+      // of merely demoting in gradeSetup.
+      const regimeMismatch =
+        (regime === 'trending' && setupType === 'REVERSAL') ||
+        (regime === 'choppy' && setupType === 'BREAKOUT');
+      if (regimeMismatch) {
+        debug?.('reject:regime-mismatch', {
+          regime, setupType, intradayRangeRatio,
+        });
+        continue;
+      }
+
       // Multi-timeframe trend filter — last gate before grading. Runs only
       // on pre-computed higher-TF bias (see AnalyzeInput.higherTimeframeTrend).
       // Strategy stays pure: no DB / broker calls here.
@@ -207,6 +262,7 @@ export class LevelsContextStrategy implements TradingStrategy {
         candidates, level: lvl, atr: levelBook.atr14,
         volumeRatio, nowIst, agreement: indicators.agreement,
         exchange: levelBook.exchange,
+        regime, setupType,
       });
       if (grade === 'C' && !this.params.includeGradeC) {
         debug?.('reject:grade-c', { volumeRatio, agreement: indicators.agreement });
@@ -244,6 +300,8 @@ export class LevelsContextStrategy implements TradingStrategy {
         timeOfDayWindow: window,
         indicators,
         higherTimeframeTrend,
+        regime,
+        intradayRangeRatio,
       };
 
       const reason = this.buildReason(setupContext, levelBook);
@@ -311,6 +369,7 @@ export class LevelsContextStrategy implements TradingStrategy {
       levelBook: meta.levelBook,
       nowIst: meta.nowIst,
       higherTimeframeTrend: meta.higherTimeframeTrend ?? null,
+      regime: meta.regime,
     };
   }
 
@@ -457,8 +516,10 @@ export class LevelsContextStrategy implements TradingStrategy {
     nowIst: string;
     agreement: number;
     exchange: string;
+    regime: Regime;
+    setupType: SetupType;
   }): SetupGrade {
-    const { candidates, level, atr, volumeRatio, nowIst, agreement, exchange } = args;
+    const { candidates, level, atr, volumeRatio, nowIst, agreement, exchange, regime, setupType } = args;
     const confluence = candidates.filter(
       (c) =>
         c !== level && Math.abs(c.value - level.value) <= CONFLUENCE_RADIUS_ATR * atr,
@@ -479,17 +540,29 @@ export class LevelsContextStrategy implements TradingStrategy {
     // Indicator-confluence adjustment: strong agreement (≥4) bumps up one
     // tier; meaningful opposition (≤-2) bumps down one tier; otherwise the
     // base grade stands.
+    let postIndicator: SetupGrade = base;
     if (agreement >= 4) {
-      if (base === 'B') return 'A';
-      if (base === 'C') return 'B';
+      if (base === 'B') postIndicator = 'A';
+      else if (base === 'C') postIndicator = 'B';
+      else postIndicator = 'A';
+    } else if (agreement <= -2) {
+      if (base === 'A') postIndicator = 'B';
+      else if (base === 'B') postIndicator = 'C';
+      else postIndicator = 'C';
+    }
+
+    // Regime bias — favors the matching setup type, bumps up one tier on
+    // alignment. Mismatched setups are rejected upstream, so this branch
+    // only applies the upgrade case here.
+    const regimeFavoursSetup =
+      (regime === 'trending' && setupType === 'BREAKOUT') ||
+      (regime === 'choppy' && setupType === 'REVERSAL');
+    if (regimeFavoursSetup) {
+      if (postIndicator === 'C') return 'B';
+      if (postIndicator === 'B') return 'A';
       return 'A';
     }
-    if (agreement <= -2) {
-      if (base === 'A') return 'B';
-      if (base === 'B') return 'C';
-      return 'C';
-    }
-    return base;
+    return postIndicator;
   }
 
   private computeIndicators(

@@ -44,6 +44,8 @@ const buyInput = (overrides?: Partial<LockInput>): LockInput => ({
   atr14: 10,
   indicators: baseIndicators,
   higherTimeframeTrend: null,
+  regime: 'normal',
+  intradayRangeRatio: 1.0,
   reason: 'test',
   ...overrides,
 });

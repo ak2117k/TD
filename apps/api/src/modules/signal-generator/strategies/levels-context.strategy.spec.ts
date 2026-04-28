@@ -318,6 +318,125 @@ describe('LevelsContextStrategy.analyze', () => {
     expect(meta.higherTimeframeTrend).toBeNull();
   });
 
+  // Breakout fixture: 24 filler bars + a last candle that closes strictly
+  // above PDH+0.15·ATR (24195). Custom wick keeps upperWick/range under
+  // BREAKOUT_WICK_MAX_RATIO 0.3. PDL/ORH/ORL/round-numbers are pushed out
+  // of range so PDH is the only candidate — keeps the test laser-focused
+  // on the regime branch.
+  const breakoutFixture = (): { book: LevelBook; candles: CandleData[] } => {
+    const book = baseLevelBook({
+      spot: 24199, pdh: 24180,
+      pdl: 22000, orh: null, orl: null, vwap: 22000,
+      todayHigh: 24205, todayLow: 23900,
+      roundNumbers: [],
+    });
+    const earlier = buildCandles(24, {
+      closes: Array(24).fill(24100),
+      volumes: Array(24).fill(100_000),
+    });
+    const lastCandle: CandleData = {
+      timestamp: new Date('2026-04-27T10:30:00+05:30'),
+      open: 24196, high: 24202, low: 24193, close: 24200, volume: 200_000,
+    };
+    return { book, candles: [...earlier, lastCandle] };
+  };
+
+  // ---- Regime gate: BREAKOUT + trending → grade upgraded ----
+  it('upgrades BREAKOUT grade B→A when regime is trending', () => {
+    const { book, candles } = breakoutFixture();
+    const out = strategy.analyze({
+      candles, levelBook: book, nowIst: '10:30',
+      regime: 'trending',
+    });
+    expect(out).not.toBeNull();
+    expect(out!.metadata!.setupType).toBe('BREAKOUT');
+    expect(out!.metadata!.grade).toBe('A');
+  });
+
+  // ---- Regime gate: BREAKOUT + choppy → reject:regime-mismatch ----
+  it('rejects BREAKOUT setup when regime is choppy', () => {
+    const { book, candles } = breakoutFixture();
+    const events: string[] = [];
+    const out = strategy.analyze({
+      candles, levelBook: book, nowIst: '10:30',
+      regime: 'choppy',
+      debug: (e) => events.push(e),
+    });
+    expect(out).toBeNull();
+    expect(events).toContain('reject:regime-mismatch');
+  });
+
+  // ---- Regime gate: REVERSAL + trending → reject:regime-mismatch ----
+  it('rejects REVERSAL setup when regime is trending', () => {
+    // Fixture isolates PDH as the only in-range level — pdl/orh/orl/round
+    // pushed far away so the iteration only sees the pinbar rejection.
+    const book = baseLevelBook({
+      spot: 24165, pdh: 24180,
+      pdl: 22000, orh: null, orl: null,
+      vwap: 22000, todayHigh: 24182, todayLow: 23900,
+      roundNumbers: [],
+    });
+    const lastCandle: CandleData = {
+      timestamp: new Date('2026-04-27T10:30:00+05:30'),
+      open: 24160, high: 24182, low: 24150, close: 24158, volume: 130_000,
+    };
+    const earlier = buildCandles(24, { closes: Array(24).fill(24160), volumes: Array(24).fill(100_000) });
+    const candles = [...earlier, lastCandle];
+    const events: string[] = [];
+    const out = strategy.analyze({
+      candles, levelBook: book, nowIst: '10:30',
+      regime: 'trending',
+      debug: (e) => events.push(e),
+    });
+    expect(out).toBeNull();
+    expect(events).toContain('reject:regime-mismatch');
+  });
+
+  // ---- Regime gate: REVERSAL + choppy → grade upgraded ----
+  it('upgrades REVERSAL grade B→A when regime is choppy', () => {
+    const book = baseLevelBook({
+      spot: 24165, pdh: 24180,
+      pdl: 22000, orh: null, orl: null,
+      vwap: 22000, todayHigh: 24182, todayLow: 23900,
+      roundNumbers: [],
+    });
+    const lastCandle: CandleData = {
+      timestamp: new Date('2026-04-27T10:30:00+05:30'),
+      open: 24160, high: 24182, low: 24150, close: 24158, volume: 130_000,
+    };
+    const earlier = buildCandles(24, { closes: Array(24).fill(24160), volumes: Array(24).fill(100_000) });
+    const candles = [...earlier, lastCandle];
+    const out = strategy.analyze({
+      candles, levelBook: book, nowIst: '10:30',
+      regime: 'choppy',
+    });
+    expect(out).not.toBeNull();
+    expect(out!.metadata!.setupType).toBe('REVERSAL');
+    expect(out!.metadata!.grade).toBe('A');
+  });
+
+  // ---- Regime gate: BREAKOUT + normal → no change ----
+  it('does not change grade when regime is normal (BREAKOUT)', () => {
+    const { book, candles } = breakoutFixture();
+    const out = strategy.analyze({
+      candles, levelBook: book, nowIst: '10:30',
+      regime: 'normal',
+    });
+    expect(out).not.toBeNull();
+    // Base grade is B (volume 2.0× passes but no confluence on PDH 24180).
+    expect(out!.metadata!.grade).toBe('B');
+  });
+
+  // ---- Regime gate: undefined regime → no change (defensive) ----
+  it('does not change grade when regime is undefined (defensive)', () => {
+    const { book, candles } = breakoutFixture();
+    const out = strategy.analyze({
+      candles, levelBook: book, nowIst: '10:30',
+    });
+    expect(out).not.toBeNull();
+    expect(out!.metadata!.grade).toBe('B');
+  });
+
   // ---- SetupContext.indicators populated ----
   it('populates SetupContext.indicators with non-null readings when history is sufficient', () => {
     const closes: number[] = [];
