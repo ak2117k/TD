@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import {
   MarketSnapshot,
@@ -14,7 +14,14 @@ import { SignalRepository, CreateSignalInput } from '../repositories/signal.repo
 import { SignalGateway } from '../gateways/signal.gateway';
 import { SignalFilterDto } from '../dto/signal.dto';
 import { LevelBookService } from './level-book.service';
-import { SetupTrackerService, SetupStatus, LockedSetup } from './setup-tracker.service';
+import {
+  SetupTrackerService,
+  SetupStatus,
+  LockedSetup,
+  RecommendedStrike,
+} from './setup-tracker.service';
+import { OptionStrikeSelectorService } from '../../options-chain/services/option-strike-selector.service';
+import { OptionsChainService } from '../../options-chain/services/options-chain.service';
 import { LevelsContextStrategy, classifyRegime } from '../strategies/levels-context.strategy';
 import { ema } from '../strategies/indicators';
 import { SetupContext } from '../types/setup-context.types';
@@ -110,6 +117,31 @@ const HIGHER_TF_CANDLE_TARGET = 30;
  */
 const HIGHER_TF_LOOKBACK_DAYS = 60;
 
+/**
+ * Standard option lot sizes by underlying. The `instrument` table's lotSize
+ * for an INDICES row reflects the index unit, not the F&O lot — so we keep
+ * a small canonical map here. Stocks fall back to 1, which means the
+ * frontend will render per-share P&L instead of per-lot.
+ */
+const OPTION_LOT_SIZES: Record<string, number> = {
+  NIFTY: 75,
+  BANKNIFTY: 15,
+  FINNIFTY: 40,
+  MIDCPNIFTY: 75,
+  SENSEX: 10,
+  CRUDEOIL: 100,
+  COPPER: 2500,
+  GOLD: 100,
+  SILVER: 30,
+  NATURALGAS: 1250,
+};
+
+function resolveOptionLotSize(symbol: string): number {
+  return OPTION_LOT_SIZES[symbol.toUpperCase()] ?? 1;
+}
+
+export { RecommendedStrike } from './setup-tracker.service';
+
 export interface LevelsSnapshot {
   pdh: number;
   pdl: number;
@@ -146,6 +178,7 @@ export type AnalyzeResult =
       setupId: string;
       triggeredAt: string | null;
       partialBookedAt: string | null;
+      recommendedStrike: RecommendedStrike | null;
     }
   | {
       kind: 'no-setup';
@@ -184,6 +217,10 @@ export class SignalGeneratorService {
     private readonly signalGateway: SignalGateway,
     private readonly levelBookService: LevelBookService,
     private readonly setupTracker: SetupTrackerService,
+    @Optional()
+    private readonly optionStrikeSelector: OptionStrikeSelectorService | null = null,
+    @Optional()
+    private readonly optionsChainService: OptionsChainService | null = null,
   ) {}
 
   async analyze(
@@ -342,6 +379,19 @@ export class SignalGeneratorService {
     }
 
     const ctx = output.metadata as SetupContext;
+
+    // Compute the optimal-strike recommendation BEFORE locking so the
+    // recommendation is frozen alongside entry/SL/target. Wrapped in
+    // try/catch — strike-selection failure must never block the analyze
+    // response.
+    const recommendedStrike = await this.computeRecommendedStrike(
+      output.symbol,
+      output.side,
+      ctx.entry,
+      ctx.target,
+      ctx.stoploss,
+    );
+
     const locked = this.setupTracker.lock({
       token,
       symbol: output.symbol,
@@ -361,6 +411,7 @@ export class SignalGeneratorService {
       regime: ctx.regime,
       intradayRangeRatio: ctx.intradayRangeRatio,
       reason: output.reason,
+      recommendedStrike,
     });
     // lock() returns null when there's already an active setup — fall back
     // to whatever's active (defensive; the short-circuit above usually
@@ -416,7 +467,77 @@ export class SignalGeneratorService {
       partialBookedAt: setup.partialBookedAt
         ? setup.partialBookedAt.toISOString()
         : null,
+      recommendedStrike: setup.recommendedStrike ?? null,
     };
+  }
+
+  /**
+   * Pick the highest-scoring strike around ATM and convert it into a
+   * trader-facing recommendation with expected per-share / per-lot premium
+   * P&L. Returns null whenever the options chain isn't available (off-hours,
+   * stocks without F&O, or transient broker errors) — the caller treats
+   * null as "no recommendation" and continues.
+   */
+  private async computeRecommendedStrike(
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    entry: number,
+    target: number,
+    stoploss: number,
+  ): Promise<RecommendedStrike | null> {
+    if (!this.optionStrikeSelector || !this.optionsChainService) return null;
+    try {
+      const expiries = await this.optionsChainService.getExpiries(symbol);
+      if (expiries.length === 0) return null;
+      const expiry = expiries[0];
+      const optionSide: 'CE' | 'PE' = side === 'BUY' ? 'CE' : 'PE';
+      const sel = await this.optionStrikeSelector.selectBestStrike({
+        underlying: symbol,
+        expiry,
+        side: optionSide,
+      });
+      if (!sel) return null;
+
+      const targetMove = Math.abs(target - entry);
+      const slMove = Math.abs(entry - stoploss);
+      const expectedProfitPerShare =
+        sel.delta * targetMove + 0.5 * sel.gamma * targetMove * targetMove;
+      const expectedLossPerShare =
+        sel.delta * slMove + 0.5 * sel.gamma * slMove * slMove;
+
+      const lotSize = resolveOptionLotSize(symbol);
+      const expectedProfitPerLot = expectedProfitPerShare * lotSize;
+      const expectedLossPerLot = expectedLossPerShare * lotSize;
+
+      return {
+        strike: sel.strikePrice,
+        side: sel.side,
+        expiry: sel.expiry,
+        ltp: sel.ltp,
+        delta: sel.delta,
+        gamma: sel.gamma,
+        theta: sel.theta,
+        vega: sel.vega,
+        iv: sel.iv,
+        oi: sel.oi,
+        volume: sel.volume,
+        expectedProfitPerShare:
+          Math.round(expectedProfitPerShare * 100) / 100,
+        expectedLossPerShare:
+          Math.round(expectedLossPerShare * 100) / 100,
+        lotSize,
+        expectedProfitPerLot: Math.round(expectedProfitPerLot * 100) / 100,
+        expectedLossPerLot: Math.round(expectedLossPerLot * 100) / 100,
+        reason: sel.reason,
+      };
+    } catch (err) {
+      this.logger.warn(
+        `Strike recommendation failed for ${symbol}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+      return null;
+    }
   }
 
   /**

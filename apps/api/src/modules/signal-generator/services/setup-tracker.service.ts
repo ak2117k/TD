@@ -4,6 +4,28 @@ import { randomUUID } from 'crypto';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { SetupContext } from '../types/setup-context.types';
 
+export interface RecommendedStrike {
+  strike: number;
+  side: 'CE' | 'PE';
+  expiry: string;
+  ltp: number;
+  delta: number;
+  gamma: number;
+  theta: number;
+  vega: number;
+  iv: number;
+  oi: number;
+  volume: number;
+  /** Expected premium gain per share if spot reaches target (delta + half-gamma estimate). */
+  expectedProfitPerShare: number;
+  /** Expected premium loss per share if spot hits stop. */
+  expectedLossPerShare: number;
+  lotSize: number;
+  expectedProfitPerLot: number;
+  expectedLossPerLot: number;
+  reason: string;
+}
+
 export type SetupStatus =
   | 'PENDING'
   | 'ACTIVE'
@@ -46,6 +68,11 @@ export interface LockedSetup {
   regime: SetupContext['regime'];
   intradayRangeRatio: number;
   reason: string;
+  /**
+   * Strike recommendation locked in at setup-detection time. Frozen across
+   * subsequent polls so the panel doesn't churn as option LTP drifts.
+   */
+  recommendedStrike: RecommendedStrike | null;
 }
 
 export interface LockInput {
@@ -67,6 +94,7 @@ export interface LockInput {
   regime: SetupContext['regime'];
   intradayRangeRatio: number;
   reason: string;
+  recommendedStrike?: RecommendedStrike | null;
 }
 
 const EOD_AGE_MS = 8 * 60 * 60 * 1000;
@@ -131,6 +159,7 @@ export class SetupTrackerService {
       regime: input.regime,
       intradayRangeRatio: input.intradayRangeRatio,
       reason: input.reason,
+      recommendedStrike: input.recommendedStrike ?? null,
     };
     this.active.set(input.token, setup);
     this.logger.log(

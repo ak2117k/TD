@@ -38,6 +38,31 @@ export type SetupStatus =
   | 'EOD'          // closed: session ended without resolution
   | 'INVALIDATED'; // closed: structural change
 
+/**
+ * Optimal-strike recommendation locked in by the backend at the moment a
+ * setup fires. All fields optional so an older backend (without this in
+ * the response) still renders the rest of the panel.
+ */
+export interface RecommendedStrike {
+  strike: number;
+  side: 'CE' | 'PE';
+  expiry: string;
+  ltp: number;
+  delta: number;
+  gamma: number;
+  theta: number;
+  vega: number;
+  iv: number;
+  oi: number;
+  volume: number;
+  expectedProfitPerShare: number;
+  expectedLossPerShare: number;
+  lotSize: number;
+  expectedProfitPerLot: number;
+  expectedLossPerLot: number;
+  reason: string;
+}
+
 export interface SetupAnalysis {
   kind: 'setup';
   symbol: string;
@@ -80,6 +105,8 @@ export interface SetupAnalysis {
   partialTakeAt?: number;
   trailingSl?: number | null;
   partialBookedAt?: string | null;
+  /** Backend-locked optimal-strike pick. Optional so stale builds still render. */
+  recommendedStrike?: RecommendedStrike | null;
 }
 
 export interface NoSetupAnalysis {
@@ -97,6 +124,17 @@ interface AnalysisPanelProps {
 
 function fmt(n: number): string {
   return n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function fmtRupees0(n: number): string {
+  const sign = n >= 0 ? '+' : '-';
+  const absRounded = Math.round(Math.abs(n));
+  return `${sign}₹ ${absRounded.toLocaleString('en-IN')}`;
+}
+
+function fmtPremium(n: number): string {
+  if (!Number.isFinite(n)) return '—';
+  return `₹ ${n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function computeRR(setup: SetupAnalysis): string {
@@ -248,6 +286,58 @@ export default function AnalysisPanel({ analysis, loading }: AnalysisPanelProps)
           </span>
         </div>
       )}
+
+      {analysis.recommendedStrike && (() => {
+        const r = analysis.recommendedStrike!;
+        const expiryShort = r.expiry.slice(0, 10);
+        const showLot = r.lotSize > 1;
+        return (
+          <div className="mt-3 border-t border-gray-700/60 pt-2">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+              Options Play
+            </div>
+            <div className="mt-1 flex items-center justify-between text-[11px] text-gray-200">
+              <span className="font-semibold tabular-nums">
+                {r.side} {fmt(r.strike)}
+              </span>
+              <span className="text-gray-500">Exp {expiryShort}</span>
+            </div>
+            <div className="mt-1 grid grid-cols-3 gap-x-2 text-[10px] tabular-nums">
+              <div className="flex flex-col">
+                <span className="text-gray-500">Premium</span>
+                <span className="text-gray-100">{fmtPremium(r.ltp)}</span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-gray-500">Δ</span>
+                <span className="text-gray-100">{r.delta.toFixed(2)}</span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-gray-500">IV</span>
+                <span className="text-gray-100">{r.iv.toFixed(1)}</span>
+              </div>
+            </div>
+            <div className="mt-2">
+              <div className="text-[10px] uppercase tracking-wider text-gray-500">
+                Expected P&amp;L
+              </div>
+              <div className="mt-0.5 flex items-center justify-between text-[11px] tabular-nums">
+                <span className="text-emerald-400">
+                  {showLot
+                    ? `${fmtRupees0(r.expectedProfitPerLot)} / lot @ TGT`
+                    : `${fmtRupees0(r.expectedProfitPerShare)} @ TGT`}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[11px] tabular-nums">
+                <span className="text-red-400">
+                  {showLot
+                    ? `-₹ ${Math.round(Math.abs(r.expectedLossPerLot)).toLocaleString('en-IN')} / lot @ SL`
+                    : `-₹ ${Math.abs(r.expectedLossPerShare).toFixed(2)} @ SL`}
+                </span>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       <div className="mt-3 flex items-center justify-between border-t border-gray-700/60 pt-2 text-[10px]">
         <span className="rounded bg-gray-700/60 px-1.5 py-0.5 font-mono tabular-nums text-gray-200">
