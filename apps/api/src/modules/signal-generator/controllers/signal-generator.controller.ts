@@ -103,12 +103,19 @@ export class SignalGeneratorController {
     if (!token || !exchange || !symbol) {
       throw new BadRequestException('token, exchange, symbol are required');
     }
-    return this.signalGeneratorService.analyze(
-      token,
-      exchange,
-      symbol,
-      timeframe ?? '5m',
-    );
+    try {
+      return await this.signalGeneratorService.analyze(
+        token,
+        exchange,
+        symbol,
+        timeframe ?? '15m',
+      );
+    } catch (err) {
+      this.logger.error(
+        `analyze failed for ${symbol}/${timeframe ?? '15m'}: ${err instanceof Error ? err.stack ?? err.message : err}`,
+      );
+      throw err;
+    }
   }
 
   /**

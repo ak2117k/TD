@@ -63,7 +63,7 @@ export class LevelsContextStrategy implements TradingStrategy {
   readonly description =
     'Intraday breakout/reversal scanner anchored on PDH/PDL/OR/VWAP/round-number levels with R:R + time-of-day + volume gates.';
   readonly supportedSegments = ['OPTIONS', 'EQUITY', 'FUTURES', 'COMMODITY'];
-  readonly preferredTimeframes = ['5m'];
+  readonly preferredTimeframes = ['15m', '1h'];
 
   private params: Record<string, unknown> = {
     rrFloor: RR_FLOOR_STRICT,
@@ -73,6 +73,12 @@ export class LevelsContextStrategy implements TradingStrategy {
     // Backtest harnesses can flip this to true to surface the ceiling
     // (what the strategy *would* trade if Grade C were allowed).
     includeGradeC: false,
+    // When true, evaluate against candles[length-1] (the latest bar,
+    // possibly in-progress). Used by existing unit tests that put the
+    // trigger candle at the end of the array. Live + backtest paths
+    // should leave this false so the strategy waits for the bar to
+    // CLOSE before detecting volume / pattern.
+    evaluateOnLastBar: false,
   };
 
   // The TradingStrategy interface forces `analyze(MarketSnapshot)`. The
@@ -87,9 +93,25 @@ export class LevelsContextStrategy implements TradingStrategy {
     if (this.isStale(levelBook, nowMs ?? Date.now())) { debug?.('reject:stale'); return null; }
     if (!this.inTradingWindow(nowIst, levelBook.exchange)) { debug?.('reject:outside-window', { nowIst, exchange: levelBook.exchange }); return null; }
 
-    const last = candles[candles.length - 1];
-    const vma20 = this.vma(candles.slice(-21, -1)); // 20 prior bars
-    const volumeRatio = vma20 > 0 ? last.volume / vma20 : 0;
+    // Evaluate against the most-recent CLOSED bar (length-2), not the
+    // in-progress one (length-1). candles[length-1] is typically a
+    // partially-formed bar whose volume is incomplete and OHLC pattern
+    // is still mutating, so using it produces false "low-volume"
+    // rejections on otherwise-active breakouts. Closed bar gives:
+    //   • Complete volume vs VMA20 (no premature confirmation reject)
+    //   • Stable OHLC for pinbar/engulfing/breakout detection
+    // Tests can opt back into evaluating-on-last-bar via setParameters
+    // (their fixtures put the trigger at length-1).
+    const useLastBar = this.params.evaluateOnLastBar === true;
+    const triggerIdx = useLastBar ? candles.length - 1 : candles.length - 2;
+    const last = candles[triggerIdx];
+    if (!last) { debug?.('reject:no-trigger-bar'); return null; }
+    const vmaWindow = useLastBar
+      ? candles.slice(-21, -1) // 20 bars BEFORE last
+      : candles.slice(-22, -2); // 20 bars BEFORE the closed bar
+    const vma20 = this.vma(vmaWindow);
+    const lastVolume = Number(last.volume) || 0;
+    const volumeRatio = vma20 > 0 ? lastVolume / vma20 : 0;
     debug?.('in-window', { atr14: levelBook.atr14, volumeRatio, spot: levelBook.spot });
 
     const candidates = this.collectLevels(levelBook);
@@ -134,8 +156,9 @@ export class LevelsContextStrategy implements TradingStrategy {
       }
       debug?.('pass:grade', { grade, agreement: indicators.agreement });
 
+      const morningStart = levelBook.exchange === 'MCX' ? MORNING_START_MCX : MORNING_START_NSE;
       const window: TimeOfDayWindow =
-        this.between(nowIst, MORNING_START, MORNING_END)
+        this.between(nowIst, morningStart, MORNING_END)
           ? 'morning-trend' : 'afternoon-trend';
 
       const setupContext: SetupContext = {
@@ -457,8 +480,21 @@ export class LevelsContextStrategy implements TradingStrategy {
 
   private vma(candles: CandleData[]): number {
     if (candles.length === 0) return 0;
-    const sum = candles.reduce((a, c) => a + c.volume, 0);
-    return sum / candles.length;
+    // Median, not arithmetic mean. Some Indian-broker historical APIs
+    // occasionally write a single-day cumulative volume into one bar
+    // (artifacts of session-close reporting). One 50M-vol bar in a
+    // 20-bar window can pull the mean up 1000x and make every
+    // subsequent bar look like 0.001× "average". Median is robust
+    // to those outliers without breaking the VMA semantics for the
+    // 99% of bars that are clean. Coerce to Number defensively in
+    // case any candle still carries bigint volume.
+    const vols = candles
+      .map((c) => Number(c.volume))
+      .filter((v) => Number.isFinite(v))
+      .sort((a, b) => a - b);
+    if (vols.length === 0) return 0;
+    const mid = Math.floor(vols.length / 2);
+    return vols.length % 2 === 0 ? (vols[mid - 1] + vols[mid]) / 2 : vols[mid];
   }
 
   private buildReason(ctx: SetupContext, book: LevelBook): string {

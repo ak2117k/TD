@@ -7,6 +7,10 @@ describe('LevelsContextStrategy.analyze', () => {
   let strategy: LevelsContextStrategy;
   beforeEach(() => {
     strategy = new LevelsContextStrategy();
+    // These fixtures put the trigger candle at the END of the array
+    // (length-1). Production defaults to evaluating against the last
+    // CLOSED bar (length-2), so opt back into legacy mode for tests.
+    strategy.setParameters({ evaluateOnLastBar: true });
   });
 
   // Build N 5-min candles ending at a target close. ATR/volume are configurable.

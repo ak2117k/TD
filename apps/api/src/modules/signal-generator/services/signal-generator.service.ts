@@ -152,7 +152,7 @@ export class SignalGeneratorService {
     token: string,
     exchange: string,
     symbol: string,
-    timeframe: string = '5m',
+    timeframe: string = '15m',
   ): Promise<AnalyzeResult> {
     const book = await this.levelBookService.lazyLoad(token, exchange, symbol);
     if (!book) {
