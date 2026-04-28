@@ -24,7 +24,12 @@ const PINBAR_BODY_PCT = 0.3;         // body ≤ 30% of full candle range
 const SL_BUFFER_ATR = 0.25;          // SL = level + 0.25 × ATR (asymmetric direction-aware)
 const RR_FLOOR_STRICT = 2.0;
 const STALE_TICK_MS = 60_000;
-const MORNING_START = '09:45';
+// NSE opens at 09:15, MCX at 09:00. The morning window starts a settle
+// period after the open so the first burst of opening volatility is
+// already absorbed before the strategy starts evaluating setups.
+// NSE: 30-min settle → 09:45. MCX: 15-min settle → 09:15.
+const MORNING_START_NSE = '09:45';
+const MORNING_START_MCX = '09:15';
 const MORNING_END = '11:00';
 const AFTERNOON_START = '14:30';
 const AFTERNOON_END = '15:30';
@@ -80,7 +85,7 @@ export class LevelsContextStrategy implements TradingStrategy {
 
     if (candles.length < 25) { debug?.('reject:not-enough-candles'); return null; }
     if (this.isStale(levelBook, nowMs ?? Date.now())) { debug?.('reject:stale'); return null; }
-    if (!this.inTradingWindow(nowIst)) { debug?.('reject:outside-window', { nowIst }); return null; }
+    if (!this.inTradingWindow(nowIst, levelBook.exchange)) { debug?.('reject:outside-window', { nowIst, exchange: levelBook.exchange }); return null; }
 
     const last = candles[candles.length - 1];
     const vma20 = this.vma(candles.slice(-21, -1)); // 20 prior bars
@@ -121,6 +126,7 @@ export class LevelsContextStrategy implements TradingStrategy {
       const grade = this.gradeSetup({
         candidates, level: lvl, atr: levelBook.atr14,
         volumeRatio, nowIst, agreement: indicators.agreement,
+        exchange: levelBook.exchange,
       });
       if (grade === 'C' && !this.params.includeGradeC) {
         debug?.('reject:grade-c', { volumeRatio, agreement: indicators.agreement });
@@ -211,9 +217,10 @@ export class LevelsContextStrategy implements TradingStrategy {
     return nowMs - book.lastTickAt.getTime() > STALE_TICK_MS;
   }
 
-  private inTradingWindow(nowIst: string): boolean {
+  private inTradingWindow(nowIst: string, exchange: string): boolean {
+    const morningStart = exchange === 'MCX' ? MORNING_START_MCX : MORNING_START_NSE;
     return (
-      this.between(nowIst, MORNING_START, MORNING_END) ||
+      this.between(nowIst, morningStart, MORNING_END) ||
       this.between(nowIst, AFTERNOON_START, AFTERNOON_END)
     );
   }
@@ -324,14 +331,20 @@ export class LevelsContextStrategy implements TradingStrategy {
     volumeRatio: number;
     nowIst: string;
     agreement: number;
+    exchange: string;
   }): SetupGrade {
-    const { candidates, level, atr, volumeRatio, nowIst, agreement } = args;
+    const { candidates, level, atr, volumeRatio, nowIst, agreement, exchange } = args;
     const confluence = candidates.filter(
       (c) =>
         c !== level && Math.abs(c.value - level.value) <= CONFLUENCE_RADIUS_ATR * atr,
     ).length;
+    // Prime A-grade window: highest-quality post-open (after the settle)
+    // and pre-close commit. NSE: 09:45-10:30 + 14:45-15:15.
+    // MCX: 09:15-10:00 + 14:45-15:15 (same afternoon).
+    const primeMorningStart = exchange === 'MCX' ? '09:15' : '09:45';
+    const primeMorningEnd = exchange === 'MCX' ? '10:00' : '10:30';
     const primeWindow =
-      this.between(nowIst, '09:45', '10:30') ||
+      this.between(nowIst, primeMorningStart, primeMorningEnd) ||
       this.between(nowIst, '14:45', '15:15');
     let base: SetupGrade;
     if (confluence >= 1 && volumeRatio >= VOLUME_RATIO_GRADE_A && primeWindow) base = 'A';

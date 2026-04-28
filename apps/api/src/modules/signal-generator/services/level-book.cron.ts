@@ -94,7 +94,21 @@ export class LevelBookCron implements OnModuleInit {
     this.logger.log(`Seeded ${UNIVERSE.length} level books`);
   }
 
-  /** 09:30 IST Mon-Fri — lock the opening range from the first 15-min candle. */
+  /**
+   * 09:16 IST Mon-Fri — earliest OR lock for MCX (first 15 min ends
+   * 09:15; +1 min buffer for the aggregator to flush the closed bar).
+   * NSE entries are skipped silently here because their OR candle
+   * (09:15-09:30) hasn't been written yet.
+   */
+  @Cron('0 16 9 * * 1-5', { timeZone: 'Asia/Kolkata' })
+  async lockOpeningRangeMcx(): Promise<void> {
+    await this.lockOpeningRange();
+  }
+
+  /**
+   * 09:30 IST Mon-Fri — lock OR for NSE (first 15 min = 09:15-09:30).
+   * Also catches any MCX entries that missed the 09:15 firing (idempotent).
+   */
   @Cron('0 30 9 * * 1-5', { timeZone: 'Asia/Kolkata' })
   async lockOpeningRange(): Promise<void> {
     this.logger.log('Locking opening ranges');
@@ -109,9 +123,15 @@ export class LevelBookCron implements OnModuleInit {
         });
         if (!inst) continue;
         const resolvedToken = inst.token;
-        // The 09:15-09:30 IST candle is timestamp = 03:45 UTC of today
+        // OR candle = first 15 min of the session.
+        // NSE opens 09:15 IST → OR candle starts 03:45 UTC.
+        // MCX opens 09:00 IST → OR candle starts 03:30 UTC.
         const today = new Date();
-        today.setUTCHours(3, 45, 0, 0);
+        if (u.exchange === 'MCX') {
+          today.setUTCHours(3, 30, 0, 0);
+        } else {
+          today.setUTCHours(3, 45, 0, 0);
+        }
         const tomorrow = new Date(today);
         tomorrow.setUTCMinutes(today.getUTCMinutes() + 15);
         const orCandle = await this.prisma.candle.findFirst({
