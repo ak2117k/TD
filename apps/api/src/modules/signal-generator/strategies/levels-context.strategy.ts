@@ -24,15 +24,24 @@ const PINBAR_BODY_PCT = 0.3;         // body ≤ 30% of full candle range
 const SL_BUFFER_ATR = 0.25;          // SL = level + 0.25 × ATR (asymmetric direction-aware)
 const RR_FLOOR_STRICT = 2.0;
 const STALE_TICK_MS = 60_000;
-// NSE opens at 09:15, MCX at 09:00. The morning window starts a settle
-// period after the open so the first burst of opening volatility is
-// already absorbed before the strategy starts evaluating setups.
-// NSE: 30-min settle → 09:45. MCX: 15-min settle → 09:15.
-const MORNING_START_NSE = '09:45';
-const MORNING_START_MCX = '09:15';
-const MORNING_END = '11:00';
-const AFTERNOON_START = '14:30';
-const AFTERNOON_END = '15:30';
+// Trading-window bounds. The strategy now evaluates the FULL session
+// (no midday-chop filter). Per-exchange:
+//   NSE/BSE  : 09:00 – 15:30 IST (technically opens 09:15 but 09:00
+//              gives breathing room for pre-open carryover)
+//   MCX      : 09:00 – 23:30 IST (full evening session, 11:30 PM)
+const SESSION_OPEN = '09:00';
+const SESSION_CLOSE_NSE = '15:30';
+const SESSION_CLOSE_MCX = '23:30';
+
+// "Prime" sub-windows used only by gradeSetup to upgrade a setup to A
+// when other confluence is also present. Outside these, B and C are
+// still tradeable; we just don't auto-A them.
+const PRIME_MORNING_START_NSE = '09:45';
+const PRIME_MORNING_START_MCX = '09:15';
+const PRIME_MORNING_END_NSE = '10:30';
+const PRIME_MORNING_END_MCX = '10:00';
+const PRIME_AFTERNOON_START = '14:45';
+const PRIME_AFTERNOON_END = '15:15';
 const CONFLUENCE_RADIUS_ATR = 0.1;
 const VOLUME_RATIO_GRADE_A = 1.4;
 
@@ -156,10 +165,11 @@ export class LevelsContextStrategy implements TradingStrategy {
       }
       debug?.('pass:grade', { grade, agreement: indicators.agreement });
 
-      const morningStart = levelBook.exchange === 'MCX' ? MORNING_START_MCX : MORNING_START_NSE;
+      // Coarse classification. Anything before 12:00 IST is "morning"
+      // session-feel, after is "afternoon-trend". MCX evening (15:30+)
+      // also reads as afternoon — closest semantic for now.
       const window: TimeOfDayWindow =
-        this.between(nowIst, morningStart, MORNING_END)
-          ? 'morning-trend' : 'afternoon-trend';
+        nowIst < '12:00' ? 'morning-trend' : 'afternoon-trend';
 
       const setupContext: SetupContext = {
         levelType: lvl.type,
@@ -241,11 +251,8 @@ export class LevelsContextStrategy implements TradingStrategy {
   }
 
   private inTradingWindow(nowIst: string, exchange: string): boolean {
-    const morningStart = exchange === 'MCX' ? MORNING_START_MCX : MORNING_START_NSE;
-    return (
-      this.between(nowIst, morningStart, MORNING_END) ||
-      this.between(nowIst, AFTERNOON_START, AFTERNOON_END)
-    );
+    const close = exchange === 'MCX' ? SESSION_CLOSE_MCX : SESSION_CLOSE_NSE;
+    return this.between(nowIst, SESSION_OPEN, close);
   }
 
   private between(hhmm: string, lo: string, hi: string): boolean {
@@ -364,11 +371,11 @@ export class LevelsContextStrategy implements TradingStrategy {
     // Prime A-grade window: highest-quality post-open (after the settle)
     // and pre-close commit. NSE: 09:45-10:30 + 14:45-15:15.
     // MCX: 09:15-10:00 + 14:45-15:15 (same afternoon).
-    const primeMorningStart = exchange === 'MCX' ? '09:15' : '09:45';
-    const primeMorningEnd = exchange === 'MCX' ? '10:00' : '10:30';
+    const primeMorningStart = exchange === 'MCX' ? PRIME_MORNING_START_MCX : PRIME_MORNING_START_NSE;
+    const primeMorningEnd = exchange === 'MCX' ? PRIME_MORNING_END_MCX : PRIME_MORNING_END_NSE;
     const primeWindow =
       this.between(nowIst, primeMorningStart, primeMorningEnd) ||
-      this.between(nowIst, '14:45', '15:15');
+      this.between(nowIst, PRIME_AFTERNOON_START, PRIME_AFTERNOON_END);
     let base: SetupGrade;
     if (confluence >= 1 && volumeRatio >= VOLUME_RATIO_GRADE_A && primeWindow) base = 'A';
     else if (volumeRatio >= VOLUME_RATIO_MIN) base = 'B';
