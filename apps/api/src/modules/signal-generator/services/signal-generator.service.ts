@@ -14,6 +14,7 @@ import { SignalRepository, CreateSignalInput } from '../repositories/signal.repo
 import { SignalGateway } from '../gateways/signal.gateway';
 import { SignalFilterDto } from '../dto/signal.dto';
 import { LevelBookService } from './level-book.service';
+import { SetupTrackerService, SetupStatus, LockedSetup } from './setup-tracker.service';
 import { LevelsContextStrategy } from '../strategies/levels-context.strategy';
 import { SetupContext } from '../types/setup-context.types';
 import { LevelBook } from '../types/level-book.types';
@@ -112,6 +113,9 @@ export type AnalyzeResult =
       levels: LevelsSnapshot;
       reason: string;
       indicators: SetupContext['indicators'];
+      status: SetupStatus;
+      setupId: string;
+      triggeredAt: string | null;
     }
   | {
       kind: 'no-setup';
@@ -146,6 +150,7 @@ export class SignalGeneratorService {
     private readonly settingsService: SettingsService,
     private readonly signalGateway: SignalGateway,
     private readonly levelBookService: LevelBookService,
+    private readonly setupTracker: SetupTrackerService,
   ) {}
 
   async analyze(
@@ -154,6 +159,22 @@ export class SignalGeneratorService {
     symbol: string,
     timeframe: string = '15m',
   ): Promise<AnalyzeResult> {
+    // Locked-setup short-circuit: if there's already an active setup for
+    // this token, return its FROZEN entry/SL/target rather than re-running
+    // the strategy. This is the whole point of locking — every poll on the
+    // same setup must return the same numbers, not drift with spot.
+    const existing = this.setupTracker.getActive(token);
+    if (existing && (existing.status === 'PENDING' || existing.status === 'ACTIVE')) {
+      const liveBook = await this.levelBookService.lazyLoad(token, exchange, symbol);
+      // Update tracker against the latest spot so PENDING -> ACTIVE etc.
+      // transitions don't lag behind the chart.
+      if (liveBook) {
+        this.setupTracker.updateFromTick(token, liveBook.spot, new Date());
+      }
+      const refreshed = this.setupTracker.getActive(token) ?? existing;
+      return this.lockedToResult(refreshed, liveBook);
+    }
+
     const book = await this.levelBookService.lazyLoad(token, exchange, symbol);
     if (!book) {
       return {
@@ -252,21 +273,65 @@ export class SignalGeneratorService {
     }
 
     const ctx = output.metadata as SetupContext;
-    return {
-      kind: 'setup',
+    const locked = this.setupTracker.lock({
+      token,
       symbol: output.symbol,
+      exchange: output.exchange,
       side: output.side,
+      setupType: ctx.setupType,
+      levelType: ctx.levelType,
+      levelValue: ctx.levelValue,
       entry: ctx.entry,
       stoploss: ctx.stoploss,
       target: ctx.target,
-      levelType: ctx.levelType,
-      setupType: ctx.setupType,
       grade: ctx.grade,
       atr14: ctx.atr14,
-      volumeRatio: ctx.volumeRatio,
-      levels: snapshotFromBook(book),
-      reason: output.reason,
       indicators: ctx.indicators,
+      reason: output.reason,
+    });
+    // lock() returns null when there's already an active setup — fall back
+    // to whatever's active (defensive; the short-circuit above usually
+    // catches this path first).
+    const final = locked ?? this.setupTracker.getActive(token);
+    if (!final) {
+      return {
+        kind: 'no-setup',
+        reason: 'failed to lock setup',
+        levels: snapshotFromBook(book),
+      };
+    }
+    return this.lockedToResult(final, book);
+  }
+
+  private lockedToResult(
+    setup: LockedSetup,
+    book: LevelBook | null,
+  ): AnalyzeResult {
+    return {
+      kind: 'setup',
+      symbol: setup.symbol,
+      side: setup.side,
+      entry: setup.entry,
+      stoploss: setup.stoploss,
+      target: setup.target,
+      levelType: setup.levelType,
+      setupType: setup.setupType,
+      grade: setup.grade,
+      atr14: setup.atr14,
+      // volumeRatio is part of the original setupContext but not held by
+      // the locked record — surface 0 when re-serving an existing lock.
+      volumeRatio: 0,
+      levels: book
+        ? snapshotFromBook(book)
+        : {
+            pdh: 0, pdl: 0, orh: null, orl: null,
+            vwap: 0, todayHigh: 0, todayLow: 0, atr14: setup.atr14,
+          },
+      reason: setup.reason,
+      indicators: setup.indicators,
+      status: setup.status,
+      setupId: setup.id,
+      triggeredAt: setup.triggeredAt ? setup.triggeredAt.toISOString() : null,
     };
   }
 

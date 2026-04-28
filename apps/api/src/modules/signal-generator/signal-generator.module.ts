@@ -24,6 +24,7 @@ import { VwapDeviationStrategy } from './strategies/vwap-deviation.strategy';
 import { AnandSniperV25CombinedStrategy } from './strategies/anand-sniper-v25-combined.strategy';
 import { LevelBookService } from './services/level-book.service';
 import { LevelBookCron } from './services/level-book.cron';
+import { SetupTrackerService } from './services/setup-tracker.service';
 
 // @Global so LevelBookService is injectable from MarketFeedService
 // (in MarketDataModule) without MarketDataModule needing to import this
@@ -76,6 +77,10 @@ import { LevelBookCron } from './services/level-book.cron';
 
     // Cron jobs — pre-market session seeder (09:15) + opening range locker (09:30)
     LevelBookCron,
+
+    // In-memory locked-setup tracker — anchors entry/SL/target so the same
+    // setup re-evaluated on subsequent polls returns the same numbers.
+    SetupTrackerService,
   ],
   exports: [
     SignalGeneratorService,
@@ -86,6 +91,7 @@ import { LevelBookCron } from './services/level-book.cron';
     StrategyStorageService,
     SignalRepository,
     LevelBookService,
+    SetupTrackerService,
   ],
 })
 export class SignalGeneratorModule {}

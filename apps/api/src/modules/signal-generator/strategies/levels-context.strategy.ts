@@ -21,7 +21,8 @@ const DISTANCE_GATE_ATR = 0.5;       // |spot - level| ≤ 0.5 × ATR14
                                      // (was 0.3 — too tight for low-vol
                                      // stocks where levels are spread
                                      // in wider ATR-multiples)
-const BREAKOUT_BODY_ATR = 0.1;       // close must be > level + 0.1 × ATR
+const BREAKOUT_BODY_ATR = 0.15;      // close must be > level + 0.15 × ATR (tightened from 0.1)
+const BREAKOUT_WICK_MAX_RATIO = 0.3; // wick on the breakout side < 30% of full bar range
 const VOLUME_RATIO_MIN = 1.2;        // 5m volume / VMA20
 const PINBAR_BODY_PCT = 0.3;         // body ≤ 30% of full candle range
 const SL_BUFFER_ATR = 0.25;          // SL = level + 0.25 × ATR (asymmetric direction-aware)
@@ -158,7 +159,7 @@ export class LevelsContextStrategy implements TradingStrategy {
       const isLong = this.directionFromSetup(setupType, last, lvl.value);
       const slTarget = this.computeSlAndTarget({
         setupType, isLong, level: lvl.value, atr: levelBook.atr14,
-        levelBook, candidates,
+        levelBook, candidates, triggerCandle: last,
       });
       if (!slTarget) continue;
 
@@ -315,7 +316,21 @@ export class LevelsContextStrategy implements TradingStrategy {
     const buffer = BREAKOUT_BODY_ATR * atr;
     const above = candle.close > level.value + buffer;
     const below = candle.close < level.value - buffer;
-    return above || below;
+    if (!above && !below) return false;
+
+    // Wick-quality gate: close must be near the breakout-side extreme of
+    // the bar. A long upper wick on a "BUY breakout" candle (close near
+    // the low of the bar) is a fakeout, not a real break — reject it.
+    const range = candle.high - candle.low;
+    if (range <= 0) return false;
+    if (above) {
+      const upperWick = candle.high - candle.close;
+      if (upperWick / range >= BREAKOUT_WICK_MAX_RATIO) return false;
+    } else {
+      const lowerWick = candle.close - candle.low;
+      if (lowerWick / range >= BREAKOUT_WICK_MAX_RATIO) return false;
+    }
+    return true;
   }
 
   private detectReversal(candle: CandleData, level: CandidateLevel, atr: number): boolean {
@@ -351,10 +366,20 @@ export class LevelsContextStrategy implements TradingStrategy {
     atr: number;
     levelBook: LevelBook;
     candidates: CandidateLevel[];
+    triggerCandle: CandleData;
   }): { entry: number; stoploss: number; target: number } | null {
-    const { setupType, isLong, level, atr, levelBook, candidates } = args;
+    const { setupType, isLong, level, atr, candidates, triggerCandle } = args;
     const buffer = SL_BUFFER_ATR * atr;
-    const entry = levelBook.spot;
+    // Anchor entry to the level (breakout) or the rejection close (reversal),
+    // not the live spot. Spot drifts on every tick — entry must be FIXED so
+    // the same setup re-evaluated 60s later returns the same numbers.
+    let entry: number;
+    if (setupType === 'BREAKOUT') {
+      const trigger = BREAKOUT_BODY_ATR * atr;
+      entry = isLong ? level + trigger : level - trigger;
+    } else {
+      entry = triggerCandle.close;
+    }
     let stoploss: number;
 
     if (setupType === 'BREAKOUT') {

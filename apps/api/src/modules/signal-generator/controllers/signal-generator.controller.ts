@@ -17,6 +17,7 @@ import { SignalGeneratorService } from '../services/signal-generator.service';
 import { StrategyRegistryService } from '../services/strategy-registry.service';
 import { SignalRepository } from '../repositories/signal.repository';
 import { UniverseScannerWorker } from '../workers/universe-scanner.worker';
+import { SetupTrackerService } from '../services/setup-tracker.service';
 import { SignalFilterDto } from '../dto/signal.dto';
 
 @Controller('api/signals')
@@ -28,8 +29,31 @@ export class SignalGeneratorController {
     private readonly strategyRegistry: StrategyRegistryService,
     private readonly signalRepository: SignalRepository,
     private readonly universeScannerWorker: UniverseScannerWorker,
+    private readonly setupTracker: SetupTrackerService,
     @InjectQueue('signal-scan') private readonly signalScanQueue: Queue,
   ) {}
+
+  /**
+   * GET /api/signals/setups/active — currently locked setup for a token.
+   */
+  @Get('setups/active')
+  getActiveSetup(@Query('token') token: string) {
+    if (!token) {
+      throw new BadRequestException('token is required');
+    }
+    return { setup: this.setupTracker.getActive(token) };
+  }
+
+  /**
+   * GET /api/signals/setups/history — recent closed setups for a token.
+   */
+  @Get('setups/history')
+  getSetupHistory(@Query('token') token: string) {
+    if (!token) {
+      throw new BadRequestException('token is required');
+    }
+    return { history: this.setupTracker.getHistory(token) };
+  }
 
   /**
    * POST /api/signals/scan-now — manually trigger one universe scan tick.

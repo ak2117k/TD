@@ -28,6 +28,14 @@ export interface IndicatorReadings {
   agreement: number; // -5 to +5
 }
 
+export type SetupStatus =
+  | 'PENDING'      // setup fired, spot hasn't crossed entry yet
+  | 'ACTIVE'       // entry hit, position notionally live
+  | 'TARGET_HIT'   // closed: profit
+  | 'STOPPED'      // closed: loss
+  | 'EOD'          // closed: session ended without resolution
+  | 'INVALIDATED'; // closed: structural change
+
 export interface SetupAnalysis {
   kind: 'setup';
   symbol: string;
@@ -43,6 +51,13 @@ export interface SetupAnalysis {
   levels: LevelsSnapshot;
   reason: string;
   indicators?: IndicatorReadings;
+  // Locked-setup fields. Once a setup is detected, the backend freezes
+  // entry/SL/target and returns the same numbers across every poll until
+  // it transitions to a closed state — so the chart panel becomes a
+  // stable, executable plan instead of drifting with every tick.
+  status?: SetupStatus;
+  setupId?: string;
+  triggeredAt?: string | null;
 }
 
 export interface NoSetupAnalysis {
@@ -154,13 +169,16 @@ export default function AnalysisPanel({ analysis, loading }: AnalysisPanelProps)
       </div>
 
       <div className="mt-2 flex items-center justify-between">
-        <div
-          className={clsx(
-            'rounded-md px-2 py-1 text-xs font-bold',
-            isBuy ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-400',
-          )}
-        >
-          {analysis.side}
+        <div className="flex items-center gap-1.5">
+          <div
+            className={clsx(
+              'rounded-md px-2 py-1 text-xs font-bold',
+              isBuy ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-400',
+            )}
+          >
+            {analysis.side}
+          </div>
+          {analysis.status && <StatusBadge status={analysis.status} />}
         </div>
         <div className="text-[11px] text-gray-300">
           <span className="font-semibold text-gray-100">{analysis.symbol}</span>
@@ -264,5 +282,28 @@ export default function AnalysisPanel({ analysis, loading }: AnalysisPanelProps)
         {analysis.reason}
       </div>
     </div>
+  );
+}
+
+function StatusBadge({ status }: { status: SetupStatus }) {
+  const cfg: Record<SetupStatus, { label: string; classes: string; pulse: boolean }> = {
+    PENDING:     { label: 'PENDING',  classes: 'bg-amber-500/15 text-amber-300',   pulse: true },
+    ACTIVE:      { label: 'ACTIVE',   classes: 'bg-blue-500/20 text-blue-300',      pulse: true },
+    TARGET_HIT:  { label: 'TARGET',   classes: 'bg-emerald-500/20 text-emerald-300', pulse: false },
+    STOPPED:     { label: 'STOPPED',  classes: 'bg-red-500/20 text-red-300',         pulse: false },
+    EOD:         { label: 'EOD',      classes: 'bg-gray-700/40 text-gray-400',       pulse: false },
+    INVALIDATED: { label: 'CLOSED',   classes: 'bg-gray-700/40 text-gray-400',       pulse: false },
+  };
+  const c = cfg[status];
+  return (
+    <span
+      className={clsx(
+        'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider',
+        c.classes,
+      )}
+    >
+      {c.pulse && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />}
+      {c.label}
+    </span>
   );
 }
