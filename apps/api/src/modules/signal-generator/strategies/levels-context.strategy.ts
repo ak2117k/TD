@@ -17,7 +17,10 @@ import {
 } from '../types/setup-context.types';
 import { ema, rsi, macd, bollinger, roc } from './indicators';
 
-const DISTANCE_GATE_ATR = 0.3;       // |spot - level| ≤ 0.3 × ATR14
+const DISTANCE_GATE_ATR = 0.5;       // |spot - level| ≤ 0.5 × ATR14
+                                     // (was 0.3 — too tight for low-vol
+                                     // stocks where levels are spread
+                                     // in wider ATR-multiples)
 const BREAKOUT_BODY_ATR = 0.1;       // close must be > level + 0.1 × ATR
 const VOLUME_RATIO_MIN = 1.2;        // 5m volume / VMA20
 const PINBAR_BODY_PCT = 0.3;         // body ≤ 30% of full candle range
@@ -124,12 +127,26 @@ export class LevelsContextStrategy implements TradingStrategy {
     debug?.('in-window', { atr14: levelBook.atr14, volumeRatio, spot: levelBook.spot });
 
     const candidates = this.collectLevels(levelBook);
+    // Track the closest distance-rejected level so the final rejection
+    // message reports something actionable ("nearest level is PDH at
+    // 295.9, you're 4.1 away") instead of whichever level happened to
+    // be last in iteration. anyDistancePassed acts as a one-way switch:
+    // if at least one level passed distance, we don't surface the
+    // distance message at all (the more informative reject:confirmation
+    // events from later iterations are better signal).
+    const distGate = DISTANCE_GATE_ATR * levelBook.atr14;
+    let closestRejected: { type: string; value: number; dist: number } | null = null;
+    let anyDistancePassed = false;
+
     for (const lvl of candidates) {
       const dist = Math.abs(levelBook.spot - lvl.value);
-      if (dist > DISTANCE_GATE_ATR * levelBook.atr14) {
-        debug?.('reject:distance', { type: lvl.type, value: lvl.value, dist, gate: DISTANCE_GATE_ATR * levelBook.atr14 });
+      if (dist > distGate) {
+        if (!anyDistancePassed && (!closestRejected || dist < closestRejected.dist)) {
+          closestRejected = { type: lvl.type, value: lvl.value, dist };
+        }
         continue;
       }
+      anyDistancePassed = true;
       debug?.('pass:distance', { type: lvl.type, value: lvl.value });
 
       const reversal = this.detectReversal(last, lvl, levelBook.atr14);
@@ -211,6 +228,18 @@ export class LevelsContextStrategy implements TradingStrategy {
       };
     }
 
+    // No level produced a tradeable setup. Surface the closest
+    // distance-rejected level only if NONE of the levels passed
+    // distance — otherwise the reject:confirmation events are the
+    // more informative signal.
+    if (!anyDistancePassed && closestRejected) {
+      debug?.('reject:distance', {
+        type: closestRejected.type,
+        value: closestRejected.value,
+        dist: closestRejected.dist,
+        gate: distGate,
+      });
+    }
     return null;
   }
 
