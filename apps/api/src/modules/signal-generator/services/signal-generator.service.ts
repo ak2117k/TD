@@ -105,6 +105,8 @@ export type AnalyzeResult =
       entry: number;
       stoploss: number;
       target: number;
+      partialTakeAt: number;
+      trailingSl: number | null;
       levelType: SetupContext['levelType'];
       setupType: SetupContext['setupType'];
       grade: SetupContext['grade'];
@@ -116,6 +118,7 @@ export type AnalyzeResult =
       status: SetupStatus;
       setupId: string;
       triggeredAt: string | null;
+      partialBookedAt: string | null;
     }
   | {
       kind: 'no-setup';
@@ -164,7 +167,12 @@ export class SignalGeneratorService {
     // the strategy. This is the whole point of locking — every poll on the
     // same setup must return the same numbers, not drift with spot.
     const existing = this.setupTracker.getActive(token);
-    if (existing && (existing.status === 'PENDING' || existing.status === 'ACTIVE')) {
+    if (
+      existing &&
+      (existing.status === 'PENDING' ||
+        existing.status === 'ACTIVE' ||
+        existing.status === 'PARTIAL_BOOKED')
+    ) {
       const liveBook = await this.levelBookService.lazyLoad(token, exchange, symbol);
       // Update tracker against the latest spot so PENDING -> ACTIVE etc.
       // transitions don't lag behind the chart.
@@ -284,6 +292,7 @@ export class SignalGeneratorService {
       entry: ctx.entry,
       stoploss: ctx.stoploss,
       target: ctx.target,
+      partialTakeAt: ctx.partialTakeAt,
       grade: ctx.grade,
       atr14: ctx.atr14,
       indicators: ctx.indicators,
@@ -314,6 +323,8 @@ export class SignalGeneratorService {
       entry: setup.entry,
       stoploss: setup.stoploss,
       target: setup.target,
+      partialTakeAt: setup.partialTakeAt,
+      trailingSl: setup.trailingSl,
       levelType: setup.levelType,
       setupType: setup.setupType,
       grade: setup.grade,
@@ -332,6 +343,9 @@ export class SignalGeneratorService {
       status: setup.status,
       setupId: setup.id,
       triggeredAt: setup.triggeredAt ? setup.triggeredAt.toISOString() : null,
+      partialBookedAt: setup.partialBookedAt
+        ? setup.partialBookedAt.toISOString()
+        : null,
     };
   }
 

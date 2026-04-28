@@ -39,6 +39,8 @@ export interface SetupContext {
   entry: number;
   stoploss: number;
   target: number;
+  /** Price at which 50% of the position is booked (1×SL distance in profit). */
+  partialTakeAt: number;
 
   triggerCandle: {
     time: number; // unix seconds

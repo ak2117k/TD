@@ -279,6 +279,9 @@ export default function ChartsPage() {
               entry={analysis.entry}
               stoploss={analysis.stoploss}
               target={analysis.target}
+              partialTakeAt={analysis.partialTakeAt ?? null}
+              trailingSl={analysis.trailingSl ?? null}
+              status={analysis.status}
             />
           )}
 

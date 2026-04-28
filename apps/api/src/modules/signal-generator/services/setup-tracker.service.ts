@@ -7,8 +7,10 @@ import { SetupContext } from '../types/setup-context.types';
 export type SetupStatus =
   | 'PENDING'
   | 'ACTIVE'
+  | 'PARTIAL_BOOKED'
   | 'TARGET_HIT'
   | 'STOPPED'
+  | 'TRAIL_STOPPED'
   | 'EOD'
   | 'INVALIDATED';
 
@@ -24,11 +26,17 @@ export interface LockedSetup {
   entry: number;
   stoploss: number;
   target: number;
+  /** 1×SL distance in profit. When spot reaches this, 50% is booked and SL ratchets to break-even. */
+  partialTakeAt: number;
+  /** Null until PARTIAL_BOOKED, then ratchets toward profit. */
+  trailingSl: number | null;
   grade: 'A' | 'B' | 'C';
   atr14: number;
   status: SetupStatus;
   createdAt: Date;
   triggeredAt: Date | null;
+  partialBookedAt: Date | null;
+  runnerExitAt: Date | null;
   closedAt: Date | null;
   closeReason: SetupStatus | null;
   high: number;
@@ -48,6 +56,7 @@ export interface LockInput {
   entry: number;
   stoploss: number;
   target: number;
+  partialTakeAt: number;
   grade: 'A' | 'B' | 'C';
   atr14: number;
   indicators: SetupContext['indicators'];
@@ -98,11 +107,15 @@ export class SetupTrackerService {
       entry: input.entry,
       stoploss: input.stoploss,
       target: input.target,
+      partialTakeAt: input.partialTakeAt,
+      trailingSl: null,
       grade: input.grade,
       atr14: input.atr14,
       status: 'PENDING',
       createdAt: now,
       triggeredAt: null,
+      partialBookedAt: null,
+      runnerExitAt: null,
       closedAt: null,
       closeReason: null,
       high: input.entry,
@@ -149,21 +162,84 @@ export class SetupTrackerService {
       return setup;
     }
 
-    // ACTIVE: evaluate target / stoploss
-    if (setup.side === 'BUY') {
-      if (spot >= setup.target) {
-        this.close(setup, 'TARGET_HIT', now);
-      } else if (spot <= setup.stoploss) {
-        this.close(setup, 'STOPPED', now);
+    // Order matters: TARGET wins over the partial-take check on the same
+    // tick (best-case outcome — full target reached before booking 50%),
+    // and PARTIAL_BOOKED happens before SL because once we're at 1×SL
+    // profit the stop ratchets to break-even and the original SL is moot.
+    if (setup.status === 'ACTIVE') {
+      if (setup.side === 'BUY') {
+        if (spot >= setup.target) {
+          this.close(setup, 'TARGET_HIT', now);
+          return setup;
+        }
+        if (spot >= setup.partialTakeAt) {
+          this.bookPartial(setup, now);
+          return setup;
+        }
+        if (spot <= setup.stoploss) {
+          this.close(setup, 'STOPPED', now);
+        }
+      } else {
+        if (spot <= setup.target) {
+          this.close(setup, 'TARGET_HIT', now);
+          return setup;
+        }
+        if (spot <= setup.partialTakeAt) {
+          this.bookPartial(setup, now);
+          return setup;
+        }
+        if (spot >= setup.stoploss) {
+          this.close(setup, 'STOPPED', now);
+        }
       }
-    } else {
-      if (spot <= setup.target) {
-        this.close(setup, 'TARGET_HIT', now);
-      } else if (spot >= setup.stoploss) {
-        this.close(setup, 'STOPPED', now);
+      return setup;
+    }
+
+    // PARTIAL_BOOKED: target still wins, otherwise ratchet trailing-SL
+    // and exit the runner if it crosses.
+    if (setup.status === 'PARTIAL_BOOKED') {
+      const slDist = Math.abs(setup.entry - setup.stoploss);
+      if (setup.side === 'BUY') {
+        if (spot >= setup.target) {
+          this.close(setup, 'TARGET_HIT', now);
+          return setup;
+        }
+        // Trail 1×SL behind spot, never letting trailingSl move backward.
+        const candidate = spot - slDist;
+        if (setup.trailingSl == null || candidate > setup.trailingSl) {
+          setup.trailingSl = candidate;
+        }
+        if (setup.trailingSl != null && spot <= setup.trailingSl) {
+          setup.runnerExitAt = now;
+          this.close(setup, 'TRAIL_STOPPED', now);
+        }
+      } else {
+        if (spot <= setup.target) {
+          this.close(setup, 'TARGET_HIT', now);
+          return setup;
+        }
+        const candidate = spot + slDist;
+        if (setup.trailingSl == null || candidate < setup.trailingSl) {
+          setup.trailingSl = candidate;
+        }
+        if (setup.trailingSl != null && spot >= setup.trailingSl) {
+          setup.runnerExitAt = now;
+          this.close(setup, 'TRAIL_STOPPED', now);
+        }
       }
     }
     return setup;
+  }
+
+  private bookPartial(setup: LockedSetup, now: Date): void {
+    setup.status = 'PARTIAL_BOOKED';
+    setup.partialBookedAt = now;
+    // Anchor trailing-SL at entry (break-even) — guarantees the runner
+    // can't turn the booked half into a net loss.
+    setup.trailingSl = setup.entry;
+    this.logger.log(
+      `Setup ${setup.id} (${setup.symbol}) 50% booked at ${setup.partialTakeAt.toFixed(2)} → PARTIAL_BOOKED, trailingSl=${setup.entry.toFixed(2)}`,
+    );
   }
 
   invalidate(token: string, reason?: string): void {
@@ -176,8 +252,8 @@ export class SetupTrackerService {
     }
   }
 
-  // Sweep is the safety-net: keeps PENDING/ACTIVE setups transitioning
-  // even when no analyze() call has come in for them lately.
+  // Sweep is the safety-net: keeps PENDING/ACTIVE/PARTIAL_BOOKED setups
+  // transitioning even when no analyze() call has come in for them lately.
   @Cron('*/30 * * * * *', { timeZone: 'Asia/Kolkata' })
   async sweep(): Promise<void> {
     if (this.active.size === 0) return;
@@ -201,7 +277,11 @@ export class SetupTrackerService {
   // ─── internals ──────────────────────────────────────────────────
 
   private isOpen(status: SetupStatus): boolean {
-    return status === 'PENDING' || status === 'ACTIVE';
+    return (
+      status === 'PENDING' ||
+      status === 'ACTIVE' ||
+      status === 'PARTIAL_BOOKED'
+    );
   }
 
   private close(setup: LockedSetup, reason: SetupStatus, now: Date): void {

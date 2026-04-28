@@ -31,8 +31,10 @@ export interface IndicatorReadings {
 export type SetupStatus =
   | 'PENDING'      // setup fired, spot hasn't crossed entry yet
   | 'ACTIVE'       // entry hit, position notionally live
+  | 'PARTIAL_BOOKED' // 50% exited at 1×SL, runner trailing
   | 'TARGET_HIT'   // closed: profit
   | 'STOPPED'      // closed: loss
+  | 'TRAIL_STOPPED' // runner exited via trailing stop
   | 'EOD'          // closed: session ended without resolution
   | 'INVALIDATED'; // closed: structural change
 
@@ -58,6 +60,9 @@ export interface SetupAnalysis {
   status?: SetupStatus;
   setupId?: string;
   triggeredAt?: string | null;
+  partialTakeAt?: number;
+  trailingSl?: number | null;
+  partialBookedAt?: string | null;
 }
 
 export interface NoSetupAnalysis {
@@ -204,6 +209,29 @@ export default function AnalysisPanel({ analysis, loading }: AnalysisPanelProps)
         </div>
       </div>
 
+      {analysis.partialTakeAt !== undefined && analysis.partialTakeAt !== null && (
+        <div className="mt-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 border-t border-gray-700/60 pt-2">
+          <span className="text-[10px] uppercase tracking-wider text-gray-500">TP1</span>
+          <span className="text-right font-mono text-[11px] tabular-nums text-white">
+            {fmt(analysis.partialTakeAt)}
+          </span>
+          {analysis.status === 'PARTIAL_BOOKED' && (
+            <>
+              <span className="text-[10px] uppercase tracking-wider text-gray-500">Trail</span>
+              <span className="text-right font-mono text-[11px] tabular-nums text-white">
+                {analysis.trailingSl !== null && analysis.trailingSl !== undefined
+                  ? fmt(analysis.trailingSl)
+                  : '—'}
+              </span>
+            </>
+          )}
+          <span className="text-[10px] uppercase tracking-wider text-gray-500">Tgt2</span>
+          <span className="text-right font-mono text-[11px] tabular-nums text-white">
+            {fmt(analysis.target)}
+          </span>
+        </div>
+      )}
+
       <div className="mt-3 flex items-center justify-between border-t border-gray-700/60 pt-2 text-[10px]">
         <span className="rounded bg-gray-700/60 px-1.5 py-0.5 font-mono tabular-nums text-gray-200">
           {computeRR(analysis)}
@@ -287,12 +315,14 @@ export default function AnalysisPanel({ analysis, loading }: AnalysisPanelProps)
 
 function StatusBadge({ status }: { status: SetupStatus }) {
   const cfg: Record<SetupStatus, { label: string; classes: string; pulse: boolean }> = {
-    PENDING:     { label: 'PENDING',  classes: 'bg-amber-500/15 text-amber-300',   pulse: true },
-    ACTIVE:      { label: 'ACTIVE',   classes: 'bg-blue-500/20 text-blue-300',      pulse: true },
-    TARGET_HIT:  { label: 'TARGET',   classes: 'bg-emerald-500/20 text-emerald-300', pulse: false },
-    STOPPED:     { label: 'STOPPED',  classes: 'bg-red-500/20 text-red-300',         pulse: false },
-    EOD:         { label: 'EOD',      classes: 'bg-gray-700/40 text-gray-400',       pulse: false },
-    INVALIDATED: { label: 'CLOSED',   classes: 'bg-gray-700/40 text-gray-400',       pulse: false },
+    PENDING:        { label: 'PENDING',    classes: 'bg-amber-500/15 text-amber-300',     pulse: true },
+    ACTIVE:         { label: 'ACTIVE',     classes: 'bg-blue-500/20 text-blue-300',       pulse: true },
+    PARTIAL_BOOKED: { label: 'TP1 BOOKED', classes: 'bg-cyan-500/20 text-cyan-300',       pulse: true },
+    TARGET_HIT:     { label: 'TARGET',     classes: 'bg-emerald-500/20 text-emerald-300', pulse: false },
+    STOPPED:        { label: 'STOPPED',    classes: 'bg-red-500/20 text-red-300',         pulse: false },
+    TRAIL_STOPPED:  { label: 'TRAIL EXIT', classes: 'bg-violet-500/20 text-violet-300',   pulse: false },
+    EOD:            { label: 'EOD',        classes: 'bg-gray-700/40 text-gray-400',       pulse: false },
+    INVALIDATED:    { label: 'CLOSED',     classes: 'bg-gray-700/40 text-gray-400',       pulse: false },
   };
   const c = cfg[status];
   return (

@@ -197,6 +197,7 @@ export class LevelsContextStrategy implements TradingStrategy {
         entry: slTarget.entry,
         stoploss: slTarget.stoploss,
         target: slTarget.target,
+        partialTakeAt: slTarget.partialTakeAt,
         triggerCandle: {
           time: Math.floor(last.timestamp.getTime() / 1000),
           ohlc: [last.open, last.high, last.low, last.close],
@@ -367,7 +368,7 @@ export class LevelsContextStrategy implements TradingStrategy {
     levelBook: LevelBook;
     candidates: CandidateLevel[];
     triggerCandle: CandleData;
-  }): { entry: number; stoploss: number; target: number } | null {
+  }): { entry: number; stoploss: number; target: number; partialTakeAt: number } | null {
     const { setupType, isLong, level, atr, candidates, triggerCandle } = args;
     const buffer = SL_BUFFER_ATR * atr;
     // Anchor entry to the level (breakout) or the rejection close (reversal),
@@ -405,7 +406,10 @@ export class LevelsContextStrategy implements TradingStrategy {
     } else {
       target = isLong ? entry + minTargetDist : entry - minTargetDist;
     }
-    return { entry, stoploss, target };
+    // 50%-book trigger sits 1×SL distance in profit — guaranteed-profit
+    // anchor the trailing-stop machinery uses to lock in break-even on the runner.
+    const partialTakeAt = isLong ? entry + slDist : entry - slDist;
+    return { entry, stoploss, target, partialTakeAt };
   }
 
   private gradeSetup(args: {
