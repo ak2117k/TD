@@ -1,8 +1,16 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject, Optional } from '@nestjs/common';
 import { LevelBook, SeedSessionInput, TickInput } from '../types/level-book.types';
 import { InstrumentService } from '../../market-data/services/instrument.service';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
+import { BrokerAdapter } from '../../../common/interfaces/broker-adapter.interface';
 import { TIMEFRAMES } from '@td/shared/constants';
+
+// Use the literal injection token string instead of importing
+// BROKER_ADAPTER_TOKEN from market-feed.service — that import creates
+// a circular load order (market-feed imports LevelBookService for the
+// live tick path, LevelBookService importing back through it crashes
+// the watcher at boot). The string is the source of truth either way.
+const BROKER_ADAPTER_TOKEN = 'BROKER_ADAPTER';
 
 const STALE_THRESHOLD_MS = 60_000;
 const LAZY_FRESH_MS = 5 * 60 * 1000;
@@ -32,8 +40,9 @@ export class LevelBookService {
   private readonly liveBooks = new Set<string>();
 
   constructor(
-    private readonly instrumentService?: InstrumentService,
-    private readonly marketDataRepository?: MarketDataRepository,
+    @Optional() private readonly instrumentService?: InstrumentService,
+    @Optional() private readonly marketDataRepository?: MarketDataRepository,
+    @Optional() @Inject(BROKER_ADAPTER_TOKEN) private readonly brokerAdapter?: BrokerAdapter | null,
   ) {}
 
   /** Cron + boot path call this so lazyLoad knows to trust the in-memory book. */
@@ -203,19 +212,6 @@ export class LevelBookService {
       return publicBook;
     }
 
-    if (!this.instrumentService || !this.marketDataRepository) {
-      this.logger.warn(
-        `lazyLoad(${symbol}) called without DI deps — service was instantiated bare`,
-      );
-      return null;
-    }
-
-    const instrument = await this.instrumentService.getByToken(token);
-    if (!instrument) {
-      this.logger.debug(`lazyLoad: no instrument found for token ${token}`);
-      return null;
-    }
-
     const now = new Date();
     const istOffsetMs = 5.5 * 60 * 60 * 1000;
     const istNow = new Date(now.getTime() + istOffsetMs);
@@ -229,24 +225,61 @@ export class LevelBookService {
     );
     const sessionOpen = new Date(sessionOpenIst.getTime() - istOffsetMs);
 
-    const dailyFrom = new Date(sessionOpen.getTime() - 21 * 24 * 60 * 60 * 1000);
-    const dailyRows = await this.marketDataRepository.getCandles(
-      instrument.id,
-      TIMEFRAMES.DAILY,
-      dailyFrom,
-      sessionOpen,
-    );
-    const dailyCandles = dailyRows
-      .filter((c) => c.timestamp.getTime() < sessionOpen.getTime())
-      .slice(-14)
-      .map((c) => ({
-        timestamp: c.timestamp,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-        volume: typeof c.volume === 'bigint' ? Number(c.volume) : c.volume,
-      }));
+    // Resolve via DB when seeded (universe symbols), else fall through to
+    // broker historical API. Either path produces a populated LevelBook.
+    const instrument = this.instrumentService
+      ? await this.instrumentService.getByToken(token)
+      : null;
+
+    let dailyCandles: Array<{
+      timestamp: Date; open: number; high: number; low: number; close: number; volume: number;
+    }> = [];
+
+    if (instrument && this.marketDataRepository) {
+      const dailyFrom = new Date(sessionOpen.getTime() - 21 * 24 * 60 * 60 * 1000);
+      const dailyRows = await this.marketDataRepository.getCandles(
+        instrument.id,
+        TIMEFRAMES.DAILY,
+        dailyFrom,
+        sessionOpen,
+      );
+      dailyCandles = dailyRows
+        .filter((c) => c.timestamp.getTime() < sessionOpen.getTime())
+        .slice(-14)
+        .map((c) => ({
+          timestamp: c.timestamp,
+          open: c.open, high: c.high, low: c.low, close: c.close,
+          volume: typeof c.volume === 'bigint' ? Number(c.volume) : c.volume,
+        }));
+    }
+
+    // Broker fallback — fires when the local DB doesn't have the symbol
+    // (e.g. user searched a stock that isn't in the seeded universe) or
+    // doesn't have enough daily candles for ATR.
+    if (dailyCandles.length < 14 && this.brokerAdapter?.getHistoricalData) {
+      try {
+        const dailyFrom = new Date(sessionOpen.getTime() - 30 * 24 * 60 * 60 * 1000);
+        const brokerDaily = await this.brokerAdapter.getHistoricalData(
+          token, exchange, '1d', dailyFrom, sessionOpen,
+        );
+        dailyCandles = brokerDaily
+          .filter((c: any) => new Date(c.timestamp).getTime() < sessionOpen.getTime())
+          .slice(-14)
+          .map((c: any) => ({
+            timestamp: new Date(c.timestamp),
+            open: Number(c.open), high: Number(c.high),
+            low: Number(c.low), close: Number(c.close),
+            volume: Number(c.volume) || 0,
+          }));
+        this.logger.log(
+          `lazyLoad: broker fallback fetched ${dailyCandles.length} daily candles for ${symbol} (${exchange})`,
+        );
+      } catch (err) {
+        this.logger.warn(
+          `lazyLoad: broker daily fetch failed for ${symbol}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
 
     if (dailyCandles.length < 14) {
       this.logger.debug(
@@ -257,20 +290,35 @@ export class LevelBookService {
 
     this.seedSession({ token, symbol, exchange, recentDailyCandles: dailyCandles });
 
-    const fiveMinRows = await this.marketDataRepository.getCandles(
-      instrument.id,
-      TIMEFRAMES.FIVE_MIN,
-      sessionOpen,
-      now,
-    );
-    const fiveMinBars = fiveMinRows.map((c) => ({
-      timestamp: c.timestamp,
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-      volume: typeof c.volume === 'bigint' ? Number(c.volume) : c.volume,
-    }));
+    // 5m bars for today's session — DB first, broker fallback.
+    let fiveMinBars: typeof dailyCandles = [];
+    if (instrument && this.marketDataRepository) {
+      const fiveMinRows = await this.marketDataRepository.getCandles(
+        instrument.id, TIMEFRAMES.FIVE_MIN, sessionOpen, now,
+      );
+      fiveMinBars = fiveMinRows.map((c) => ({
+        timestamp: c.timestamp,
+        open: c.open, high: c.high, low: c.low, close: c.close,
+        volume: typeof c.volume === 'bigint' ? Number(c.volume) : c.volume,
+      }));
+    }
+    if (fiveMinBars.length === 0 && this.brokerAdapter?.getHistoricalData) {
+      try {
+        const broker5m = await this.brokerAdapter.getHistoricalData(
+          token, exchange, '5m', sessionOpen, now,
+        );
+        fiveMinBars = broker5m.map((c: any) => ({
+          timestamp: new Date(c.timestamp),
+          open: Number(c.open), high: Number(c.high),
+          low: Number(c.low), close: Number(c.close),
+          volume: Number(c.volume) || 0,
+        }));
+      } catch (err) {
+        this.logger.warn(
+          `lazyLoad: broker 5m fetch failed for ${symbol}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
 
     if (fiveMinBars.length >= 3) {
       const orBars = fiveMinBars.slice(0, 3);

@@ -164,31 +164,48 @@ export class SignalGeneratorService {
     }
 
     const instrument = await this.marketDataRepository.getInstrumentByToken(token);
-    if (!instrument) {
+    const now = new Date();
+    const fiveDaysAgo = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
+
+    // Try DB first when the symbol is seeded; fall back to broker
+    // historical API otherwise (any stock the user picks via search).
+    let candles: Array<{
+      timestamp: Date; open: number; high: number; low: number; close: number; volume: number;
+    }> = [];
+    if (instrument) {
+      const candleRows = await this.marketDataRepository.getCandles(
+        instrument.id, timeframe, fiveDaysAgo, now, 25,
+      );
+      candles = candleRows.map((c) => ({
+        timestamp: c.timestamp,
+        open: c.open, high: c.high, low: c.low, close: c.close,
+        volume: typeof c.volume === 'bigint' ? Number(c.volume) : c.volume,
+      }));
+    }
+    if (candles.length < 25) {
+      try {
+        const broker = await this.angelOneAdapter.getHistoricalData(
+          token, exchange, timeframe, fiveDaysAgo, now,
+        );
+        candles = broker.slice(-30).map((c: any) => ({
+          timestamp: new Date(c.timestamp),
+          open: Number(c.open), high: Number(c.high),
+          low: Number(c.low), close: Number(c.close),
+          volume: Number(c.volume) || 0,
+        }));
+      } catch (err) {
+        this.logger.warn(
+          `analyze: broker candles fetch failed for ${symbol}/${timeframe}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+    if (candles.length < 25) {
       return {
         kind: 'no-setup',
-        reason: 'instrument not found',
+        reason: `not enough candles (got ${candles.length}, need 25 for ${timeframe})`,
         levels: snapshotFromBook(book),
       };
     }
-
-    const now = new Date();
-    const fiveDaysAgo = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
-    const candleRows = await this.marketDataRepository.getCandles(
-      instrument.id,
-      timeframe,
-      fiveDaysAgo,
-      now,
-      25,
-    );
-    const candles = candleRows.map((c) => ({
-      timestamp: c.timestamp,
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-      volume: typeof c.volume === 'bigint' ? Number(c.volume) : c.volume,
-    }));
 
     const istParts = new Intl.DateTimeFormat('en-IN', {
       timeZone: 'Asia/Kolkata',
