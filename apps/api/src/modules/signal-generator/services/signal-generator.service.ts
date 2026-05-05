@@ -188,6 +188,17 @@ export type AnalyzeResult =
        */
       invalidationKind?: 'structural' | 'counter-setup' | 'time-mfe' | null;
       invalidationReason?: string | null;
+      /**
+       * Source of the TP1 placement and metadata about the obstacle that
+       * drove it (when 'obstacle'). Surfaces in the AnalysisPanel TP1 row
+       * as a small subtitle so the trader sees WHY TP1 sits where it does.
+       */
+      tp1Source?: 'obstacle' | 'fixed';
+      tp1Obstacle?: {
+        classification: 'STRONG' | 'MEDIUM';
+        touchCount: number;
+        nearEdge: number;
+      } | null;
     }
   | {
       kind: 'no-setup';
@@ -445,6 +456,8 @@ export class SignalGeneratorService {
       intradayRangeRatio: ctx.intradayRangeRatio,
       reason: output.reason,
       recommendedStrike,
+      tp1Source: ctx.tp1Source,
+      tp1Obstacle: ctx.tp1Obstacle ?? null,
     });
     // lock() returns null when there's already an active setup — fall back
     // to whatever's active (defensive; the short-circuit above usually
@@ -503,6 +516,8 @@ export class SignalGeneratorService {
       recommendedStrike: setup.recommendedStrike ?? null,
       invalidationKind: setup.invalidationKind ?? null,
       invalidationReason: setup.invalidationReason ?? null,
+      tp1Source: setup.tp1Source,
+      tp1Obstacle: setup.tp1Obstacle ?? null,
     };
   }
 

@@ -513,8 +513,11 @@ describe('computeSlAndTarget — obstacle-aware TP1', () => {
   }
 
   it('1. SELL with no zones falls back to fixed 1×R TP1', () => {
+    // SELL REVERSAL: entry = triggerCandle.close = 24000;
+    // stoploss = level + SL_BUFFER_ATR(0.25) * atr(100) = 24025;
+    // slDist = 25; defaultTp1 = entry - slDist = 23975.
     const r = computeSlAndTarget({ isLong: false, level: 24000 });
-    expect(r.partialTakeAt).toBeCloseTo(23950, 1);
+    expect(r.partialTakeAt).toBeCloseTo(23975, 1);
     expect(r.tp1Source).toBe('fixed');
     expect(r.tp1Obstacle ?? null).toBeNull();
   });
@@ -533,22 +536,24 @@ describe('computeSlAndTarget — obstacle-aware TP1', () => {
   it('3. SELL with MEDIUM zone touchCount=2 → ignored (touchCount filter)', () => {
     const zone = makeZone({ classification: 'MEDIUM', touchCount: 2 });
     const r = computeSlAndTarget({ isLong: false, level: 24000, zones: [zone] });
-    expect(r.partialTakeAt).toBeCloseTo(23950, 1);
+    expect(r.partialTakeAt).toBeCloseTo(23975, 1);
     expect(r.tp1Source).toBe('fixed');
   });
 
   it('4. SELL with WEAK zone in path → ignored (classification filter)', () => {
     const zone = makeZone({ classification: 'WEAK', touchCount: 5 });
     const r = computeSlAndTarget({ isLong: false, level: 24000, zones: [zone] });
-    expect(r.partialTakeAt).toBeCloseTo(23950, 1);
+    expect(r.partialTakeAt).toBeCloseTo(23975, 1);
     expect(r.tp1Source).toBe('fixed');
   });
 
   it('5. SELL with MEDIUM zone too close (obstacleR < 0.4) → fallback to fixed', () => {
+    // Zone upper=23990; nearEdge=23990; rawObstacleTp1 = 23990 + 0.1*100 = 24000 (= entry).
+    // obstacleR = 0 / slDist(25) = 0 < MIN_TP1_R(0.4) → fallback to defaultTp1.
     const zone = makeZone({ classification: 'MEDIUM', touchCount: 5,
       upper: 23990, lower: 23970 });
     const r = computeSlAndTarget({ isLong: false, level: 24000, zones: [zone] });
-    expect(r.partialTakeAt).toBeCloseTo(23950, 1);
+    expect(r.partialTakeAt).toBeCloseTo(23975, 1);
     expect(r.tp1Source).toBe('fixed');
   });
 
@@ -573,11 +578,15 @@ describe('computeSlAndTarget — obstacle-aware TP1', () => {
   });
 
   it('8. BUY with zone beyond target → ignored', () => {
+    // BUY BREAKOUT: entry = level + BREAKOUT_BODY_ATR(0.15)*atr(100) = 24015;
+    // stoploss = level - SL_BUFFER_ATR(0.25)*atr = 23975; slDist = 40;
+    // target = entry + 2*slDist = 24095. Zone nearEdge(lower)=24220 > target → out.
+    // defaultTp1 = entry + slDist = 24055.
     const zone = makeZone({ classification: 'MEDIUM', touchCount: 4,
       type: 'resistance', upper: 24240, lower: 24220 });
     const r = computeSlAndTarget({ isLong: true, level: 24000, zones: [zone],
       setupType: 'BREAKOUT' });
-    expect(r.partialTakeAt).toBeCloseTo(24090, 1);
+    expect(r.partialTakeAt).toBeCloseTo(24055, 1);
     expect(r.tp1Source).toBe('fixed');
   });
 

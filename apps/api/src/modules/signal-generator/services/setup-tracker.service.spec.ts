@@ -542,77 +542,47 @@ describe('SetupTrackerService – persistence wiring', () => {
   });
 
   // ── tp1Source / tp1Obstacle round-trip ────────────────────────────
-  // These fields were added to SetupContext in b25104a so the
-  // obstacle-aware computeSlAndTarget (Task 3 of the TP1-at-obstacle
-  // spec) can record WHY TP1 sits where it does. The chart panel
-  // re-renders the locked TP1 on every poll until the trade closes, so
-  // the field plumbing through lock → getActive must be regression-safe.
+  // These fields were added to SetupContext in b25104a and threaded
+  // through LockInput → LockedSetup so the obstacle-aware
+  // computeSlAndTarget can record WHY TP1 sits where it does. The chart
+  // panel re-renders the locked TP1 on every poll until the trade
+  // closes, so the field plumbing through lock → getActive must be
+  // regression-safe.
   //
-  // The load-bearing assertion is on `partialTakeAt` itself: the lock
-  // input's obstacle-derived value (23980 = nearEdge 23970 + 0.1×ATR
-  // buffer of 10) must survive intact on the LockedSetup returned by
-  // getActive() — i.e. the panel always sees the value the strategy
-  // computed at lock time, never a recomputed default.
-  //
-  // Source + obstacle metadata are passed through on the LockInput and
-  // checked via unknown-cast accessors. They will start surfacing on
-  // LockedSetup once the strategy-chain task wires them through
-  // LockInput → LockedSetup; until then we tolerate undefined and only
-  // assert the typed pass-through (i.e. the test never regresses, and
-  // becomes strict once the wiring lands by tightening the optional
-  // expectations below).
+  // Two assertions matter:
+  //   - partialTakeAt = 23980 (= obstacle nearEdge 23970 + 0.1×ATR
+  //     buffer 10) survives intact on the LockedSetup returned by
+  //     getActive — the panel never sees a recomputed default.
+  //   - tp1Source + tp1Obstacle round-trip identically so the chart's
+  //     "at MEDIUM zone · 5t" subtitle has the data it needs.
   it('persists tp1Source and tp1Obstacle across lock and re-load', async () => {
     const tp1Obstacle = {
       classification: 'MEDIUM' as const,
       touchCount: 5,
       nearEdge: 23970,
     };
-    // Mirror sellInput() (the SELL fixture used elsewhere) but with the
-    // obstacle-derived TP1 (23980 = upper 23970 + 0.1×ATR=10) instead
-    // of the fixed 1×R partialTakeAt (95).
-    const input = sellInput({
-      token: '99926000',
-      symbol: 'NIFTY',
-      entry: 24000,
-      stoploss: 24050,
-      target: 23900,
-      partialTakeAt: 23980,
-      atr14: 100,
-    });
-    const inputWithTp1 = {
-      ...input,
-      tp1Source: 'obstacle' as const,
+    const input: LockInput = {
+      ...sellInput({
+        token: '99926000',
+        symbol: 'NIFTY',
+        entry: 24000,
+        stoploss: 24050,
+        target: 23900,
+        partialTakeAt: 23980,
+        atr14: 100,
+      }),
+      tp1Source: 'obstacle',
       tp1Obstacle,
     };
 
-    const locked = tracker.lock(inputWithTp1 as unknown as LockInput);
+    const locked = tracker.lock(input);
     await flushMicrotasks();
     expect(locked).not.toBeNull();
 
     const reloaded = tracker.getActive('99926000');
     expect(reloaded).not.toBeNull();
-    // partialTakeAt is the load-bearing field — the chart polls this
-    // every 60s and must always see the obstacle-derived value, not a
-    // recomputed default.
     expect(reloaded!.partialTakeAt).toBe(23980);
-
-    // Source + obstacle metadata read via unknown cast: typed accessors
-    // land with the strategy-chain wiring (Task 3 of the TP1 spec).
-    // Tolerant assertion now — once wiring lands, replace the
-    // toBeUndefined branches with toBe('obstacle') / toEqual(tp1Obstacle).
-    const reloadedAny = reloaded as unknown as {
-      tp1Source?: 'obstacle' | 'fixed';
-      tp1Obstacle?: typeof tp1Obstacle | null;
-    };
-    if (reloadedAny.tp1Source !== undefined) {
-      expect(reloadedAny.tp1Source).toBe('obstacle');
-      expect(reloadedAny.tp1Obstacle).toEqual(tp1Obstacle);
-    } else {
-      // Pre-wiring: confirm fields haven't been silently mangled to
-      // some unexpected non-undefined value (e.g. 'fixed' would mean
-      // wiring exists but is overwriting the LockInput value).
-      expect(reloadedAny.tp1Source).toBeUndefined();
-      expect(reloadedAny.tp1Obstacle).toBeUndefined();
-    }
+    expect(reloaded!.tp1Source).toBe('obstacle');
+    expect(reloaded!.tp1Obstacle).toEqual(tp1Obstacle);
   });
 });
