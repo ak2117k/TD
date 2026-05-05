@@ -87,6 +87,31 @@ export class DailyBackfillWorker {
     await this.runBackfill('MCX commodity', MCX_TARGETS);
   }
 
+  /**
+   * Boot-time catch-up for the WHOLE universe (NSE indices + MCX
+   * commodities) across all configured timeframes. Closes the
+   * "API was offline at 15:35 / 23:35 IST" hole that leaves yesterday's
+   * candles missing — without it, LevelBookCron.seedSession reads a
+   * stale latest-daily and the chart's analyze() endpoint reads a
+   * stale intraday window (analyze uses `take: 25` which skips the
+   * repo's gap-fill, so missing data is silently surfaced as
+   * "got 0 candles" until tomorrow's cron firing).
+   *
+   * Worst-case boot delay: (NSE_TARGETS.length + MCX_TARGETS.length) ×
+   * timeframes per target × 1.2s rate-limit ≈ 16 × 1.2s = ~19s when
+   * everything needs filling. When the table is already current,
+   * `backfillOne` skips the broker call but the loop still sleeps —
+   * acceptable for a once-per-process boot cost in exchange for
+   * correctness across the universe + all timeframes the analyze
+   * endpoint reads (1d / 1h / 15m / 5m).
+   */
+  async backfillUniverseAtBoot(): Promise<void> {
+    await this.runBackfill('NSE+MCX universe (boot)', [
+      ...NSE_TARGETS,
+      ...MCX_TARGETS,
+    ]);
+  }
+
   private async runBackfill(label: string, targets: BackfillTarget[]): Promise<void> {
     this.logger.log(`${label} candle backfill starting (${targets.length} symbols)`);
     const startedAt = Date.now();

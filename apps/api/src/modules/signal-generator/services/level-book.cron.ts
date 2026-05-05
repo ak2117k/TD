@@ -1,8 +1,9 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
-import { LevelBookService } from './level-book.service';
+import { LevelBookService, getTodayMidnightIstAsUtc } from './level-book.service';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { TIMEFRAMES } from '@td/shared/constants';
+import { DailyBackfillWorker } from '../../market-data/workers/daily-backfill.worker';
 
 /**
  * Index tokens are stable (NIFTY = 99926000 forever) so we hardcode them.
@@ -28,6 +29,9 @@ export class LevelBookCron implements OnModuleInit {
   constructor(
     private readonly levelBook: LevelBookService,
     private readonly prisma: PrismaService,
+    // Optional so unit-test wiring (which doesn't bring up MarketDataModule)
+    // still constructs cleanly. Production always has it.
+    @Optional() private readonly dailyBackfill?: DailyBackfillWorker,
   ) {}
 
   /**
@@ -37,8 +41,28 @@ export class LevelBookCron implements OnModuleInit {
    * universe symbol has a populated, live-fed book the moment the
    * service boots — so the /signals/analyze endpoint and the chart
    * analysis panel work immediately.
+   *
+   * Universe catch-up backfill runs FIRST so seedSession reads the
+   * freshest possible "last daily before today" candle for each
+   * symbol AND the analyze endpoint sees recent intraday candles for
+   * its `take: 25` fast-path read. Without this step, a boot after
+   * the API was offline at 15:35 / 23:35 IST would leave NSE OR MCX
+   * candles missing — PDH/PDL goes stale (multi-day-old daily) AND
+   * intraday queries return 0 candles ("got 0, need 25") until
+   * tomorrow's cron firings. Covers both NSE indices and MCX
+   * commodities across 1d/1h/15m/5m.
    */
   async onModuleInit(): Promise<void> {
+    if (this.dailyBackfill) {
+      try {
+        await this.dailyBackfill.backfillUniverseAtBoot();
+      } catch (err) {
+        this.logger.warn(
+          `Boot universe-backfill failed (continuing with seed anyway): ` +
+          `${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
     this.logger.log('Boot-seeding level books');
     await this.seedSession();
     await this.lockOpeningRange();
@@ -48,6 +72,12 @@ export class LevelBookCron implements OnModuleInit {
   @Cron('0 15 9 * * 1-5', { timeZone: 'Asia/Kolkata' })
   async seedSession(): Promise<void> {
     this.logger.log('Seeding level books for the session');
+    // Threshold for "yesterday or earlier" daily candles. Without this filter,
+    // an API restart after 15:35 IST (when the daily-backfill cron writes
+    // today's daily candle) would silently flip PDH/PDL to today's H/L,
+    // because Angel One stamps daily candles at midnight IST of the trading
+    // day — see getTodayMidnightIstAsUtc() for the full rationale.
+    const todayMidnightUtc = getTodayMidnightIstAsUtc();
     for (const u of UNIVERSE) {
       try {
         // Resolve token from DB when not hardcoded (MCX commodities roll
@@ -65,7 +95,11 @@ export class LevelBookCron implements OnModuleInit {
         }
         const resolvedToken = inst.token;
         const recent = await this.prisma.candle.findMany({
-          where: { instrumentId: inst.id, timeframe: TIMEFRAMES.DAILY },
+          where: {
+            instrumentId: inst.id,
+            timeframe: TIMEFRAMES.DAILY,
+            timestamp: { lt: todayMidnightUtc },
+          },
           orderBy: { timestamp: 'desc' },
           take: 16,
         });
