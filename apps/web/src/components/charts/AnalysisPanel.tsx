@@ -1,4 +1,122 @@
 import clsx from 'clsx';
+import { useEffect, useRef, useState } from 'react';
+
+const DRAG_POSITION_STORAGE_KEY = 'td:analysis-panel-pos';
+
+interface DragPosition {
+  x: number;
+  y: number;
+}
+
+/**
+ * Position + drag state for a floating chart panel. Position persists in
+ * localStorage so the panel stays put across reloads, symbol switches, and
+ * remounts. `null` position = "use the default top-right placement" — that
+ * way first-time users see the panel where the existing CSS puts it instead
+ * of in some confusing relocated spot.
+ *
+ * Drag handle is wired separately (caller spreads `dragHandleProps` onto the
+ * element they want to be draggable) so the rest of the panel keeps normal
+ * click/select behaviour for chips, tooltips, and option-row text.
+ */
+function useDraggablePanel() {
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const dragOffsetRef = useRef<DragPosition>({ x: 0, y: 0 });
+  const [position, setPosition] = useState<DragPosition | null>(() => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const raw = window.localStorage.getItem(DRAG_POSITION_STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as { x?: unknown; y?: unknown };
+      if (typeof parsed.x !== 'number' || typeof parsed.y !== 'number') return null;
+      return { x: parsed.x, y: parsed.y };
+    } catch {
+      return null;
+    }
+  });
+  const [isDragging, setIsDragging] = useState(false);
+  // Held in a ref so onPointerUp can persist the latest position without
+  // racing the setState batch.
+  const positionRef = useRef<DragPosition | null>(position);
+  useEffect(() => {
+    positionRef.current = position;
+  }, [position]);
+
+  const dragHandleProps = {
+    onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => {
+      // Left mouse button or touch only — ignore right-click / aux button.
+      if (e.button !== 0) return;
+      const panel = panelRef.current;
+      if (!panel) return;
+      const rect = panel.getBoundingClientRect();
+      dragOffsetRef.current = {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      };
+      setIsDragging(true);
+      try {
+        (e.currentTarget as Element).setPointerCapture(e.pointerId);
+      } catch {
+        /* capture not supported (very old browser) — fall back to global listeners */
+      }
+      e.preventDefault();
+    },
+    onPointerMove: (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!isDragging) return;
+      // Clamp to viewport so the panel can't be dragged completely off-screen
+      // and become unreachable. We only clamp the top-left corner; users can
+      // still drag mostly out the right/bottom for screen-grabs etc.
+      const next: DragPosition = {
+        x: Math.max(0, e.clientX - dragOffsetRef.current.x),
+        y: Math.max(0, e.clientY - dragOffsetRef.current.y),
+      };
+      setPosition(next);
+    },
+    onPointerUp: (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!isDragging) return;
+      setIsDragging(false);
+      try {
+        (e.currentTarget as Element).releasePointerCapture(e.pointerId);
+      } catch {
+        /* nothing to release */
+      }
+      try {
+        if (positionRef.current) {
+          window.localStorage.setItem(
+            DRAG_POSITION_STORAGE_KEY,
+            JSON.stringify(positionRef.current),
+          );
+        }
+      } catch {
+        /* private mode / quota — drop on the floor */
+      }
+    },
+    // Double-click the handle to reset to the default top-right placement.
+    onDoubleClick: () => {
+      setPosition(null);
+      try {
+        window.localStorage.removeItem(DRAG_POSITION_STORAGE_KEY);
+      } catch {
+        /* ignore */
+      }
+    },
+    style: {
+      cursor: isDragging ? 'grabbing' : 'grab',
+      // Prevent the browser from interpreting touch-drag as a scroll gesture.
+      touchAction: 'none' as const,
+      userSelect: 'none' as const,
+    },
+    title: 'Drag to move · double-click to reset position',
+  };
+
+  // When position is set, override the Tailwind `top-4 right-4` defaults.
+  const wrapperStyle: React.CSSProperties | undefined = position
+    ? { top: position.y, left: position.x, right: 'auto' }
+    : undefined;
+  const useDefaultPlacement = position === null;
+
+  return { panelRef, wrapperStyle, useDefaultPlacement, dragHandleProps };
+}
 
 export interface LevelsSnapshot {
   pdh: number;
@@ -107,12 +225,50 @@ export interface SetupAnalysis {
   partialBookedAt?: string | null;
   /** Backend-locked optimal-strike pick. Optional so stale builds still render. */
   recommendedStrike?: RecommendedStrike | null;
+  /**
+   * Adaptive auto-invalidation metadata. Only populated when the backend
+   * tears down a locked setup mid-trade via one of the three new
+   * mechanisms (structural shift, opposite setup firing, time-based MFE
+   * decay). Manual invalidations and older signals leave both fields
+   * null/undefined — UI must guard with optional chaining.
+   */
+  invalidationKind?: 'structural' | 'counter-setup' | 'time-mfe' | null;
+  invalidationReason?: string | null;
+  /** How TP1 was placed — 'obstacle' surfaces a subtitle on the TP1 row. */
+  tp1Source?: 'obstacle' | 'fixed';
+  tp1Obstacle?: {
+    classification: 'STRONG' | 'MEDIUM';
+    touchCount: number;
+    nearEdge: number;
+  } | null;
+}
+
+export type RejectGate =
+  | 'distance'
+  | 'confirmation'
+  | 'rr'
+  | 'regime-mismatch'
+  | 'mtf-conflict'
+  | 'grade-c';
+
+export interface RankedReject {
+  levelType: string;
+  levelValue: number;
+  blockedAt: RejectGate;
+  side: 'BUY' | 'SELL' | null;
+  progress: number;
+  blockedReason: string;
+  needsFor: string;
+  detail?: Record<string, unknown>;
 }
 
 export interface NoSetupAnalysis {
   kind: 'no-setup';
   reason: string;
   levels: LevelsSnapshot | null;
+  /** Per-level rejections sorted by closeness to firing. Optional so an
+   *  older backend without the field still renders the panel. */
+  rejections?: RankedReject[];
 }
 
 export type AnalysisDto = SetupAnalysis | NoSetupAnalysis;
@@ -145,10 +301,22 @@ function computeRR(setup: SetupAnalysis): string {
 }
 
 export default function AnalysisPanel({ analysis, loading }: AnalysisPanelProps) {
+  // Shared draggable-panel state. Hook is called unconditionally so React's
+  // rules-of-hooks are happy across the early-return branches below.
+  const { panelRef, wrapperStyle, useDefaultPlacement, dragHandleProps } =
+    useDraggablePanel();
+
   if (analysis === null && loading) {
     return (
-      <div className="absolute top-4 right-4 z-10 w-72 rounded-lg border border-gray-700 bg-gray-800/85 p-3 backdrop-blur-sm">
-        <div className="flex items-center justify-between">
+      <div
+        ref={panelRef}
+        style={wrapperStyle}
+        className={clsx(
+          'absolute z-10 w-72 rounded-lg border border-gray-700 bg-gray-800/85 p-3 backdrop-blur-sm',
+          useDefaultPlacement && 'top-4 right-4',
+        )}
+      >
+        <div {...dragHandleProps} className="flex items-center justify-between">
           <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">
             Analysis
           </span>
@@ -167,16 +335,39 @@ export default function AnalysisPanel({ analysis, loading }: AnalysisPanelProps)
   if (analysis === null) return null;
 
   if (analysis.kind === 'no-setup') {
+    const topRejects = (analysis.rejections ?? []).slice(0, 3);
     return (
-      <div className="absolute top-4 right-4 z-10 w-72 rounded-lg border border-gray-700 bg-gray-800/85 p-3 backdrop-blur-sm">
-        <div className="flex items-center justify-between">
+      <div
+        ref={panelRef}
+        style={wrapperStyle}
+        className={clsx(
+          'absolute z-10 w-72 rounded-lg border border-gray-700 bg-gray-800/85 p-3 backdrop-blur-sm',
+          useDefaultPlacement && 'top-4 right-4',
+        )}
+      >
+        <div {...dragHandleProps} className="flex items-center justify-between">
           <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">
             Analysis
           </span>
           <span className="h-2 w-2 animate-pulse rounded-full bg-gray-500" />
         </div>
         <div className="mt-2 text-sm font-semibold text-gray-300">No setup right now</div>
-        <div className="mt-1 text-[11px] italic text-gray-500">{analysis.reason}</div>
+
+        {topRejects.length > 0 ? (
+          <div className="mt-2 space-y-1.5 border-t border-gray-700/60 pt-2">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+              Closest to firing
+            </div>
+            {topRejects.map((r, i) => (
+              <RejectRow key={`${r.levelType}-${r.levelValue}-${i}`} reject={r} highlight={i === 0} />
+            ))}
+          </div>
+        ) : (
+          <div className="mt-1 text-[11px] italic text-gray-500" title={analysis.reason}>
+            {analysis.reason}
+          </div>
+        )}
+
         {analysis.levels && (
           <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1.5 border-t border-gray-700/60 pt-2 text-[11px]">
             <div className="flex justify-between">
@@ -211,12 +402,15 @@ export default function AnalysisPanel({ analysis, loading }: AnalysisPanelProps)
 
   return (
     <div
+      ref={panelRef}
+      style={wrapperStyle}
       className={clsx(
-        'absolute top-4 right-4 z-10 w-72 rounded-lg border bg-gray-800/85 p-3 backdrop-blur-sm',
+        'absolute z-10 w-72 rounded-lg border bg-gray-800/85 p-3 backdrop-blur-sm',
+        useDefaultPlacement && 'top-4 right-4',
         isBuy ? 'border-emerald-500/40' : 'border-red-500/40',
       )}
     >
-      <div className="flex items-center justify-between">
+      <div {...dragHandleProps} className="flex items-center justify-between">
         <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">
           Analysis
         </span>
@@ -238,7 +432,12 @@ export default function AnalysisPanel({ analysis, loading }: AnalysisPanelProps)
           >
             {analysis.side}
           </div>
-          {analysis.status && <StatusBadge status={analysis.status} />}
+          {analysis.status && (
+            <StatusBadge
+              status={analysis.status}
+              invalidationKind={analysis.invalidationKind ?? null}
+            />
+          )}
         </div>
         <div className="text-[11px] text-gray-300">
           <span className="font-semibold text-gray-100">{analysis.symbol}</span>
@@ -249,7 +448,34 @@ export default function AnalysisPanel({ analysis, loading }: AnalysisPanelProps)
         </div>
       </div>
 
-      <div className="mt-3 space-y-1.5 text-[12px]">
+      {analysis.status === 'INVALIDATED' && analysis.invalidationReason && (() => {
+        const kindLabel =
+          analysis.invalidationKind === 'structural'
+            ? 'STRUCTURAL EXIT'
+            : analysis.invalidationKind === 'counter-setup'
+              ? 'COUNTER FLIP'
+              : analysis.invalidationKind === 'time-mfe'
+                ? 'TIMED OUT'
+                : 'CLOSED';
+        return (
+          <div className="mt-3 rounded-md border-2 border-amber-500/50 bg-amber-500/10 px-2.5 py-2">
+            <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-amber-300">
+              <span>⚠</span>
+              <span>Invalidated — {kindLabel}</span>
+            </div>
+            <div className="mt-1 text-[11px] leading-snug text-amber-100/90">
+              {analysis.invalidationReason}
+            </div>
+          </div>
+        );
+      })()}
+
+      <div
+        className={clsx(
+          'mt-3 space-y-1.5 text-[12px]',
+          analysis.status === 'INVALIDATED' && 'opacity-60',
+        )}
+      >
         <div className="flex items-center justify-between">
           <span className="text-amber-400">Entry</span>
           <span className="font-mono tabular-nums text-gray-100">{fmt(analysis.entry)}</span>
@@ -468,7 +694,56 @@ export default function AnalysisPanel({ analysis, loading }: AnalysisPanelProps)
   );
 }
 
-function StatusBadge({ status }: { status: SetupStatus }) {
+function RejectRow({ reject, highlight }: { reject: RankedReject; highlight: boolean }) {
+  // Visual intensity scales with how far the level got. Distance/confirmation
+  // rejects are dim, mtf-conflict / grade-c are nearly green because they
+  // mean the setup almost fired.
+  const tone =
+    reject.progress >= 4
+      ? 'border-emerald-500/40 bg-emerald-500/5'
+      : reject.progress >= 2
+        ? 'border-amber-500/30 bg-amber-500/5'
+        : 'border-gray-700/60 bg-gray-800/40';
+  const sideColor =
+    reject.side === 'BUY'
+      ? 'text-emerald-400'
+      : reject.side === 'SELL'
+        ? 'text-red-400'
+        : 'text-gray-400';
+  return (
+    <div className={clsx('rounded border px-2 py-1.5', tone, highlight && 'ring-1 ring-amber-500/30')}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 min-w-0">
+          {reject.side && (
+            <span className={clsx('text-[9px] font-bold uppercase', sideColor)}>{reject.side}</span>
+          )}
+          <span className="rounded bg-gray-700/60 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wider text-gray-300">
+            {reject.levelType}
+          </span>
+          <span className="font-mono tabular-nums text-[11px] text-gray-200">
+            {fmt(reject.levelValue)}
+          </span>
+        </div>
+        <span className="text-[9px] font-mono tabular-nums text-gray-500">{reject.progress}/5</span>
+      </div>
+      <div className="mt-0.5 text-[10px] leading-tight text-gray-400">{reject.blockedReason}</div>
+      {reject.needsFor && (
+        <div className="text-[10px] leading-tight text-gray-500">
+          <span className="text-gray-600">needs: </span>
+          {reject.needsFor}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatusBadge({
+  status,
+  invalidationKind,
+}: {
+  status: SetupStatus;
+  invalidationKind?: SetupAnalysis['invalidationKind'];
+}) {
   const cfg: Record<SetupStatus, { label: string; classes: string; pulse: boolean }> = {
     PENDING:        { label: 'PENDING',    classes: 'bg-amber-500/15 text-amber-300',     pulse: true },
     ACTIVE:         { label: 'ACTIVE',     classes: 'bg-blue-500/20 text-blue-300',       pulse: true },
@@ -479,7 +754,24 @@ function StatusBadge({ status }: { status: SetupStatus }) {
     EOD:            { label: 'EOD',        classes: 'bg-gray-700/40 text-gray-400',       pulse: false },
     INVALIDATED:    { label: 'CLOSED',     classes: 'bg-gray-700/40 text-gray-400',       pulse: false },
   };
-  const c = cfg[status];
+
+  // Mechanism-aware override for INVALIDATED. When the backend signals
+  // *why* the setup was torn down via the new adaptive-invalidation
+  // pipeline, swap the generic "CLOSED" pill for a tone that hints at
+  // the cause. Falls through to the default "CLOSED" pill when
+  // invalidationKind is null/missing (manual invalidation or older
+  // signals).
+  let c = cfg[status];
+  if (status === 'INVALIDATED' && invalidationKind) {
+    if (invalidationKind === 'structural') {
+      c = { label: 'STRUCTURAL EXIT', classes: 'bg-amber-500/20 text-amber-300', pulse: false };
+    } else if (invalidationKind === 'counter-setup') {
+      c = { label: 'COUNTER FLIP', classes: 'bg-violet-500/20 text-violet-300', pulse: false };
+    } else if (invalidationKind === 'time-mfe') {
+      c = { label: 'TIMED OUT', classes: 'bg-gray-600/40 text-gray-300', pulse: false };
+    }
+  }
+
   return (
     <span
       className={clsx(

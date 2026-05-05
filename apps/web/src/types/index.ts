@@ -111,10 +111,47 @@ export interface NavItem {
 // keep them in lockstep.
 export type LevelType =
   | 'PDH' | 'PDL' | 'ORH' | 'ORL'
-  | 'VWAP' | 'ROUND' | 'VOL_STRIKE';
+  | 'VWAP' | 'ROUND' | 'VOL_STRIKE'
+  | 'STRONG_ZONE';
+
+// Strong-Zone Reversal strategy (2026-05-03 design spec): zone detector +
+// reversal trigger. Mirrors the backend `StrongZone` and
+// `ZoneScoreBreakdown` types in
+// apps/api/src/modules/signal-generator/types/zone.types.ts — keep in lockstep.
+export interface ZoneScoreBreakdown {
+  touchCount: number;        // 0-100 score for this dimension
+  reversalScore: number;     // 0-100
+  volumeScore: number;       // 0-100
+  recencyScore: number;      // 0-100
+  confluenceBonus: number;   // 0-100
+  wickDensity: number;       // 0-100
+}
+
+export interface StrongZone {
+  id: string;                // stable id (token + zone center hash)
+  token: string;             // instrument token
+  symbol: string;
+  exchange: string;
+  type: 'support' | 'resistance';
+  upper: number;             // zone top price
+  lower: number;             // zone bottom price (== upper if isLine)
+  isLine: boolean;           // true = single horizontal line, false = band
+  strength: number;          // 0-100 normalized
+  classification: 'STRONG' | 'MEDIUM' | 'WEAK';
+  touchCount: number;
+  lastTouchTimestamp: number; // unix ms
+  scoreBreakdown: ZoneScoreBreakdown;
+  computedAt: number;
+  expiresAt: number;          // when to recompute
+}
 export type SetupType = 'BREAKOUT' | 'REVERSAL';
 export type SetupGrade = 'A' | 'B' | 'C';
 export type TimeOfDayWindow = 'morning-trend' | 'afternoon-trend';
+
+// Adaptive-invalidation kinds emitted by the backend's three new
+// auto-teardown mechanisms. Kept in lockstep with `SetupAnalysis` in
+// AnalysisPanel.tsx so the wire contract is single-sourced.
+export type InvalidationKind = 'structural' | 'counter-setup' | 'time-mfe';
 
 export interface SetupContext {
   levelType: LevelType;
@@ -134,8 +171,35 @@ export interface SetupContext {
   volumeRatio: number;
   timeOfDayWindow: TimeOfDayWindow;
   expiryDayWarning?: boolean;
+  // Adaptive-invalidation surface. Populated only when the locked setup
+  // was auto-torn-down mid-trade by structural / counter-setup / time-MFE
+  // mechanisms. Nested under setupContext (rather than at the TradeSignal
+  // root) because (a) the data is conceptually part of the setup
+  // lifecycle, (b) only level-context signals carry locked setups today,
+  // and (c) co-locating with the setup fields keeps the discriminant
+  // (`setupType`) and the invalidation reason on the same object — the
+  // SignalCard already gates the whole setup-context block on
+  // `setupContext.setupType` truthiness.
+  invalidationKind?: InvalidationKind | null;
+  invalidationReason?: string | null;
+  tp1Source?: 'obstacle' | 'fixed';
+  tp1Obstacle?: {
+    classification: 'STRONG' | 'MEDIUM';
+    touchCount: number;
+    nearEdge: number;
+  } | null;
 }
 
 export interface TradeSignal extends SharedTradeSignal {
   setupContext?: SetupContext | null;
+  /**
+   * Per-lot rupee amounts. Backend computes these as
+   * `expectedProfit * instrument.lotSize` and `expectedLoss * instrument.lotSize`.
+   * Optional so a stale build that hasn't been redeployed still renders the
+   * pre-existing per-share fallback. Equity instruments (`lotSize=1`) end up
+   * with the same number as per-share — that's correct, not a bug.
+   */
+  lotSize?: number;
+  expectedProfitPerLot?: number | null;
+  expectedLossPerLot?: number | null;
 }
