@@ -3,7 +3,8 @@ export type LevelType =
   | 'ORH' | 'ORL'
   | 'VWAP'
   | 'ROUND'
-  | 'VOL_STRIKE';
+  | 'VOL_STRIKE'
+  | 'STRONG_ZONE';
 
 export type SetupType = 'BREAKOUT' | 'REVERSAL';
 
@@ -90,4 +91,25 @@ export interface SetupContext {
   /** intradayRange / atr14 — diagnostic ratio backing the regime label. */
   intradayRangeRatio: number;
   expiryDayWarning?: boolean;
+  /**
+   * How TP1 (`partialTakeAt`) was placed:
+   *   'fixed'    → entry ± 1×R (the historical default)
+   *   'obstacle' → near edge of a STRONG/MEDIUM zone (touchCount ≥ 3) in
+   *                the trade path, with a 0.1×ATR buffer.
+   *
+   * Optional so persisted setups from before this field existed still
+   * rehydrate cleanly (Prisma column is `Json?`).
+   */
+  tp1Source?: 'obstacle' | 'fixed';
+  /**
+   * Metadata about the obstacle that drove TP1 placement, populated only
+   * when `tp1Source === 'obstacle'`. Surfaces in the AnalysisPanel TP1 row
+   * so the trader can see WHY TP1 sits where it does.
+   */
+  tp1Obstacle?: {
+    classification: 'STRONG' | 'MEDIUM';
+    touchCount: number;
+    /** The band edge price hits FIRST in the trade direction (upper for SELL, lower for BUY). */
+    nearEdge: number;
+  } | null;
 }
