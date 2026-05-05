@@ -16,6 +16,7 @@ import {
   IndicatorReadings,
   Regime,
 } from '../types/setup-context.types';
+import { StrongZone } from '../types/zone.types';
 import { ema, rsi, macd, bollinger, roc } from './indicators';
 
 const DISTANCE_GATE_ATR = 0.5;       // |spot - level| ≤ 0.5 × ATR14
@@ -112,6 +113,13 @@ export interface AnalyzeInput {
    * callers and unit fixtures keep working unchanged.
    */
   regime?: Regime;
+  /**
+   * Active strong/medium zones for this token. Pre-fetched by
+   * SignalGeneratorService from ZoneRepository.findActiveByToken so the
+   * strategy stays pure (no DB / detector calls here). Empty array when
+   * no zones are loaded — TP1 falls back to the fixed 1×R default.
+   */
+  zones?: StrongZone[];
   /** Optional gate-trace callback for backtest harnesses. */
   debug?: (event: string, detail?: Record<string, unknown>) => void;
 }
@@ -216,6 +224,7 @@ export class LevelsContextStrategy implements TradingStrategy {
       const slTarget = this.computeSlAndTarget({
         setupType, isLong, level: lvl.value, atr: levelBook.atr14,
         levelBook, candidates, triggerCandle: last,
+        zones: input.zones ?? [],
       });
       if (!slTarget) continue;
 
@@ -302,6 +311,8 @@ export class LevelsContextStrategy implements TradingStrategy {
         higherTimeframeTrend,
         regime,
         intradayRangeRatio,
+        tp1Source: slTarget.tp1Source,
+        tp1Obstacle: slTarget.tp1Obstacle,
       };
 
       const reason = this.buildReason(setupContext, levelBook);
@@ -370,6 +381,7 @@ export class LevelsContextStrategy implements TradingStrategy {
       nowIst: meta.nowIst,
       higherTimeframeTrend: meta.higherTimeframeTrend ?? null,
       regime: meta.regime,
+      zones: meta.zones ?? [],
     };
   }
 
@@ -464,12 +476,18 @@ export class LevelsContextStrategy implements TradingStrategy {
     levelBook: LevelBook;
     candidates: CandidateLevel[];
     triggerCandle: CandleData;
-  }): { entry: number; stoploss: number; target: number; partialTakeAt: number } | null {
-    const { setupType, isLong, level, atr, candidates, triggerCandle } = args;
+    zones?: StrongZone[];
+  }): {
+    entry: number;
+    stoploss: number;
+    target: number;
+    partialTakeAt: number;
+    tp1Source: 'obstacle' | 'fixed';
+    tp1Obstacle: { classification: 'STRONG' | 'MEDIUM'; touchCount: number; nearEdge: number } | null;
+  } | null {
+    const { setupType, isLong, level, atr, candidates, triggerCandle, zones = [] } = args;
     const buffer = SL_BUFFER_ATR * atr;
-    // Anchor entry to the level (breakout) or the rejection close (reversal),
-    // not the live spot. Spot drifts on every tick — entry must be FIXED so
-    // the same setup re-evaluated 60s later returns the same numbers.
+
     let entry: number;
     if (setupType === 'BREAKOUT') {
       const trigger = BREAKOUT_BODY_ATR * atr;
@@ -477,35 +495,79 @@ export class LevelsContextStrategy implements TradingStrategy {
     } else {
       entry = triggerCandle.close;
     }
-    let stoploss: number;
 
-    if (setupType === 'BREAKOUT') {
-      stoploss = isLong ? level - buffer : level + buffer;
-    } else {
-      stoploss = isLong ? level - buffer : level + buffer;
-    }
-
+    const stoploss = isLong ? level - buffer : level + buffer;
     const slDist = Math.abs(entry - stoploss);
     if (slDist <= 0) return null;
     const minTargetDist = 2 * slDist;
 
-    // Find the nearest opposing level in the trade direction
     const opposing = candidates
       .filter((c) => (isLong ? c.value > entry : c.value < entry))
-      .sort((a, b) =>
-        Math.abs(a.value - entry) - Math.abs(b.value - entry),
+      .sort((a, b) => Math.abs(a.value - entry) - Math.abs(b.value - entry));
+    const target =
+      opposing.length > 0 && Math.abs(opposing[0].value - entry) >= minTargetDist
+        ? opposing[0].value
+        : (isLong ? entry + minTargetDist : entry - minTargetDist);
+
+    const defaultTp1 = isLong ? entry + slDist : entry - slDist;
+
+    // Obstacle-aware TP1. See docs/superpowers/specs/2026-05-05-tp1-at-obstacle-design.md §Algorithm.
+    const TP1_OBSTACLE_BUFFER_ATR = 0.1;
+    const MIN_TP1_R = 0.4;
+    const obstacleBuffer = TP1_OBSTACLE_BUFFER_ATR * atr;
+
+    const obstacleCandidates = zones
+      .filter((z) =>
+        (z.classification === 'STRONG' || z.classification === 'MEDIUM') &&
+        z.touchCount >= 3,
+      )
+      .map((z) => ({
+        classification: z.classification as 'STRONG' | 'MEDIUM',
+        touchCount: z.touchCount,
+        nearEdge: isLong ? z.lower : z.upper,
+      }))
+      .filter((z) =>
+        isLong
+          ? z.nearEdge > entry && z.nearEdge < target
+          : z.nearEdge < entry && z.nearEdge > target,
       );
 
-    let target: number;
-    if (opposing.length > 0 && Math.abs(opposing[0].value - entry) >= minTargetDist) {
-      target = opposing[0].value;
-    } else {
-      target = isLong ? entry + minTargetDist : entry - minTargetDist;
+    const closest = isLong
+      ? obstacleCandidates.reduce<typeof obstacleCandidates[number] | null>(
+          (best, z) => (best === null || z.nearEdge < best.nearEdge ? z : best),
+          null,
+        )
+      : obstacleCandidates.reduce<typeof obstacleCandidates[number] | null>(
+          (best, z) => (best === null || z.nearEdge > best.nearEdge ? z : best),
+          null,
+        );
+
+    let partialTakeAt = defaultTp1;
+    let tp1Source: 'obstacle' | 'fixed' = 'fixed';
+    let tp1Obstacle:
+      | { classification: 'STRONG' | 'MEDIUM'; touchCount: number; nearEdge: number }
+      | null = null;
+
+    if (closest) {
+      const rawObstacleTp1 = isLong
+        ? closest.nearEdge - obstacleBuffer
+        : closest.nearEdge + obstacleBuffer;
+      const clampedTp1 = isLong
+        ? Math.min(rawObstacleTp1, target - 1e-6)
+        : Math.max(rawObstacleTp1, target + 1e-6);
+      const obstacleR = Math.abs(clampedTp1 - entry) / slDist;
+      if (obstacleR >= MIN_TP1_R) {
+        partialTakeAt = clampedTp1;
+        tp1Source = 'obstacle';
+        tp1Obstacle = {
+          classification: closest.classification,
+          touchCount: closest.touchCount,
+          nearEdge: closest.nearEdge,
+        };
+      }
     }
-    // 50%-book trigger sits 1×SL distance in profit — guaranteed-profit
-    // anchor the trailing-stop machinery uses to lock in break-even on the runner.
-    const partialTakeAt = isLong ? entry + slDist : entry - slDist;
-    return { entry, stoploss, target, partialTakeAt };
+
+    return { entry, stoploss, target, partialTakeAt, tp1Source, tp1Obstacle };
   }
 
   private gradeSetup(args: {
