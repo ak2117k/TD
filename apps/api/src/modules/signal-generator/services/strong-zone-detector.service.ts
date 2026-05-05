@@ -322,8 +322,15 @@ export class StrongZoneDetectorService {
         lowCount >= highCount ? 'support' : 'resistance';
       const wall = naturalType === 'support' ? cluster.lower : cluster.upper;
 
+      // Scan from the EARLIEST pivot's bar, not the latest. cluster.lastIndex
+      // is the most recent pivot — but if post-flip pivots from the NEW role
+      // (e.g. swing highs at the same price level after a support breaks
+      // down) have accumulated, lastIndex sits PAST the actual breakthrough
+      // bar and the scan misses it entirely. Starting from cluster.pivots[0]
+      // guarantees we see every candle between the cluster's earliest
+      // touch and now.
       let flipBarIdx = -1;
-      for (let j = cluster.lastIndex + 1; j < candles.length; j++) {
+      for (let j = cluster.pivots[0].index + 1; j < candles.length; j++) {
         const bar = candles[j];
         const body = Math.abs(bar.close - bar.open);
         if (body <= breakBodyThreshold) continue;
