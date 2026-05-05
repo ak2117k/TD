@@ -2,6 +2,7 @@
 import { LevelsContextStrategy } from './levels-context.strategy';
 import { LevelBook } from '../types/level-book.types';
 import { CandleData } from '../../../common/interfaces/trading-strategy.interface';
+import type { StrongZone } from '../types/zone.types';
 
 describe('LevelsContextStrategy.analyze', () => {
   let strategy: LevelsContextStrategy;
@@ -465,5 +466,126 @@ describe('LevelsContextStrategy.analyze', () => {
     expect(ind.bollingerPosition).not.toBeNull();
     expect(ind.roc10).not.toBeNull();
     expect(typeof ind.agreement).toBe('number');
+  });
+});
+
+describe('computeSlAndTarget — obstacle-aware TP1', () => {
+  const baseLevelBook = {
+    token: '99926000', symbol: 'NIFTY', exchange: 'NSE',
+    asOf: new Date(), pdh: 24100, pdl: 23900, prevClose: 24000,
+    orh: null, orl: null, orLocked: false,
+    spot: 24000, vwap: 0, todayHigh: 24000, todayLow: 24000,
+    atr14: 100, lastTickAt: new Date(), roundNumbers: [],
+  };
+  const baseCandle = {
+    timestamp: new Date(), open: 24000, high: 24010, low: 23990,
+    close: 24000, volume: 1000,
+  };
+
+  function makeZone(overrides: Partial<StrongZone>): StrongZone {
+    return {
+      id: 'z1', token: '99926000', symbol: 'NIFTY', exchange: 'NSE',
+      type: 'support', upper: 23970, lower: 23930, isLine: false,
+      strength: 60, classification: 'MEDIUM', touchCount: 5,
+      lastTouchTimestamp: Date.now(),
+      scoreBreakdown: { touchCount: 100, volumeScore: 0, wickDensity: 50,
+        recencyScore: 80, reversalScore: 40, confluenceBonus: 30 },
+      computedAt: Date.now(), expiresAt: Date.now() + 60_000,
+      ...overrides,
+    };
+  }
+
+  function computeSlAndTarget(args: {
+    isLong: boolean; level: number; zones?: StrongZone[];
+    setupType?: 'BREAKOUT' | 'REVERSAL';
+  }) {
+    const strategy = new LevelsContextStrategy();
+    return (strategy as any).computeSlAndTarget({
+      setupType: args.setupType ?? 'REVERSAL',
+      isLong: args.isLong,
+      level: args.level,
+      atr: 100,
+      levelBook: baseLevelBook,
+      candidates: [],
+      triggerCandle: { ...baseCandle, close: args.level },
+      zones: args.zones ?? [],
+    });
+  }
+
+  it('1. SELL with no zones falls back to fixed 1×R TP1', () => {
+    const r = computeSlAndTarget({ isLong: false, level: 24000 });
+    expect(r.partialTakeAt).toBeCloseTo(23950, 1);
+    expect(r.tp1Source).toBe('fixed');
+    expect(r.tp1Obstacle ?? null).toBeNull();
+  });
+
+  it('2. SELL with STRONG zone in path → TP1 at zone.upper + buffer', () => {
+    const zone = makeZone({ classification: 'STRONG', strength: 75,
+      touchCount: 5, type: 'support', upper: 23970, lower: 23930 });
+    const r = computeSlAndTarget({ isLong: false, level: 24000, zones: [zone] });
+    expect(r.partialTakeAt).toBeCloseTo(23980, 1);
+    expect(r.tp1Source).toBe('obstacle');
+    expect(r.tp1Obstacle).toEqual({
+      classification: 'STRONG', touchCount: 5, nearEdge: 23970,
+    });
+  });
+
+  it('3. SELL with MEDIUM zone touchCount=2 → ignored (touchCount filter)', () => {
+    const zone = makeZone({ classification: 'MEDIUM', touchCount: 2 });
+    const r = computeSlAndTarget({ isLong: false, level: 24000, zones: [zone] });
+    expect(r.partialTakeAt).toBeCloseTo(23950, 1);
+    expect(r.tp1Source).toBe('fixed');
+  });
+
+  it('4. SELL with WEAK zone in path → ignored (classification filter)', () => {
+    const zone = makeZone({ classification: 'WEAK', touchCount: 5 });
+    const r = computeSlAndTarget({ isLong: false, level: 24000, zones: [zone] });
+    expect(r.partialTakeAt).toBeCloseTo(23950, 1);
+    expect(r.tp1Source).toBe('fixed');
+  });
+
+  it('5. SELL with MEDIUM zone too close (obstacleR < 0.4) → fallback to fixed', () => {
+    const zone = makeZone({ classification: 'MEDIUM', touchCount: 5,
+      upper: 23990, lower: 23970 });
+    const r = computeSlAndTarget({ isLong: false, level: 24000, zones: [zone] });
+    expect(r.partialTakeAt).toBeCloseTo(23950, 1);
+    expect(r.tp1Source).toBe('fixed');
+  });
+
+  it('6. BUY with resistance zone in path → TP1 at zone.lower − buffer', () => {
+    const zone = makeZone({ classification: 'MEDIUM', touchCount: 4,
+      type: 'resistance', upper: 24080, lower: 24050 });
+    const r = computeSlAndTarget({ isLong: true, level: 24000, zones: [zone],
+      setupType: 'BREAKOUT' });
+    expect(r.partialTakeAt).toBeCloseTo(24040, 1);
+    expect(r.tp1Source).toBe('obstacle');
+    expect(r.tp1Obstacle?.nearEdge).toBeCloseTo(24050, 1);
+  });
+
+  it('7. BUY with two resistance zones → only the closest one used', () => {
+    const closer = makeZone({ id: 'z-close', classification: 'MEDIUM',
+      touchCount: 4, type: 'resistance', upper: 24080, lower: 24050 });
+    const farther = makeZone({ id: 'z-far', classification: 'MEDIUM',
+      touchCount: 4, type: 'resistance', upper: 24150, lower: 24120 });
+    const r = computeSlAndTarget({ isLong: true, level: 24000,
+      zones: [farther, closer], setupType: 'BREAKOUT' });
+    expect(r.tp1Obstacle?.nearEdge).toBeCloseTo(24050, 1);
+  });
+
+  it('8. BUY with zone beyond target → ignored', () => {
+    const zone = makeZone({ classification: 'MEDIUM', touchCount: 4,
+      type: 'resistance', upper: 24240, lower: 24220 });
+    const r = computeSlAndTarget({ isLong: true, level: 24000, zones: [zone],
+      setupType: 'BREAKOUT' });
+    expect(r.partialTakeAt).toBeCloseTo(24090, 1);
+    expect(r.tp1Source).toBe('fixed');
+  });
+
+  it('9. SELL with valid obstacle clamps to NOT exceed target', () => {
+    const zone = makeZone({ classification: 'STRONG', strength: 75,
+      touchCount: 5, type: 'support', upper: 23805, lower: 23770 });
+    const r = computeSlAndTarget({ isLong: false, level: 24000, zones: [zone] });
+    expect(r.partialTakeAt).toBeGreaterThan(r.target);
+    expect(r.partialTakeAt).toBeLessThan(24000);
   });
 });
