@@ -143,6 +143,15 @@ export interface StrongZone {
   scoreBreakdown: ZoneScoreBreakdown;
   computedAt: number;
   expiresAt: number;          // when to recompute
+  /**
+   * Set when the backend detector observed an impulsive close beyond the
+   * zone's wall edge. `type` reflects the post-flip polarity; `wasType`
+   * carries the pre-flip polarity; `preFlipTouchCount` carries the
+   * touchCount before the half-credit recomputation. All optional.
+   */
+  flippedAt?: number;
+  wasType?: 'support' | 'resistance';
+  preFlipTouchCount?: number;
 }
 export type SetupType = 'BREAKOUT' | 'REVERSAL';
 export type SetupGrade = 'A' | 'B' | 'C';
