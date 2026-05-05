@@ -493,8 +493,18 @@ export default function AnalysisPanel({ analysis, loading }: AnalysisPanelProps)
       {analysis.partialTakeAt !== undefined && analysis.partialTakeAt !== null && (
         <div className="mt-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 border-t border-gray-700/60 pt-2">
           <span className="text-[10px] uppercase tracking-wider text-gray-500">TP1</span>
-          <span className="text-right font-mono text-[11px] tabular-nums text-white">
-            {fmt(analysis.partialTakeAt)}
+          <span className="text-right">
+            <span className="font-mono text-[11px] tabular-nums text-white">
+              {fmt(analysis.partialTakeAt)}
+            </span>
+            {analysis.tp1Source === 'obstacle' && analysis.tp1Obstacle && (
+              <span
+                className="ml-1.5 text-[9px] uppercase tracking-wider text-gray-500"
+                title={`TP1 sits just before a ${analysis.tp1Obstacle.classification} zone with ${analysis.tp1Obstacle.touchCount} historical touches at ${analysis.tp1Obstacle.nearEdge.toFixed(2)}`}
+              >
+                at {analysis.tp1Obstacle.classification.toLowerCase()} zone · {analysis.tp1Obstacle.touchCount}t
+              </span>
+            )}
           </span>
           {analysis.status === 'PARTIAL_BOOKED' && (
             <>
