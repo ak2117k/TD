@@ -11,6 +11,7 @@ import { SettingsService } from '../../settings/services/settings.service';
 import { StrategyRegistryService } from './strategy-registry.service';
 import { SignalScoringService } from './signal-scoring.service';
 import { SignalRepository, CreateSignalInput } from '../repositories/signal.repository';
+import { ZoneRepository } from '../repositories/zone.repository';
 import { SignalGateway } from '../gateways/signal.gateway';
 import { SignalFilterDto } from '../dto/signal.dto';
 import { LevelBookService } from './level-book.service';
@@ -179,6 +180,14 @@ export type AnalyzeResult =
       triggeredAt: string | null;
       partialBookedAt: string | null;
       recommendedStrike: RecommendedStrike | null;
+      /**
+       * Adaptive-invalidation classification + reason. Populated when the
+       * setup was closed early via one of the three short-circuit paths
+       * (structural / counter-setup / time-mfe). Both fields stay null on
+       * still-open setups and on plain target/SL/EOD closes.
+       */
+      invalidationKind?: 'structural' | 'counter-setup' | 'time-mfe' | null;
+      invalidationReason?: string | null;
     }
   | {
       kind: 'no-setup';
@@ -217,6 +226,7 @@ export class SignalGeneratorService {
     private readonly signalGateway: SignalGateway,
     private readonly levelBookService: LevelBookService,
     private readonly setupTracker: SetupTrackerService,
+    private readonly zoneRepository: ZoneRepository,
     @Optional()
     private readonly optionStrikeSelector: OptionStrikeSelectorService | null = null,
     @Optional()
@@ -357,6 +367,7 @@ export class SignalGeneratorService {
     // a useful no-setup reason ("reject:outside-window") instead of a
     // misleading "reject:stale".
     const nowMsForStrategy = book.lastTickAt.getTime() + 1000;
+    const zones = await this.zoneRepository.findActiveByToken(token);
     const output = strategy.analyze({
       candles,
       levelBook: book,
@@ -364,6 +375,7 @@ export class SignalGeneratorService {
       nowMs: nowMsForStrategy,
       higherTimeframeTrend,
       regime,
+      zones,
       debug,
     });
 
@@ -391,6 +403,27 @@ export class SignalGeneratorService {
       ctx.target,
       ctx.stoploss,
     );
+
+    // Counter-setup invalidation: if there's already an open setup for
+    // this token in the OPPOSITE direction, the new fire counts as a
+    // confirmation that the prior thesis is wrong. Flag the old one
+    // first — lock() short-circuits on any open setup, so the conflict
+    // has to be resolved before the new lock can take.
+    const existingForCounter = this.setupTracker.getActive(token);
+    if (
+      existingForCounter &&
+      (existingForCounter.status === 'ACTIVE' ||
+        existingForCounter.status === 'PARTIAL_BOOKED' ||
+        existingForCounter.status === 'PENDING') &&
+      existingForCounter.side !== output.side
+    ) {
+      this.setupTracker.flagCounterSetup(
+        token,
+        output.side,
+        ctx.levelType,
+        output.reason,
+      );
+    }
 
     const locked = this.setupTracker.lock({
       token,
@@ -468,6 +501,8 @@ export class SignalGeneratorService {
         ? setup.partialBookedAt.toISOString()
         : null,
       recommendedStrike: setup.recommendedStrike ?? null,
+      invalidationKind: setup.invalidationKind ?? null,
+      invalidationReason: setup.invalidationReason ?? null,
     };
   }
 
