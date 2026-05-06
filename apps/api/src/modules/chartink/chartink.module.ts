@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Global, Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bull';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { MarketDataModule } from '../market-data/market-data.module';
@@ -10,6 +10,10 @@ import { ChartinkProcessWorker } from './workers/chartink-process.worker';
 import { ChartinkWebhookController } from './controllers/chartink-webhook.controller';
 import { ChartinkController } from './controllers/chartink.controller';
 
+// @Global so ChartinkRepository is injectable into SignalGeneratorController
+// (in SignalGeneratorModule) without that module needing to import this one —
+// which would be a cycle since ChartinkModule already imports SignalGeneratorModule.
+@Global()
 @Module({
   imports: [
     PrismaModule,
