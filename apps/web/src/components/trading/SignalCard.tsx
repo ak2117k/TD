@@ -90,6 +90,16 @@ export default function SignalCard({
             </span>
             <Badge label={signal.exchange} variant="info" size="sm" />
             <StrategyBadge strategy={signal.strategy} />
+            {signal.chartinkSource && (
+              <a
+                href={`/chartink?alertId=${signal.chartinkSource.alertId}`}
+                title={`Sourced from Chartink scanner: ${signal.chartinkSource.scannerName}`}
+                className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-blue-400 hover:bg-blue-500/25"
+              >
+                <span>📊</span>
+                <span>{signal.chartinkSource.scannerName}</span>
+              </a>
+            )}
             {isExpired && (
               <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 bg-gray-700/60 px-1.5 py-0.5 rounded">
                 Expired
