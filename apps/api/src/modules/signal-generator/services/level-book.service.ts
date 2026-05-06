@@ -20,6 +20,34 @@ const DEFAULT_ROUND_STEP: Record<string, number> = {
 };
 const DEFAULT_FALLBACK_STEP = 50;
 
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+/**
+ * The UTC moment that corresponds to **today 00:00 IST**. Angel One stamps
+ * daily candles at midnight IST of the trading day they represent — which
+ * is 18:30 UTC of the *previous* calendar day. So the candle for trading
+ * day 2026-04-30 is timestamped `2026-04-29 18:30 UTC`.
+ *
+ * To pick "yesterday or earlier" while excluding "today's still-forming
+ * daily candle," compare with strict `<` against this value. Naive
+ * thresholds like "today's session open" (03:45 UTC for NSE) do NOT work
+ * because today's daily candle (stamped at 18:30 UTC yesterday) is
+ * *before* today's session open and would slip through.
+ *
+ * Exported because both `LevelBookService.lazyLoad` and `LevelBookCron.
+ * seedSession` need the same threshold.
+ */
+export function getTodayMidnightIstAsUtc(now: Date = new Date()): Date {
+  const istNow = new Date(now.getTime() + IST_OFFSET_MS);
+  const todayMidnightIst = Date.UTC(
+    istNow.getUTCFullYear(),
+    istNow.getUTCMonth(),
+    istNow.getUTCDate(),
+    0, 0, 0, 0,
+  );
+  return new Date(todayMidnightIst - IST_OFFSET_MS);
+}
+
 interface BookState extends LevelBook {
   /** Internal accumulators for VWAP. */
   cumPV: number;

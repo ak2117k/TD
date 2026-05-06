@@ -25,6 +25,7 @@ import { AnandSniperV25CombinedStrategy } from './strategies/anand-sniper-v25-co
 import { LevelBookService } from './services/level-book.service';
 import { LevelBookCron } from './services/level-book.cron';
 import { SetupTrackerService } from './services/setup-tracker.service';
+import { ZoneRepository } from './repositories/zone.repository';
 
 // @Global so LevelBookService is injectable from MarketFeedService
 // (in MarketDataModule) without MarketDataModule needing to import this
@@ -81,6 +82,10 @@ import { SetupTrackerService } from './services/setup-tracker.service';
     // In-memory locked-setup tracker — anchors entry/SL/target so the same
     // setup re-evaluated on subsequent polls returns the same numbers.
     SetupTrackerService,
+
+    // Strong-zone persistence cache. Used by SignalGeneratorService to feed
+    // the TP1-at-obstacle algorithm with the active S/R zone set per token.
+    ZoneRepository,
   ],
   exports: [
     SignalGeneratorService,
