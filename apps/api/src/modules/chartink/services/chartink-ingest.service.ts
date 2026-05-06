@@ -1,6 +1,7 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
+import { Prisma } from '@prisma/client';
 import { ChartinkWebhookDto } from '../dto/chartink-webhook.dto';
 import { ChartinkRepository } from '../repositories/chartink.repository';
 
@@ -39,7 +40,7 @@ export class ChartinkIngestService {
     const alert = await this.repo.createAlert({
       scannerId: scanner.id,
       triggeredAt,
-      rawPayload: payload as unknown as Record<string, unknown>,
+      rawPayload: payload as unknown as Prisma.InputJsonValue,
     });
 
     await this.queue.add('process', { alertId: alert.id, hits });

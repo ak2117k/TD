@@ -229,6 +229,17 @@ export class MarketDataRepository {
   }
 
   /**
+   * Find an instrument by trading symbol + exchange. Used by
+   * Chartink integration to resolve scanner-emitted symbols to
+   * tokens. Returns null when no instrument matches.
+   */
+  async getInstrumentBySymbol(symbol: string, exchange: string) {
+    return this.prisma.instrument.findFirst({
+      where: { symbol, exchange },
+    });
+  }
+
+  /**
    * Load every active instrument in the DB. Used by InstrumentService at
    * boot to prime the in-memory token→instrumentId cache so the candle
    * aggregator has mappings for all tradable segments (NSE indices, NFO
