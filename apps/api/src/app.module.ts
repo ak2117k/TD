@@ -17,6 +17,7 @@ import { AIAdvisorModule } from './modules/ai-advisor/ai-advisor.module';
 import { AutoTradeModule } from './modules/auto-trade/auto-trade.module';
 import { InsightsModule } from './modules/insights/insights.module';
 import { BrokerModule } from './modules/broker/broker.module';
+import { ChartinkModule } from './modules/chartink/chartink.module';
 
 @Module({
   imports: [
@@ -80,6 +81,9 @@ import { BrokerModule } from './modules/broker/broker.module';
 
     // Broker management — credential storage and connection lifecycle
     BrokerModule,
+
+    // Chartink — webhook-driven scanner alerts feeding the setup pipeline
+    ChartinkModule,
   ],
   providers: [],
 })
