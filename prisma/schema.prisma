@@ -170,6 +170,93 @@ model Trade {
 }
 
 // ============================================
+// Locked Setups — persistence for in-memory tracker
+// ============================================
+//
+// Mirrors the LockedSetup contract maintained in-memory by
+// SetupTrackerService. The in-memory map remains the source of truth for
+// hot-path lookups; this table is the durable forensics log so MFE / MAE
+// / invalidation kind / close reason / barsToOutcome survive an API
+// restart. Without it we cannot do failure-mode analysis — every restart
+// wipes the data.
+model Setup {
+  id                    String    @id @default(cuid())
+  token                 Int
+  symbol                String
+  exchange              String
+  side                  String    // BUY | SELL
+  setupType             String    // BREAKOUT | REVERSAL
+  levelType             String    // PDH | PDL | ORH | ORL | VWAP | ROUND | VOL_STRIKE
+  levelValue            Float
+  entry                 Float
+  stoploss              Float
+  target                Float
+  partialTakeAt         Float?
+  grade                 String    // A | B | C
+  atr14                 Float?
+  regime                String?   // trending | choppy | normal
+  intradayRangeRatio    Float?
+  higherTimeframeTrend  Json?
+  recommendedStrike     Json?
+  reason                String
+  status                String    // PENDING | ACTIVE | PARTIAL_BOOKED | CLOSED | INVALIDATED
+  lockedAt              DateTime  @default(now())
+  triggeredAt           DateTime?
+  triggerBarTimestamp   DateTime?
+  closedAt              DateTime?
+  // SL_HIT | TARGET_HIT | TRAIL_STOP | INVALIDATED_STRUCTURAL |
+  // INVALIDATED_COUNTER | INVALIDATED_TIME_MFE | EOD | MANUAL
+  closeReason           String?
+  // structural | counter-setup | time-mfe | manual
+  invalidationKind      String?
+  invalidationReason    String?
+  // Running max favorable excursion in R units (0 at entry).
+  mfeR                  Float?
+  // Running max adverse excursion in R units (0 at entry, NEW).
+  maeR                  Float?
+  barsSinceEntry        Int?
+  lastUpdatedAt         DateTime  @updatedAt
+
+  @@index([token, status])
+  @@index([symbol, lockedAt])
+  @@index([closeReason])
+  @@map("setups")
+}
+
+// ============================================
+// Strong Zones — supply/demand zone detector cache
+// ============================================
+//
+// Persists the most recent StrongZoneDetector output per token so the
+// chart overlay (and any consumer that doesn't run the detector itself)
+// can read zones without recomputing them on every poll. Refreshed by
+// upsertMany() — which deletes existing rows for the token in a
+// transaction before inserting the new set — so a token always has at
+// most ~10 zones (5 above + 5 below LTP). Stale rows past
+// `expiresAt` are skipped by findActiveByToken().
+model Zone {
+  id                  String   @id @default(cuid())
+  token               String
+  symbol              String
+  exchange            String
+  type                String   // 'support' | 'resistance'
+  upper               Float
+  lower               Float
+  isLine              Boolean
+  strength            Int
+  classification      String   // 'STRONG' | 'MEDIUM' | 'WEAK'
+  touchCount          Int
+  lastTouchTimestamp  DateTime
+  scoreBreakdown      Json
+  computedAt          DateTime @default(now())
+  expiresAt           DateTime
+
+  @@index([token, classification])
+  @@index([expiresAt])
+  @@map("zones")
+}
+
+// ============================================
 // Portfolio & Performance
 // ============================================
 
@@ -347,4 +434,64 @@ model BrokerCredential {
   updatedAt     DateTime  @updatedAt
 
   @@map("broker_credentials")
+}
+
+// ============================================
+// Chartink — webhook-driven scanner alerts
+// ============================================
+//
+// Each scanner the user configures on chartink.com gets one
+// ChartinkScanner row (keyed by scan_url slug). Every time it fires,
+// we get a ChartinkAlert. Each alert produces N ChartinkAlertSetup
+// rows — one per symbol in the alert payload, each annotated with
+// whether our pipeline accepted (kind='setup') or rejected (kind=
+// 'no-setup' / 'unresolved' / 'error').
+//
+// See docs/superpowers/specs/2026-05-06-chartink-webhook-integration-design.md.
+
+model ChartinkScanner {
+  id           String           @id @default(cuid())
+  scanUrl      String           @unique
+  scanName     String
+  alertName    String?
+  firstSeenAt  DateTime         @default(now())
+  lastFiredAt  DateTime?
+  fireCount    Int              @default(0)
+  alerts       ChartinkAlert[]
+
+  @@map("chartink_scanners")
+}
+
+model ChartinkAlert {
+  id           String                 @id @default(cuid())
+  scannerId    String
+  scanner      ChartinkScanner        @relation(fields: [scannerId], references: [id])
+  triggeredAt  DateTime
+  receivedAt   DateTime               @default(now())
+  rawPayload   Json
+  setups       ChartinkAlertSetup[]
+
+  @@index([scannerId, triggeredAt])
+  @@map("chartink_alerts")
+}
+
+model ChartinkAlertSetup {
+  id            String         @id @default(cuid())
+  alertId       String
+  alert         ChartinkAlert  @relation(fields: [alertId], references: [id])
+  symbol        String
+  token         String?
+  hitPrice      Float
+  // 'setup' | 'no-setup' | 'unresolved' | 'error'
+  kind          String
+  // Loose ref to the existing Setup model when kind='setup'. Intentionally
+  // NOT a Prisma @relation so the existing setup lifecycle (close /
+  // invalidate / cascade) doesn't reach into Chartink history.
+  setupId       String?
+  rejectReason  String?
+  processedAt   DateTime       @default(now())
+
+  @@index([alertId])
+  @@index([token])
+  @@map("chartink_alert_setups")
 }
