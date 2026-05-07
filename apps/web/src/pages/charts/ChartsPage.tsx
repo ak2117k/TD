@@ -217,8 +217,12 @@ export default function ChartsPage() {
           </div>
         )}
 
-        {/* Chart area */}
-        <div className="flex-1 relative min-w-0">
+        {/* Chart area. h-full is required because the inner CandlestickChart
+            uses height: '100%' which can't resolve on a flex item without an
+            explicit definite height when the row's outer container is
+            min-h-* (not a fixed h-*). Without this, the chart collapsed to
+            its 300px minHeight or disappeared entirely. */}
+        <div className="flex-1 relative min-w-0 h-full">
           {isLoading && candles.length === 0 && (
             <div className="absolute inset-0 flex items-center justify-center bg-[var(--color-bg-primary)] z-10">
               <div className="flex flex-col items-center gap-3">
