@@ -45,3 +45,25 @@ export function Stat({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
+
+/**
+ * Format a raw INR number into a compact Indian-style label.
+ *
+ *   ≥ 1e13  → "₹X.XX L Cr"   (lakh crore, used for the largest caps —
+ *                              Reliance, TCS, HDFC Bank etc.)
+ *   ≥ 1e7   → "₹X,XXX Cr"     (crore, the default for most listed stocks)
+ *   else    → "₹X,XX,XXX"     (Indian-locale grouping)
+ *
+ * Returns "—" for null/undefined/non-finite — the card can render the
+ * dash directly without doing its own null check.
+ */
+export function formatINR(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '—';
+  if (value >= 1e13) {
+    return `₹${(value / 1e13).toFixed(2)} L Cr`;
+  }
+  if (value >= 1e7) {
+    return `₹${Math.round(value / 1e7).toLocaleString('en-IN')} Cr`;
+  }
+  return `₹${Math.round(value).toLocaleString('en-IN')}`;
+}

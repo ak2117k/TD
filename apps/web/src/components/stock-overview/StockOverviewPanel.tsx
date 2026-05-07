@@ -4,7 +4,7 @@ import MarketDepthCard from './MarketDepthCard';
 import IndicatorsCard from './IndicatorsCard';
 import OptionsChainPreviewCard from './OptionsChainPreviewCard';
 import SymbolNewsCard from './SymbolNewsCard';
-import FundamentalsStubCard from './FundamentalsStubCard';
+import FundamentalsCard from './FundamentalsCard';
 
 interface Props {
   token: string;
@@ -28,7 +28,8 @@ interface Props {
  *   4. IndicatorsCard             — RSI/MACD/EMA/BB/ROC chips
  *   5. OptionsChainPreviewCard    — ATM ± 3 strikes (hides for cash-only)
  *   6. SymbolNewsCard             — last 10 symbol-tagged headlines
- *   7. FundamentalsStubCard       — placeholder grid, "Coming soon"
+ *   7. FundamentalsCard           — Yahoo-sourced sector/valuation/earnings,
+ *                                   24h API cache, hides for indices/MCX
  *
  * Symbol/timeframe switches: each card refetches via its own hook; nothing
  * is shared at the panel level.
@@ -49,7 +50,7 @@ export default function StockOverviewPanel({
       <IndicatorsCard token={token} exchange={exchange} timeframe={timeframe} />
       <OptionsChainPreviewCard symbol={symbol} token={token} />
       <SymbolNewsCard symbol={symbol} />
-      <FundamentalsStubCard />
+      <FundamentalsCard symbol={symbol} exchange={exchange} />
     </div>
   );
 }
