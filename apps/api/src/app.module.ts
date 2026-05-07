@@ -18,6 +18,7 @@ import { AutoTradeModule } from './modules/auto-trade/auto-trade.module';
 import { InsightsModule } from './modules/insights/insights.module';
 import { BrokerModule } from './modules/broker/broker.module';
 import { ChartinkModule } from './modules/chartink/chartink.module';
+import { FundamentalsModule } from './modules/fundamentals/fundamentals.module';
 
 @Module({
   imports: [
@@ -84,6 +85,9 @@ import { ChartinkModule } from './modules/chartink/chartink.module';
 
     // Chartink — webhook-driven scanner alerts feeding the setup pipeline
     ChartinkModule,
+
+    // Fundamentals — Yahoo Finance-sourced stock fundamentals (24h cache)
+    FundamentalsModule,
   ],
   providers: [],
 })
