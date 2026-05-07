@@ -177,4 +177,20 @@ export interface SetupContext {
   contextCoverage?: number;
   /** Per-factor breakdown (name, weight, tier, value, contribution, isStub). */
   contextFactors?: ContextFactorBreakdown[];
+
+  /**
+   * Optional reference to the locked option-strike recommendation, attached
+   * to the SetupContext just before scoring runs so factors like
+   * `GreeksFactor` can read delta / gamma without an extra injection. Kept
+   * loose-typed (`unknown`) here to avoid pulling the strike type from
+   * `setup-tracker.service` and creating a circular import; the GreeksFactor
+   * narrows it via a structural check.
+   */
+  recommendedStrike?: {
+    strike: number;
+    side: 'CE' | 'PE';
+    delta: number;
+    gamma: number;
+    [key: string]: unknown;
+  } | null;
 }

@@ -141,6 +141,50 @@ export class MarketContextService {
   }
 
   /**
+   * Returns today's VIX and yesterday's VIX (closest available trading day),
+   * sourced from Yahoo's daily ^INDIAVIX series. Returns null when either
+   * value is missing.
+   *
+   * Used by the VolatilityFactor in the context-scoring engine to classify
+   * volatility direction (rising / flat / falling). Best-effort: any failure
+   * resolves to null so the factor degrades to NEUTRAL with a "no VIX data"
+   * reason instead of crashing the score.
+   */
+  async getVixHistory(): Promise<{ today: number; yesterday: number } | null> {
+    try {
+      // ^INDIAVIX is supported by YahooFinanceService.getCandles via the
+      // INDICES symbol-token map. Token '99926037' is wrong here — INDIAVIX
+      // doesn't have an Angel One INDICES token in the current map. Fall
+      // back to a direct Yahoo fetch via the same chart endpoint
+      // getIndiaVix uses, but extract the last two daily closes.
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent('^INDIAVIX')}?interval=1d&range=5d`;
+      const response = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+      });
+      if (!response.ok) return null;
+      const data = (await response.json()) as any;
+      const result = data?.chart?.result?.[0];
+      const closes: Array<number | null> | undefined = result?.indicators?.quote?.[0]?.close;
+      if (!closes || closes.length < 2) return null;
+
+      // Walk from the end and pick the two most recent non-null closes.
+      const recent: number[] = [];
+      for (let i = closes.length - 1; i >= 0 && recent.length < 2; i--) {
+        const c = closes[i];
+        if (typeof c === 'number' && Number.isFinite(c)) recent.push(c);
+      }
+      if (recent.length < 2) return null;
+
+      return { today: recent[0], yesterday: recent[1] };
+    } catch (err) {
+      this.logger.warn(
+        `MarketContext: failed to fetch VIX history: ${err instanceof Error ? err.message : err}`,
+      );
+      return null;
+    }
+  }
+
+  /**
    * Run a fetch and turn any throw into a logged warning + null result.
    * Used so the snapshot is best-effort: each source can fail independently.
    */
