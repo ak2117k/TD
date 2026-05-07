@@ -52,6 +52,14 @@ interface BookState extends LevelBook {
   /** Internal accumulators for VWAP. */
   cumPV: number;
   cumV: number;
+  /**
+   * Timestamp of the most-recent daily candle that fed PDH/PDL/atr14. Used by
+   * lazyLoad to detect when a newer daily has landed in the DB after seed
+   * time (boot-after-downtime → gap-fill ingests yesterday on demand) and
+   * refresh the static side without dropping the live VWAP / today's H/L /
+   * opening-range that the tick path is accumulating.
+   */
+  lastDailyTimestamp: Date | null;
 }
 
 @Injectable()
@@ -140,6 +148,7 @@ export class LevelBookService {
     const last = candles[candles.length - 1];
     const atr14 = this.computeAtr(candles);
 
+    const existing = this.books.get(input.token);
     const book: BookState = {
       token: input.token,
       symbol: input.symbol,
@@ -148,18 +157,23 @@ export class LevelBookService {
       pdh: last.high,
       pdl: last.low,
       prevClose: last.close,
-      orh: null,
-      orl: null,
-      orLocked: false,
-      spot: 0,
-      vwap: 0,
-      todayHigh: 0,
-      todayLow: 0,
+      // Preserve OR + intraday accumulators across a re-seed so an
+      // in-session refresh (lazyLoad detected a newer daily candle)
+      // doesn't blow away the VWAP / today's H/L the tick path has
+      // been building.
+      orh: existing?.orh ?? null,
+      orl: existing?.orl ?? null,
+      orLocked: existing?.orLocked ?? false,
+      spot: existing?.spot ?? 0,
+      vwap: existing?.vwap ?? 0,
+      todayHigh: existing?.todayHigh ?? 0,
+      todayLow: existing?.todayLow ?? 0,
       atr14,
-      lastTickAt: new Date(0),
-      roundNumbers: [],
-      cumPV: 0,
-      cumV: 0,
+      lastTickAt: existing?.lastTickAt ?? new Date(0),
+      roundNumbers: existing?.roundNumbers ?? [],
+      cumPV: existing?.cumPV ?? 0,
+      cumV: existing?.cumV ?? 0,
+      lastDailyTimestamp: last.timestamp,
     };
     this.books.set(input.token, book);
   }
@@ -195,8 +209,8 @@ export class LevelBookService {
     const book = this.books.get(token);
     if (!book) return null;
     // Strip internal accumulators from the public view
-    const { cumPV: _pv, cumV: _v, ...publicBook } = book;
-    void _pv; void _v;
+    const { cumPV: _pv, cumV: _v, lastDailyTimestamp: _ldt, ...publicBook } = book;
+    void _pv; void _v; void _ldt;
     return publicBook;
   }
 
@@ -226,17 +240,24 @@ export class LevelBookService {
     // in-session VWAP/today's-H-L through overnight (when the lazy-build
     // path would otherwise rebuild and reset them to 0 because the new
     // session hasn't started yet).
+    // EXCEPTION before unconditional return: if a newer daily candle has
+    // landed in the DB since we seeded (boot-after-downtime, manual
+    // backfill via debug-broker-fetch, etc.), refresh the static side
+    // (PDH/PDL/prevClose/atr14) before returning. The updated seedSession
+    // preserves OR / VWAP / today's H/L across the refresh.
     if (cached && this.liveBooks.has(token)) {
-      const { cumPV: _pv, cumV: _v, ...publicBook } = cached;
-      void _pv; void _v;
+      await this.refreshDailyStaticsIfStale(cached, exchange, symbol);
+      const refreshed = this.books.get(token) ?? cached;
+      const { cumPV: _pv, cumV: _v, lastDailyTimestamp: _ldt, ...publicBook } = refreshed;
+      void _pv; void _v; void _ldt;
       return publicBook;
     }
 
     // Non-live (lazy-built) books still use the 5-min TTL — the snapshot
     // they were built from is only as fresh as the DB at build time.
     if (cached && Date.now() - cached.lastTickAt.getTime() < LAZY_FRESH_MS) {
-      const { cumPV: _pv, cumV: _v, ...publicBook } = cached;
-      void _pv; void _v;
+      const { cumPV: _pv, cumV: _v, lastDailyTimestamp: _ldt, ...publicBook } = cached;
+      void _pv; void _v; void _ldt;
       return publicBook;
     }
 
@@ -365,6 +386,71 @@ export class LevelBookService {
     }
 
     return this.getLevels(token);
+  }
+
+  /**
+   * Re-seed PDH/PDL/prevClose/atr14 if a newer daily candle has appeared in
+   * the DB since this book was seeded. No-op when:
+   *   - the dependency is absent (test wiring without market-data)
+   *   - the instrument can't be resolved
+   *   - no newer daily exists
+   *
+   * Cheap (~1 indexed `findFirst`) and safe to call on every lazyLoad —
+   * the staleness check itself bails fast for the common (already-fresh)
+   * case. The actual re-seed only runs when a new daily lands.
+   */
+  private async refreshDailyStaticsIfStale(
+    book: BookState,
+    exchange: string,
+    symbol: string,
+  ): Promise<void> {
+    if (!this.instrumentService || !this.marketDataRepository) return;
+    const instrument = await this.instrumentService.getByToken(book.token);
+    if (!instrument) return;
+
+    const todayMidnightUtc = getTodayMidnightIstAsUtc();
+    const latest = await this.marketDataRepository.getLatestCandleBefore(
+      instrument.id,
+      TIMEFRAMES.DAILY,
+      todayMidnightUtc,
+    );
+    if (!latest) return;
+    if (
+      book.lastDailyTimestamp !== null &&
+      latest.timestamp.getTime() <= book.lastDailyTimestamp.getTime()
+    ) {
+      return; // already current
+    }
+
+    const dailyFrom = new Date(todayMidnightUtc.getTime() - 21 * 24 * 60 * 60 * 1000);
+    const rows = await this.marketDataRepository.getCandles(
+      instrument.id,
+      TIMEFRAMES.DAILY,
+      dailyFrom,
+      todayMidnightUtc,
+    );
+    const dailyCandles = rows
+      .filter((c) => c.timestamp.getTime() < todayMidnightUtc.getTime())
+      .slice(-14)
+      .map((c) => ({
+        timestamp: c.timestamp,
+        open: c.open, high: c.high, low: c.low, close: c.close,
+        volume: typeof c.volume === 'bigint' ? Number(c.volume) : c.volume,
+      }));
+    if (dailyCandles.length === 0) return;
+
+    const prevPdl = book.pdl;
+    this.seedSession({
+      token: book.token, symbol, exchange, recentDailyCandles: dailyCandles,
+    });
+    const refreshed = this.books.get(book.token);
+    if (refreshed) {
+      this.logger.log(
+        `refreshDailyStaticsIfStale(${symbol}): pdl ${prevPdl} → ${refreshed.pdl}, ` +
+        `pdh → ${refreshed.pdh}, atr14 → ${refreshed.atr14.toFixed(2)} ` +
+        `(latest daily: ${refreshed.lastDailyTimestamp?.toISOString()})`,
+      );
+    }
   }
 
   /** Wilder-smoothed ATR over the last ATR_PERIOD candles. */

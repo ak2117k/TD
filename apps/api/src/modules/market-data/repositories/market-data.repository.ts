@@ -72,6 +72,72 @@ export class MarketDataRepository {
   }
 
   /**
+   * Upsert a single candle row keyed by the unique
+   * (instrumentId, timeframe, timestamp) constraint. Used when we need
+   * to overwrite a previously-stored row with revised broker values
+   * (e.g. Angel One's daily candles get late-print adjustments
+   * post-market-close, and the original row in DB is stale). saveCandles
+   * uses createMany + skipDuplicates which can't update existing rows;
+   * this is its surgical complement.
+   */
+  async upsertCandle(input: SaveCandleInput): Promise<{ created: boolean }> {
+    const existing = await this.prisma.candle.findUnique({
+      where: {
+        instrumentId_timeframe_timestamp: {
+          instrumentId: input.instrumentId,
+          timeframe: input.timeframe,
+          timestamp: input.timestamp,
+        },
+      },
+      select: { id: true },
+    });
+    if (existing) {
+      await this.prisma.candle.update({
+        where: { id: existing.id },
+        data: {
+          open: input.open,
+          high: input.high,
+          low: input.low,
+          close: input.close,
+          volume: BigInt(Math.round(input.volume)),
+        },
+      });
+      return { created: false };
+    }
+    await this.prisma.candle.create({
+      data: {
+        instrumentId: input.instrumentId,
+        timeframe: input.timeframe,
+        timestamp: input.timestamp,
+        open: input.open,
+        high: input.high,
+        low: input.low,
+        close: input.close,
+        volume: BigInt(Math.round(input.volume)),
+      },
+    });
+    return { created: true };
+  }
+
+  /**
+   * Most-recent candle for `(instrumentId, timeframe)` strictly before `before`.
+   * Used by LevelBookService to detect when a newer daily candle has landed
+   * since the in-memory book was seeded — so a live-fed book doesn't keep
+   * serving stale PDH/PDL after the previous-day candle finally arrives.
+   */
+  async getLatestCandleBefore(
+    instrumentId: string,
+    timeframe: string,
+    before: Date,
+  ): Promise<{ timestamp: Date } | null> {
+    return this.prisma.candle.findFirst({
+      where: { instrumentId, timeframe, timestamp: { lt: before } },
+      orderBy: { timestamp: 'desc' },
+      select: { timestamp: true },
+    });
+  }
+
+  /**
    * Query candles for a given instrument, timeframe, and date range.
    */
   async getCandles(

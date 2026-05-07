@@ -560,4 +560,83 @@ export class MarketDataController {
     await this.marketFeedService.addViewing(token, exchange);
     return { ok: true, token, exchange };
   }
+
+  /**
+   * POST /api/market-data/debug-broker-fetch
+   * TEMPORARY DIAGNOSTIC ENDPOINT — calls AngelOneAdapter.getHistoricalData
+   * directly and optionally persists the rows. Used to diagnose
+   * "broker returned no rows" silent failures and as a manual catch-up
+   * trigger when the daily-backfill cron didn't fire. REMOVE once
+   * the broker fetch is healthy again.
+   *
+   * Pass `persist: true` to upsert the returned rows into the candle
+   * table (overwriting any existing row at the same instrumentId+timeframe+timestamp,
+   * unlike saveCandles' skipDuplicates).
+   */
+  @Post('debug-broker-fetch')
+  @HttpCode(HttpStatus.OK)
+  async debugBrokerFetch(
+    @Body()
+    body: {
+      token: string;
+      exchange: string;
+      timeframe: string;
+      fromIso: string;
+      toIso: string;
+      persist?: boolean;
+    },
+  ) {
+    const { token, exchange, timeframe, fromIso, toIso, persist } = body;
+    const from = new Date(fromIso);
+    const to = new Date(toIso);
+    if (isNaN(from.getTime()) || isNaN(to.getTime())) {
+      return { ok: false, error: 'invalid fromIso / toIso' };
+    }
+    try {
+      const rows = await this.angelOneAdapter.getHistoricalData(
+        token, exchange, timeframe, from, to,
+      );
+
+      let persisted: number | null = null;
+      if (persist && rows.length > 0) {
+        const instrument = await this.instrumentService.getByToken(token);
+        if (!instrument) {
+          return { ok: false, error: `no instrument record for token ${token}` };
+        }
+        // Upsert each row so we can overwrite stale (revised) candles, not
+        // just add missing ones. saveCandles' skipDuplicates would only
+        // insert; we want both insert + update on conflict.
+        const upsertResults = await Promise.all(
+          rows.map((c: any) =>
+            this.repository.upsertCandle({
+              instrumentId: instrument.id,
+              timeframe,
+              timestamp: new Date(c.timestamp),
+              open: Number(c.open),
+              high: Number(c.high),
+              low: Number(c.low),
+              close: Number(c.close),
+              volume: Number(c.volume) || 0,
+            }),
+          ),
+        );
+        persisted = upsertResults.length;
+      }
+
+      return {
+        ok: true,
+        rowCount: rows.length,
+        persisted,
+        first: rows[0] ?? null,
+        last: rows.length > 0 ? rows[rows.length - 1] : null,
+        sample: rows.slice(0, 3),
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.split('\n').slice(0, 5).join('\n') : null,
+      };
+    }
+  }
 }
