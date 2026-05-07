@@ -1,5 +1,6 @@
 import SetupContextCard, { type AnalysisDto } from './SetupContextCard';
 import LiveQuoteCard from './LiveQuoteCard';
+import MarketDepthCard from './MarketDepthCard';
 
 interface Props {
   token: string;
@@ -37,7 +38,7 @@ export default function StockOverviewPanel({
     <div className="flex flex-col gap-4 p-4 max-w-full">
       <SetupContextCard analysis={analysis} loading={analysisLoading} />
       <LiveQuoteCard token={token} exchange={exchange} symbol={symbol} />
-      <PlaceholderCard label="Card 3: Market Depth (placeholder)" />
+      <MarketDepthCard token={token} exchange={exchange} />
       <PlaceholderCard label="Card 4: Indicators (placeholder)" />
       <PlaceholderCard label="Card 5: Options Chain Preview (placeholder)" />
       <PlaceholderCard label="Card 6: News (placeholder)" />
