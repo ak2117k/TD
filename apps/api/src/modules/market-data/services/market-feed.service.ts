@@ -595,18 +595,9 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
       // Ensure we always use our canonical symbol for consistent frontend filtering.
       this.normalizeTickSymbol(tick);
 
-      // 1. Update in-memory quote cache
-      const quote = this.tickToQuote(tick);
-      this.quoteCache.set(tick.token, quote);
-
-      // 2. Publish to Redis for cross-service distribution
-      this.publishToRedis(tick);
-
-      // 3. Pass to candle aggregator
-      this.candleAggregator.processTick(tick);
-
-      // 3b. Drive the per-instrument level book off the same tick stream.
-      // LevelBookService rolls VWAP / today H/L / spot and tracks staleness.
+      // 1. Update the level book BEFORE building the quote so the quote can
+      //    read the freshly-rolled VWAP. LevelBookService rolls VWAP /
+      //    today H/L / spot and tracks staleness off this same tick stream.
       this.levelBookService?.updateFromTick({
         token: tick.token,
         ltp: tick.ltp,
@@ -614,7 +605,18 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
         timestamp: tick.timestamp,
       });
 
-      // 4. Emit live tick to frontend via WebSocket gateway
+      // 2. Build the quote (now annotated with vwap when the book has it)
+      //    and update the in-memory cache.
+      const quote = this.tickToQuote(tick);
+      this.quoteCache.set(tick.token, quote);
+
+      // 3. Publish to Redis for cross-service distribution
+      this.publishToRedis(tick);
+
+      // 4. Pass to candle aggregator
+      this.candleAggregator.processTick(tick);
+
+      // 5. Emit live tick to frontend via WebSocket gateway
       this.gateway.emitTick(quote);
     } catch (error) {
       this.logger.error(
@@ -1179,7 +1181,14 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
     const change = tick.ltp - prevClose;
     const changePercent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
 
-    return {
+    // Read intraday VWAP from the level book if it's tracking this token.
+    // Books that haven't accumulated enough volume yet report vwap=0; we
+    // omit the field in that case so the frontend can render "—" cleanly
+    // instead of a misleading 0.00 stat.
+    const book = this.levelBookService?.getLevels(tick.token) ?? null;
+    const vwap = book && book.vwap > 0 ? book.vwap : undefined;
+
+    const quote: Quote = {
       symbol: tick.symbol,
       token: tick.token,
       exchange: (tick as any).exchange ?? this.getExchangeForToken(tick.token),
@@ -1193,6 +1202,8 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
       changePercent: Math.round(changePercent * 100) / 100,
       timestamp: tick.timestamp,
     };
+    if (vwap !== undefined) quote.vwap = vwap;
+    return quote;
   }
 
   private async registerTokensWithBroker(tokens: string[]): Promise<void> {

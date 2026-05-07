@@ -79,6 +79,9 @@ export interface Quote {
   change: number;
   changePercent: number;
   timestamp: Date;
+  /** Intraday VWAP from LevelBookService when available. Optional — not all
+   *  tokens are tracked by the level book (e.g. tokens outside the universe). */
+  vwap?: number;
 }
 
 export interface Candle {
