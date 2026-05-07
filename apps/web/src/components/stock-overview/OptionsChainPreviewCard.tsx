@@ -8,8 +8,9 @@ import { Card } from './_shared';
 
 interface Props {
   symbol: string;
-  /** Currently unused but accepted so callers pass it consistently with the
-   *  other card APIs; future enhancement will live-tick the strike row. */
+  /** Used to disambiguate the WS quote lookup — the market-store is keyed
+   *  by symbol, but the symbol carried in the WS payload may not match
+   *  what the user searched. Keying by token is unambiguous. */
   token?: string;
 }
 
@@ -33,8 +34,17 @@ interface ChainResponse {
  * for the dedicated Options page; this card needs to follow whatever
  * symbol the chart is showing without fighting the store.
  */
-export default function OptionsChainPreviewCard({ symbol }: Props) {
-  const wsQuote = useMarketStore((s) => s.quotes.get(symbol));
+export default function OptionsChainPreviewCard({ symbol, token }: Props) {
+  // Symbol-keyed lookup with a token-based fallback — see LiveQuoteCard
+  // for the full rationale. Without this we render a NIFTY-priced ATM
+  // strike for a stock when the demo seed has NIFTY in the store.
+  const wsQuote = useMarketStore((s) => {
+    const bySymbol = s.quotes.get(symbol);
+    if (!token) return bySymbol;
+    if (bySymbol && bySymbol.token === token) return bySymbol;
+    for (const q of s.quotes.values()) if (q.token === token) return q;
+    return undefined;
+  });
   const [data, setData] = useState<ChainResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [errored, setErrored] = useState(false);

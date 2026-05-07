@@ -25,7 +25,19 @@ interface Props {
  * Quote.vwap is optional), and Volume.
  */
 export default function LiveQuoteCard({ token, exchange, symbol }: Props) {
-  const wsQuote = useMarketStore((s) => s.quotes.get(symbol));
+  // Prefer exact symbol match, but fall back to a token-based scan so the
+  // card doesn't render a stale/colliding quote when the searched symbol
+  // string doesn't match what the WS payload carried (e.g. demo seed
+  // pre-loads NIFTY into the store under symbol="NIFTY" and a search for
+  // SBI under a different store key would otherwise hit the NIFTY entry
+  // because of a name collision elsewhere in the pipeline). Token is
+  // unambiguous — same key the chart and analyze() use.
+  const wsQuote = useMarketStore((s) => {
+    const bySymbol = s.quotes.get(symbol);
+    if (bySymbol && bySymbol.token === token) return bySymbol;
+    for (const q of s.quotes.values()) if (q.token === token) return q;
+    return undefined;
+  });
   const [restQuote, setRestQuote] = useState<Quote | null>(null);
 
   // REST fallback so the card isn't blank before the first WS tick.
