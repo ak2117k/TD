@@ -586,13 +586,27 @@ export class MarketDataController {
       persist?: boolean;
     },
   ) {
-    const { token, exchange, timeframe, fromIso, toIso, persist } = body;
+    const { token, exchange, timeframe, fromIso, toIso, persist, updateInstrumentTokenFrom } = body;
     const from = new Date(fromIso);
     const to = new Date(toIso);
     if (isNaN(from.getTime()) || isNaN(to.getTime())) {
       return { ok: false, error: 'invalid fromIso / toIso' };
     }
     try {
+      // Optionally repoint an existing instrument row to a new token before
+      // fetching. Used to fix stale FUTCOM contract tokens (e.g. expired
+      // COPPER row) in-place; the instrument's id stays stable so existing
+      // candles tied to that id are preserved.
+      let tokenRepointed: { from: string; to: string } | null = null;
+      if (updateInstrumentTokenFrom && updateInstrumentTokenFrom !== token) {
+        const stale = await this.instrumentService.getByToken(updateInstrumentTokenFrom);
+        if (!stale) {
+          return { ok: false, error: `no instrument record for stale token ${updateInstrumentTokenFrom}` };
+        }
+        await this.instrumentService.updateTokenById(stale.id, token);
+        tokenRepointed = { from: updateInstrumentTokenFrom, to: token };
+      }
+
       const rows = await this.angelOneAdapter.getHistoricalData(
         token, exchange, timeframe, from, to,
       );
@@ -627,6 +641,7 @@ export class MarketDataController {
         ok: true,
         rowCount: rows.length,
         persisted,
+        tokenRepointed,
         first: rows[0] ?? null,
         last: rows.length > 0 ? rows[rows.length - 1] : null,
         sample: rows.slice(0, 3),

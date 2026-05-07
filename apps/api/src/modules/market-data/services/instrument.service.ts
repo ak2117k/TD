@@ -107,6 +107,38 @@ export class InstrumentService implements OnModuleInit {
   }
 
   /**
+   * Repoint an instrument row to a new token. Used to fix stale FUTCOM
+   * contract tokens after a monthly roll without losing the instrument's
+   * id (and thus its tied candle history). Also rewires the in-memory
+   * caches so subsequent getByToken reads return the correct record.
+   *
+   * Usage: instrument.id is stable; only the `token` field changes.
+   * Existing candles keyed by instrumentId remain accessible (though
+   * those rows reflect the OLD contract's price action, so a fresh
+   * backfill on the NEW token usually follows this call).
+   */
+  async updateTokenById(instrumentId: string, newToken: string): Promise<void> {
+    // Find the current record so we can purge the stale-token entry
+    // from the cache after the DB update.
+    let stale: InstrumentRecord | null = null;
+    for (const inst of this.instrumentsByToken.values()) {
+      if (inst.id === instrumentId) {
+        stale = inst;
+        break;
+      }
+    }
+    await this.repository.updateInstrumentToken(instrumentId, newToken);
+    if (stale) {
+      this.instrumentsByToken.delete(stale.token);
+      const updated = { ...stale, token: newToken } as InstrumentRecord;
+      this.instrumentsByToken.set(newToken, updated);
+    }
+    this.logger.log(
+      `updateTokenById: instrument ${instrumentId} repointed${stale ? ` from ${stale.token}` : ''} to ${newToken}`,
+    );
+  }
+
+  /**
    * Return tokens from the in-memory cache filtered by exchange and segment.
    * Used by MarketFeedService at boot to seed WebSocket subscriptions for
    * symbol classes whose tokens roll over time (e.g. MCX FUTCOM contracts) —

@@ -120,6 +120,17 @@ export class MarketDataRepository {
   }
 
   /**
+   * Repoint an instrument row to a new token. Used by InstrumentService
+   * to fix stale FUTCOM contract tokens after a monthly roll.
+   */
+  async updateInstrumentToken(id: string, token: string): Promise<void> {
+    await this.prisma.instrument.update({
+      where: { id },
+      data: { token },
+    });
+  }
+
+  /**
    * Most-recent candle for `(instrumentId, timeframe)` strictly before `before`.
    * Used by LevelBookService to detect when a newer daily candle has landed
    * since the in-memory book was seeded — so a live-fed book doesn't keep
