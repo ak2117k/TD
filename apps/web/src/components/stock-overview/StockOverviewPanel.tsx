@@ -21,15 +21,17 @@ interface Props {
  * source (e.g. options chain) doesn't gate the cards above it.
  *
  * Cards (top → bottom):
- *   1. Setup & Context (lifted from the old floating AnalysisPanel)
- *   2. Live Quote
- *   3. Market Depth
- *   4. Indicators
- *   5. Options Chain Preview
- *   6. Symbol News
- *   7. Fundamentals (stub for now)
+ *   1. SetupContextCard          — live setup details + Market Context
+ *                                  (lifted from the old floating AnalysisPanel)
+ *   2. LiveQuoteCard              — LTP, OHLC, VWAP, day-range bar
+ *   3. MarketDepthCard            — 5-level bid/ask ladder, REST poll 2s
+ *   4. IndicatorsCard             — RSI/MACD/EMA/BB/ROC chips
+ *   5. OptionsChainPreviewCard    — ATM ± 3 strikes (hides for cash-only)
+ *   6. SymbolNewsCard             — last 10 symbol-tagged headlines
+ *   7. FundamentalsStubCard       — placeholder grid, "Coming soon"
  *
- * Currently rendering placeholder slots — each lands in a follow-up commit.
+ * Symbol/timeframe switches: each card refetches via its own hook; nothing
+ * is shared at the panel level.
  */
 export default function StockOverviewPanel({
   token,
