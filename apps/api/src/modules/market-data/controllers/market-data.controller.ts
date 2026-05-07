@@ -371,11 +371,16 @@ export class MarketDataController {
           resolvedSymbol,
         );
         if (book) {
-          // Build a minimal Quote from what the level book has. Fields
-          // the level book doesn't track (volume, change, changePercent)
-          // are zeroed; the frontend tolerates that. ltp falls back to
+          // Build a minimal Quote from what the level book has. Volume
+          // isn't tracked here (zeroed). LTP falls back to
           // spot → vwap → prevClose so we always have *some* number.
+          // Change / changePercent are derived from prevClose when both
+          // sides are non-zero — otherwise zeroed (the alternative is
+          // showing a misleading -100% on first market-day data).
           const ltp = book.spot || book.vwap || book.prevClose || 0;
+          const prevClose = book.prevClose || 0;
+          const change = ltp && prevClose ? ltp - prevClose : 0;
+          const changePercent = ltp && prevClose ? (change / prevClose) * 100 : 0;
           const seededQuote = {
             token,
             symbol: resolvedSymbol,
@@ -384,10 +389,10 @@ export class MarketDataController {
             open: 0, // not tracked by LevelBook
             high: book.todayHigh || 0,
             low: book.todayLow || 0,
-            close: book.prevClose || 0,
+            close: prevClose,
             volume: 0,
-            change: 0,
-            changePercent: 0,
+            change,
+            changePercent,
             timestamp: book.lastTickAt ?? new Date(),
             vwap: book.vwap || undefined,
           };
