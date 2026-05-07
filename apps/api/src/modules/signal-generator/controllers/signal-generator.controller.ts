@@ -22,6 +22,9 @@ import { SetupTrackerService } from '../services/setup-tracker.service';
 import { SignalFilterDto } from '../dto/signal.dto';
 import { ChartinkRepository } from '../../chartink/repositories/chartink.repository';
 import { ZoneRepository } from '../repositories/zone.repository';
+import { StrongZoneDetectorService } from '../services/strong-zone-detector.service';
+import { LevelBookService } from '../services/level-book.service';
+import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 
 @Controller('api/signals')
 export class SignalGeneratorController {
@@ -41,6 +44,12 @@ export class SignalGeneratorController {
     // Optional for the same test-wiring reason. Backs the /zones endpoint
     // that the chart's ChartZoneOverlay polls every 60s.
     @Optional() private readonly zoneRepository?: ZoneRepository,
+    // Compute-on-miss dependencies for /zones — when the cache is empty
+    // we run the detector inline, persist, return. All optional so test
+    // wirings still construct.
+    @Optional() private readonly strongZoneDetector?: StrongZoneDetectorService,
+    @Optional() private readonly levelBookService?: LevelBookService,
+    @Optional() private readonly marketDataRepository?: MarketDataRepository,
   ) {}
 
   /**
@@ -84,19 +93,102 @@ export class SignalGeneratorController {
    *
    * Backs the chart's `ChartZoneOverlay` (top 5 above + 5 below LTP, with
    * STRONG/MEDIUM classification + flippedAt/wasType/preFlipTouchCount
-   * metadata for swap zones). The detector populates this cache via
-   * upsertMany on each universe scan; this endpoint just reads it.
+   * metadata for swap zones).
    *
-   * Returns [] when no zones are cached for the token (rather than 404)
-   * so the chart overlay stays mounted and doesn't crash.
+   * Two-tier read:
+   *   1. DB cache (ZoneRepository) — fast path, refreshed by the detector
+   *   2. Compute-on-miss — when cache is empty, run the detector inline
+   *      using the level book + 200 most recent 15m candles, persist,
+   *      and return. Means the chart overlay never sees an empty zone
+   *      list just because the universe scan hasn't fired yet.
+   *
+   * Returns [] (not 404) when no zones can be computed (no level book,
+   * insufficient candles, no detector wired) so the chart overlay
+   * stays mounted and doesn't crash.
    */
   @Get('zones')
-  async getZones(@Query('token') token: string) {
+  async getZones(
+    @Query('token') token: string,
+    @Query('exchange') exchange?: string,
+    @Query('symbol') symbol?: string,
+  ) {
     if (!token) {
       throw new BadRequestException('token is required');
     }
     if (!this.zoneRepository) return [];
-    return this.zoneRepository.findActiveByToken(token);
+
+    // Cache hit — done.
+    const cached = await this.zoneRepository.findActiveByToken(token);
+    if (cached.length > 0) return cached;
+
+    // Cache miss — try to compute inline. All deps optional so an
+    // unwired test container still returns []; production has them.
+    if (!this.strongZoneDetector || !this.levelBookService || !this.marketDataRepository) {
+      return [];
+    }
+
+    let resolvedSymbol = symbol;
+    let resolvedExchange = exchange;
+    try {
+      const instrument = await this.marketDataRepository.getInstrumentByToken(token);
+      resolvedSymbol = resolvedSymbol ?? instrument?.symbol;
+      resolvedExchange = resolvedExchange ?? instrument?.exchange ?? 'NSE';
+    } catch (err) {
+      this.logger.debug(
+        `getZones: instrument lookup failed for ${token}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    if (!resolvedSymbol || !resolvedExchange) return [];
+
+    try {
+      const book = await this.levelBookService.lazyLoad(token, resolvedExchange, resolvedSymbol);
+      if (!book) return [];
+
+      const now = new Date();
+      const tenDaysAgo = new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000);
+      const instrument = await this.marketDataRepository.getInstrumentByToken(token);
+      if (!instrument) return [];
+
+      const rows = await this.marketDataRepository.getCandles(
+        instrument.id, '15m', tenDaysAgo, now, 200,
+      );
+      const candles15m = rows.map((r) => ({
+        timestamp: r.timestamp,
+        open: r.open,
+        high: r.high,
+        low: r.low,
+        close: r.close,
+        volume: typeof r.volume === 'bigint' ? Number(r.volume) : r.volume,
+      }));
+
+      if (candles15m.length < 10) return [];
+
+      const zones = this.strongZoneDetector.detectZones({
+        token,
+        symbol: resolvedSymbol,
+        exchange: resolvedExchange,
+        candles15m,
+        levelBook: book,
+        ltp: book.spot,
+        atr14: book.atr14,
+      });
+
+      // Best-effort persist so the next call hits the cache.
+      try {
+        await this.zoneRepository.upsertMany(token, zones);
+      } catch (err) {
+        this.logger.warn(
+          `getZones: persist failed for ${token}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+
+      return zones;
+    } catch (err) {
+      this.logger.warn(
+        `getZones: compute failed for ${token}: ${err instanceof Error ? err.message : err}`,
+      );
+      return [];
+    }
   }
 
   /**

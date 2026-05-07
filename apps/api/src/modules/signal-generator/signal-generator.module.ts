@@ -26,6 +26,7 @@ import { LevelBookService } from './services/level-book.service';
 import { LevelBookCron } from './services/level-book.cron';
 import { SetupTrackerService } from './services/setup-tracker.service';
 import { ZoneRepository } from './repositories/zone.repository';
+import { StrongZoneDetectorService } from './services/strong-zone-detector.service';
 
 // @Global so LevelBookService is injectable from MarketFeedService
 // (in MarketDataModule) without MarketDataModule needing to import this
@@ -86,6 +87,10 @@ import { ZoneRepository } from './repositories/zone.repository';
     // Strong-zone persistence cache. Used by SignalGeneratorService to feed
     // the TP1-at-obstacle algorithm with the active S/R zone set per token.
     ZoneRepository,
+
+    // Strong/swap zone detector — pure compute, fed by /signals/zones
+    // on cache miss so the chart overlay never sees an empty zone list.
+    StrongZoneDetectorService,
   ],
   exports: [
     SignalGeneratorService,
