@@ -162,6 +162,32 @@ export type TimeOfDayWindow = 'morning-trend' | 'afternoon-trend';
 // AnalysisPanel.tsx so the wire contract is single-sourced.
 export type InvalidationKind = 'structural' | 'counter-setup' | 'time-mfe';
 
+// ─── Context scoring ────────────────────────────────────────
+// Mirrors apps/api/src/modules/signal-generator/types/setup-context.types.ts
+// (Tier / CombinedTier / ContextFactorBreakdown). Keep in lockstep with the
+// backend — those types are the wire contract.
+
+/** Subset of Tier valid for the combined contextTier — never NEUTRAL_STUB. */
+export type CombinedTier =
+  | 'STRONG_BULL'
+  | 'BULL'
+  | 'NEUTRAL'
+  | 'BEAR'
+  | 'STRONG_BEAR';
+
+/** Per-factor tier label. NEUTRAL_STUB only appears on stub factors. */
+export type Tier = CombinedTier | 'NEUTRAL_STUB';
+
+export interface ContextFactorBreakdown {
+  name: string;
+  weight: number;
+  tier: Tier;
+  value: number;
+  contribution: number;
+  isStub: boolean;
+  detail?: Record<string, unknown>;
+}
+
 export interface SetupContext {
   levelType: LevelType;
   setupType: SetupType;
@@ -197,6 +223,19 @@ export interface SetupContext {
     touchCount: number;
     nearEdge: number;
   } | null;
+  // ──────────────────────────────────────────────────────────────────
+  // Context scoring (Mama's 10-factor framework). All four optional —
+  // older signals returned by the API will not have them, so the UI
+  // must guard with truthy checks before rendering the Context section.
+  // ──────────────────────────────────────────────────────────────────
+  /** Aggregated alignment score, -100 (counter) to +100 (supportive). */
+  contextScore?: number;
+  /** Tier label derived from contextScore. Never `NEUTRAL_STUB`. */
+  contextTier?: CombinedTier;
+  /** Real-factor weight coverage, 0.0 to 1.0. */
+  contextCoverage?: number;
+  /** Per-factor breakdown (name, weight, tier, value, contribution, isStub). */
+  contextFactors?: ContextFactorBreakdown[];
 }
 
 export interface TradeSignal extends SharedTradeSignal {

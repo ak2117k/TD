@@ -1,5 +1,6 @@
 import clsx from 'clsx';
 import { useEffect, useRef, useState } from 'react';
+import type { CombinedTier, ContextFactorBreakdown } from '@/types';
 
 const DRAG_POSITION_STORAGE_KEY = 'td:analysis-panel-pos';
 
@@ -241,6 +242,16 @@ export interface SetupAnalysis {
     touchCount: number;
     nearEdge: number;
   } | null;
+  /**
+   * Context-scoring engine fields (Mama's 10-factor framework). All four are
+   * optional — older signals or legacy code paths may omit them, in which
+   * case the Market Context section is hidden entirely. Mirrors the backend
+   * SetupContext fields in apps/api/.../setup-context.types.ts.
+   */
+  contextScore?: number;
+  contextTier?: CombinedTier;
+  contextCoverage?: number;
+  contextFactors?: ContextFactorBreakdown[];
 }
 
 export type RejectGate =
@@ -696,6 +707,89 @@ export default function AnalysisPanel({ analysis, loading }: AnalysisPanelProps)
           </div>
         );
       })()}
+
+      {analysis.contextScore !== undefined && analysis.contextFactors && (
+        <div className="mt-3 border-t border-gray-700/60 pt-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+              Market Context
+            </span>
+            <span
+              className={clsx(
+                'text-[11px] font-bold tabular-nums',
+                analysis.contextTier === 'STRONG_BULL' && 'text-emerald-400',
+                analysis.contextTier === 'BULL' && 'text-emerald-300',
+                analysis.contextTier === 'STRONG_BEAR' && 'text-red-400',
+                analysis.contextTier === 'BEAR' && 'text-red-300',
+                analysis.contextTier === 'NEUTRAL' && 'text-gray-300',
+              )}
+            >
+              {analysis.contextScore > 0 ? '+' : ''}
+              {analysis.contextScore} {analysis.contextTier?.replace('_', ' ')}
+            </span>
+          </div>
+          <div className="mt-0.5 text-[9px] text-gray-500">
+            {analysis.contextFactors.filter((f) => !f.isStub).length}/
+            {analysis.contextFactors.length} factors active · coverage{' '}
+            {Math.round((analysis.contextCoverage ?? 0) * 100)}%
+          </div>
+          <div className="mt-1.5 space-y-0.5">
+            {analysis.contextFactors.map((f) => (
+              <div
+                key={f.name}
+                className="flex items-center justify-between text-[10px]"
+              >
+                <span
+                  className={clsx(
+                    'font-mono uppercase tracking-wider',
+                    f.isStub ? 'text-gray-600' : 'text-gray-400',
+                  )}
+                >
+                  {f.name}
+                </span>
+                <div className="flex items-center gap-2">
+                  <span
+                    className={clsx(
+                      'rounded px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wider',
+                      f.isStub
+                        ? 'bg-gray-700/30 text-gray-500'
+                        : f.tier === 'STRONG_BULL'
+                          ? 'bg-emerald-500/15 text-emerald-400'
+                          : f.tier === 'BULL'
+                            ? 'bg-emerald-500/10 text-emerald-300'
+                            : f.tier === 'STRONG_BEAR'
+                              ? 'bg-red-500/15 text-red-400'
+                              : f.tier === 'BEAR'
+                                ? 'bg-red-500/10 text-red-300'
+                                : 'bg-gray-700/40 text-gray-400',
+                    )}
+                    title={
+                      f.isStub
+                        ? 'Stub factor — backend returns NEUTRAL_STUB until implemented'
+                        : `value ${f.value.toFixed(2)} · weight ${(f.weight * 100).toFixed(0)}%`
+                    }
+                  >
+                    {f.isStub ? 'STUB' : f.tier.replace('_', ' ')}
+                  </span>
+                  <span
+                    className={clsx(
+                      'w-8 text-right tabular-nums',
+                      f.contribution > 0
+                        ? 'text-emerald-400'
+                        : f.contribution < 0
+                          ? 'text-red-400'
+                          : 'text-gray-500',
+                    )}
+                  >
+                    {f.contribution > 0 ? '+' : ''}
+                    {Math.round(f.contribution)}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="mt-2 truncate text-[10px] italic text-gray-500" title={analysis.reason}>
         {analysis.reason}

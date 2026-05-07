@@ -11,7 +11,7 @@ import {
 import { cn } from '@/utils/cn';
 import { Badge } from '@/components/common';
 import { formatINR } from '@td/shared';
-import type { TradeSignal } from '@/types';
+import type { CombinedTier, TradeSignal } from '@/types';
 import { OrderSide } from '@/types';
 import StrategyBadge from './StrategyBadge';
 import RiskRewardBar from './RiskRewardBar';
@@ -23,6 +23,25 @@ interface SignalCardProps {
   onTakeAction?: (signal: TradeSignal) => void;
   isNew?: boolean;
   className?: string;
+}
+
+// Pretty label + Tailwind tone for the Ctx chip. Kept tiny so the dense
+// SignalCard top row still breathes — the AnalysisPanel carries the full
+// per-factor breakdown for traders who want detail.
+function ctxChipTone(tier: CombinedTier | undefined, score: number): string {
+  if (tier === 'STRONG_BULL') return 'bg-emerald-500/20 text-emerald-300';
+  if (tier === 'BULL') return 'bg-emerald-500/10 text-emerald-300';
+  if (tier === 'STRONG_BEAR') return 'bg-red-500/20 text-red-300';
+  if (tier === 'BEAR') return 'bg-red-500/10 text-red-300';
+  // NEUTRAL or undefined-tier-but-defined-score (defensive): score-based fallback.
+  if (score >= 30) return 'bg-emerald-500/15 text-emerald-400';
+  if (score <= -30) return 'bg-red-500/15 text-red-400';
+  return 'bg-gray-500/20 text-gray-300';
+}
+
+function ctxChipLabel(tier: CombinedTier | undefined): string {
+  if (!tier) return '';
+  return tier.replace('_', ' ');
 }
 
 function timeAgo(date: Date): string {
@@ -177,13 +196,33 @@ export default function SignalCard({
                   {signal.setupContext.levelType}
                 </span>
               </div>
-              <span className={`rounded px-2 py-0.5 text-[10px] font-bold ${
-                signal.setupContext.grade === 'A' ? 'bg-emerald-500/20 text-emerald-300'
-                : signal.setupContext.grade === 'B' ? 'bg-blue-500/20 text-blue-300'
-                : 'bg-gray-500/20 text-gray-300'
-              }`}>
-                Grade {signal.setupContext.grade}
-              </span>
+              <div className="flex items-center gap-1.5">
+                {signal.setupContext.contextScore !== undefined && (
+                  <span
+                    className={cn(
+                      'inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider',
+                      ctxChipTone(
+                        signal.setupContext.contextTier,
+                        signal.setupContext.contextScore,
+                      ),
+                    )}
+                    title={`Context score ${signal.setupContext.contextScore > 0 ? '+' : ''}${signal.setupContext.contextScore}${signal.setupContext.contextTier ? ` · ${ctxChipLabel(signal.setupContext.contextTier)}` : ''}`}
+                  >
+                    {ctxChipLabel(signal.setupContext.contextTier) || 'CTX'}
+                    <span className="ml-0.5 tabular-nums">
+                      {signal.setupContext.contextScore > 0 ? '+' : ''}
+                      {signal.setupContext.contextScore}
+                    </span>
+                  </span>
+                )}
+                <span className={`rounded px-2 py-0.5 text-[10px] font-bold ${
+                  signal.setupContext.grade === 'A' ? 'bg-emerald-500/20 text-emerald-300'
+                  : signal.setupContext.grade === 'B' ? 'bg-blue-500/20 text-blue-300'
+                  : 'bg-gray-500/20 text-gray-300'
+                }`}>
+                  Grade {signal.setupContext.grade}
+                </span>
+              </div>
             </div>
             <div className="grid grid-cols-3 gap-2 text-[11px] text-gray-300">
               <div>
