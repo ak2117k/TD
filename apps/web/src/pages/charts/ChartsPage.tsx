@@ -6,7 +6,7 @@ import type { CandlestickChartHandle } from '@/components/charts';
 import LevelOverlay, { LEVEL_COLORS } from '@/components/charts/LevelOverlay';
 import SetupMarker from '@/components/charts/SetupMarker';
 import EntryTargetOverlay from '@/components/charts/EntryTargetOverlay';
-import AnalysisPanel from '@/components/charts/AnalysisPanel';
+import StockOverviewPanel from '@/components/stock-overview/StockOverviewPanel';
 import { useChartData } from '@/hooks/useChartData';
 import { useChartAnalysis } from '@/hooks/useChartAnalysis';
 import { useChartStore, type SelectedSymbol } from '@/stores/chart-store';
@@ -144,7 +144,9 @@ export default function ChartsPage() {
     <div
       className={clsx(
         'flex flex-col',
-        isFullscreen ? 'fixed inset-0 z-50 bg-[var(--color-bg-primary)]' : 'h-[calc(100vh-64px)]',
+        isFullscreen
+          ? 'fixed inset-0 z-50 bg-[var(--color-bg-primary)]'
+          : 'min-h-[calc(100vh-64px)] overflow-y-auto',
       )}
     >
       {/* Toolbar */}
@@ -166,8 +168,10 @@ export default function ChartsPage() {
         </div>
       )}
 
-      {/* Main content area */}
-      <div className="flex flex-1 min-h-0">
+      {/* Chart area — fixed at 70vh so the StockOverviewPanel below has room
+          to scroll into view without squishing the chart. */}
+      <div className={clsx('flex min-h-0', isFullscreen ? 'flex-1' : 'h-[70vh]')}>
+
         {/* Watchlist sidebar */}
         {!isFullscreen && (
           <div className="w-48 shrink-0 border-r border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)] overflow-y-auto">
@@ -285,12 +289,6 @@ export default function ChartsPage() {
             />
           )}
 
-          {/* Live analysis panel — top-right of chart area. Hidden when
-              signal-mode is showing the persisted SetupContext instead. */}
-          {!setupContext && (
-            <AnalysisPanel analysis={analysis} loading={analysisLoading} />
-          )}
-
           {/* Indicator panel overlay */}
           {showIndicators && (
             <IndicatorPanel
@@ -308,6 +306,19 @@ export default function ChartsPage() {
           </div>
         </div>
       </div>
+
+      {/* Scrollable info panel below the chart. Hidden in fullscreen so the
+          chart truly fills the viewport. */}
+      {!isFullscreen && (
+        <StockOverviewPanel
+          token={selectedSymbol.token}
+          exchange={selectedSymbol.exchange}
+          symbol={selectedSymbol.symbol}
+          timeframe={timeframe}
+          analysis={analysis}
+          analysisLoading={analysisLoading}
+        />
+      )}
     </div>
   );
 }
