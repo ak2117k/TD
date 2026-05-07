@@ -21,6 +21,7 @@ import { UniverseScannerWorker } from '../workers/universe-scanner.worker';
 import { SetupTrackerService } from '../services/setup-tracker.service';
 import { SignalFilterDto } from '../dto/signal.dto';
 import { ChartinkRepository } from '../../chartink/repositories/chartink.repository';
+import { ZoneRepository } from '../repositories/zone.repository';
 
 @Controller('api/signals')
 export class SignalGeneratorController {
@@ -37,6 +38,9 @@ export class SignalGeneratorController {
     // When wired (in app boot) every signal listing gets a chartinkSource
     // field — null unless a Chartink alert produced the matching setup.
     @Optional() private readonly chartinkRepo?: ChartinkRepository,
+    // Optional for the same test-wiring reason. Backs the /zones endpoint
+    // that the chart's ChartZoneOverlay polls every 60s.
+    @Optional() private readonly zoneRepository?: ZoneRepository,
   ) {}
 
   /**
@@ -73,6 +77,26 @@ export class SignalGeneratorController {
       throw new BadRequestException('token is required');
     }
     return { history: this.setupTracker.getHistory(token) };
+  }
+
+  /**
+   * GET /api/signals/zones — strong support/resistance zones for a token.
+   *
+   * Backs the chart's `ChartZoneOverlay` (top 5 above + 5 below LTP, with
+   * STRONG/MEDIUM classification + flippedAt/wasType/preFlipTouchCount
+   * metadata for swap zones). The detector populates this cache via
+   * upsertMany on each universe scan; this endpoint just reads it.
+   *
+   * Returns [] when no zones are cached for the token (rather than 404)
+   * so the chart overlay stays mounted and doesn't crash.
+   */
+  @Get('zones')
+  async getZones(@Query('token') token: string) {
+    if (!token) {
+      throw new BadRequestException('token is required');
+    }
+    if (!this.zoneRepository) return [];
+    return this.zoneRepository.findActiveByToken(token);
   }
 
   /**
