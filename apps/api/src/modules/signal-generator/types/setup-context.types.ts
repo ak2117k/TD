@@ -6,6 +6,56 @@ export type LevelType =
   | 'VOL_STRIKE'
   | 'STRONG_ZONE';
 
+/**
+ * Tier label assigned to each context-scoring factor + the combined
+ * context score. NEUTRAL_STUB is used ONLY for per-factor results when
+ * the factor's implementation isn't ready yet — it never appears on the
+ * combined `contextTier` (which always derives from the aggregated
+ * numeric score).
+ *
+ * Defined here (rather than in the context-scoring module) so SetupContext
+ * fields can reference these types without creating a circular dependency
+ * between setup-context.types and context-scoring/types.
+ */
+export type Tier =
+  | 'STRONG_BULL'
+  | 'BULL'
+  | 'NEUTRAL'
+  | 'BEAR'
+  | 'STRONG_BEAR'
+  | 'NEUTRAL_STUB';
+
+/** Subset of Tier valid for the combined contextTier — never NEUTRAL_STUB. */
+export type CombinedTier = Exclude<Tier, 'NEUTRAL_STUB'>;
+
+export interface ContextFactorBreakdown {
+  name: string;
+  weight: number;
+  tier: Tier;
+  value: number;
+  contribution: number;
+  isStub: boolean;
+  detail?: Record<string, unknown>;
+}
+
+/** Tier derivation from per-factor value (-1.0 to +1.0). */
+export function tierFromValue(value: number): Tier {
+  if (value >= 0.6) return 'STRONG_BULL';
+  if (value >= 0.2) return 'BULL';
+  if (value <= -0.6) return 'STRONG_BEAR';
+  if (value <= -0.2) return 'BEAR';
+  return 'NEUTRAL';
+}
+
+/** Tier derivation from combined score (-100 to +100). */
+export function tierFromScore(score: number): CombinedTier {
+  if (score >= 60) return 'STRONG_BULL';
+  if (score >= 20) return 'BULL';
+  if (score <= -60) return 'STRONG_BEAR';
+  if (score <= -20) return 'BEAR';
+  return 'NEUTRAL';
+}
+
 export type SetupType = 'BREAKOUT' | 'REVERSAL';
 
 export type SetupGrade = 'A' | 'B' | 'C';
@@ -112,4 +162,19 @@ export interface SetupContext {
     /** The band edge price hits FIRST in the trade direction (upper for SELL, lower for BUY). */
     nearEdge: number;
   } | null;
+
+  // ──────────────────────────────────────────────────────────────────
+  // Context scoring (Mama's 10-factor framework). All optional — older
+  // persisted setups (Prisma `Json?`) still rehydrate cleanly without
+  // these fields, and analyze() may omit them on legacy code paths.
+  // ──────────────────────────────────────────────────────────────────
+
+  /** Aggregated alignment score, -100 (counter) to +100 (supportive of side). */
+  contextScore?: number;
+  /** Tier label derived from contextScore. Never `NEUTRAL_STUB`. */
+  contextTier?: CombinedTier;
+  /** Real-factor weight coverage, 0.0 to 1.0 — share of weight from non-stub factors. */
+  contextCoverage?: number;
+  /** Per-factor breakdown (name, weight, tier, value, contribution, isStub). */
+  contextFactors?: ContextFactorBreakdown[];
 }
