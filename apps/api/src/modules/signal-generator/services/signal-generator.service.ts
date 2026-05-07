@@ -25,9 +25,9 @@ import { OptionStrikeSelectorService } from '../../options-chain/services/option
 import { OptionsChainService } from '../../options-chain/services/options-chain.service';
 import { ContextScoringService } from './context-scoring/context-scoring.service';
 import type { ContextFactorBreakdown } from '../types/setup-context.types';
-import { LevelsContextStrategy, classifyRegime } from '../strategies/levels-context.strategy';
+import { LevelsContextStrategy, classifyRegime, buildIndicatorReadings } from '../strategies/levels-context.strategy';
 import { ema } from '../strategies/indicators';
-import { SetupContext } from '../types/setup-context.types';
+import { SetupContext, IndicatorReadings } from '../types/setup-context.types';
 import { LevelBook } from '../types/level-book.types';
 import {
   TIMEFRAMES,
@@ -546,6 +546,83 @@ export class SignalGeneratorService {
       };
     }
     return this.lockedToResult(final, book);
+  }
+
+  /**
+   * Compute the standalone IndicatorReadings (EMA9/21, RSI14, MACD, BB,
+   * ROC10 + alignment + agreement) for a token / TF, independent of any
+   * setup. Backs the StockOverviewPanel's IndicatorsCard, which needs
+   * indicators even when no active setup exists.
+   *
+   * Reuses the same `buildIndicatorReadings` helper that
+   * `LevelsContextStrategy.computeIndicators` delegates to, so the values
+   * are byte-identical to what `analyze()` would compute on the same
+   * candle window.
+   *
+   * For alignment: standalone callers don't have a setup direction, so
+   * we infer it from the most-recent close vs the prior close. This
+   * means "+1" on every chip means "the indicator agrees with the
+   * candle's micro-direction" — same semantics as the setup case but
+   * derived from price rather than the locked side.
+   *
+   * Returns null when there aren't enough candles to compute the longer
+   * indicators (need ≥ 30 for RSI14 + EMA21 stability).
+   */
+  async computeIndicatorsFor(
+    token: string,
+    exchange: string,
+    timeframe: string,
+  ): Promise<IndicatorReadings | null> {
+    const instrument = await this.marketDataRepository.getInstrumentByToken(token);
+    const now = new Date();
+    const fiveDaysAgo = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
+
+    let candles: Array<{
+      timestamp: Date; open: number; high: number; low: number; close: number; volume: number;
+    }> = [];
+
+    // Try DB first (when symbol is seeded), fall back to broker.
+    if (instrument) {
+      try {
+        const rows = await this.marketDataRepository.getCandles(
+          instrument.id, timeframe, fiveDaysAgo, now, 100,
+        );
+        candles = rows.map((c) => ({
+          timestamp: c.timestamp,
+          open: c.open, high: c.high, low: c.low, close: c.close,
+          volume: typeof c.volume === 'bigint' ? Number(c.volume) : c.volume,
+        }));
+      } catch (err) {
+        this.logger.debug(
+          `computeIndicatorsFor: DB candle lookup failed for ${token}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+    if (candles.length < 30) {
+      try {
+        const broker = await this.angelOneAdapter.getHistoricalData(
+          token, exchange, timeframe, fiveDaysAgo, now,
+        );
+        candles = broker.slice(-100).map((c: any) => ({
+          timestamp: new Date(c.timestamp),
+          open: Number(c.open), high: Number(c.high),
+          low: Number(c.low), close: Number(c.close),
+          volume: Number(c.volume) || 0,
+        }));
+      } catch (err) {
+        this.logger.warn(
+          `computeIndicatorsFor: broker candles fetch failed for ${token}/${timeframe}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+    if (candles.length < 30) return null;
+
+    // Direction inference: align to the latest closed bar's micro-direction.
+    const lastClose = candles[candles.length - 1].close;
+    const prevClose = candles[candles.length - 2].close;
+    const isLong = lastClose >= prevClose;
+
+    return buildIndicatorReadings(candles, lastClose, isLong);
   }
 
   private lockedToResult(

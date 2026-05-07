@@ -288,6 +288,36 @@ export class SignalGeneratorController {
   }
 
   /**
+   * GET /api/signals/indicators — standalone IndicatorReadings for a
+   * token / timeframe, independent of any active setup. Backs the
+   * StockOverviewPanel's IndicatorsCard. Returns `{ indicators: null }`
+   * when there aren't enough candles; the frontend renders 'unavailable'.
+   */
+  @Get('indicators')
+  async getIndicators(
+    @Query('token') token: string,
+    @Query('exchange') exchange: string,
+    @Query('timeframe') timeframe: string,
+  ) {
+    if (!token || !exchange || !timeframe) {
+      throw new BadRequestException('token, exchange, timeframe are required');
+    }
+    try {
+      const indicators = await this.signalGeneratorService.computeIndicatorsFor(
+        token,
+        exchange,
+        timeframe,
+      );
+      return { indicators };
+    } catch (err) {
+      this.logger.error(
+        `computeIndicatorsFor failed for ${token}/${timeframe}: ${err instanceof Error ? err.stack ?? err.message : err}`,
+      );
+      throw err;
+    }
+  }
+
+  /**
    * GET /api/signals/strategies/:name/performance — strategy performance stats.
    */
   @Get('strategies/:name/performance')
