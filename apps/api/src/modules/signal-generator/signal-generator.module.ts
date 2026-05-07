@@ -27,6 +27,17 @@ import { LevelBookCron } from './services/level-book.cron';
 import { SetupTrackerService } from './services/setup-tracker.service';
 import { ZoneRepository } from './repositories/zone.repository';
 import { StrongZoneDetectorService } from './services/strong-zone-detector.service';
+import { ContextScoringService } from './services/context-scoring/context-scoring.service';
+import { MtfTrendFactor } from './services/context-scoring/factors/mtf-trend.factor';
+import { GreeksFactor } from './services/context-scoring/factors/greeks.factor';
+import { VolatilityFactor } from './services/context-scoring/factors/volatility.factor';
+import { SectorFactor } from './services/context-scoring/factors/sector.factor';
+import { OiShiftFactor } from './services/context-scoring/factors/oi-shift.factor';
+import { FiiFactor } from './services/context-scoring/factors/fii.factor';
+import { NasdaqFactor } from './services/context-scoring/factors/nasdaq.factor';
+import { CrudeOilFactor } from './services/context-scoring/factors/crude-oil.factor';
+import { GoldFactor } from './services/context-scoring/factors/gold.factor';
+import type { ContextFactor } from './services/context-scoring/types';
 
 // @Global so LevelBookService is injectable from MarketFeedService
 // (in MarketDataModule) without MarketDataModule needing to import this
@@ -91,6 +102,42 @@ import { StrongZoneDetectorService } from './services/strong-zone-detector.servi
     // Strong/swap zone detector — pure compute, fed by /signals/zones
     // on cache miss so the chart overlay never sees an empty zone list.
     StrongZoneDetectorService,
+
+    // Context scoring engine — Mama's 10-factor framework v1.
+    // Each factor is registered as a provider so it can be unit-tested
+    // independently. ContextScoringService receives the array via a
+    // factory so we can plug factors in / out without touching the service.
+    MtfTrendFactor,
+    GreeksFactor,
+    VolatilityFactor,
+    SectorFactor,
+    OiShiftFactor,
+    FiiFactor,
+    NasdaqFactor,
+    CrudeOilFactor,
+    GoldFactor,
+    {
+      provide: ContextScoringService,
+      useFactory: (
+        mtf: MtfTrendFactor,
+        greeks: GreeksFactor,
+        vol: VolatilityFactor,
+        sector: SectorFactor,
+        oi: OiShiftFactor,
+        fii: FiiFactor,
+        nasdaq: NasdaqFactor,
+        crude: CrudeOilFactor,
+        gold: GoldFactor,
+      ) =>
+        new ContextScoringService([
+          mtf, greeks, vol, sector, oi, fii, nasdaq, crude, gold,
+        ] satisfies ContextFactor[]),
+      inject: [
+        MtfTrendFactor, GreeksFactor, VolatilityFactor,
+        SectorFactor, OiShiftFactor, FiiFactor, NasdaqFactor,
+        CrudeOilFactor, GoldFactor,
+      ],
+    },
   ],
   exports: [
     SignalGeneratorService,
@@ -102,6 +149,7 @@ import { StrongZoneDetectorService } from './services/strong-zone-detector.servi
     SignalRepository,
     LevelBookService,
     SetupTrackerService,
+    ContextScoringService,
   ],
 })
 export class SignalGeneratorModule {}
