@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import api from '@/services/api';
-import type { AnalysisDto } from '@/components/charts/AnalysisPanel';
+import type { AnalysisDto } from '@/components/stock-overview/SetupContextCard';
 
 interface UseChartAnalysisResult {
   analysis: AnalysisDto | null;

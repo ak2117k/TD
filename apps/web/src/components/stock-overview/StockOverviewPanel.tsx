@@ -1,4 +1,4 @@
-import type { AnalysisDto } from '@/components/charts/AnalysisPanel';
+import SetupContextCard, { type AnalysisDto } from './SetupContextCard';
 
 interface Props {
   token: string;
@@ -25,10 +25,10 @@ interface Props {
  *
  * Currently rendering placeholder slots — each lands in a follow-up commit.
  */
-export default function StockOverviewPanel(_props: Props) {
+export default function StockOverviewPanel({ analysis, analysisLoading }: Props) {
   return (
     <div className="flex flex-col gap-4 p-4 max-w-full">
-      <PlaceholderCard label="Card 1: Setup &amp; Context (placeholder)" />
+      <SetupContextCard analysis={analysis} loading={analysisLoading} />
       <PlaceholderCard label="Card 2: Live Quote (placeholder)" />
       <PlaceholderCard label="Card 3: Market Depth (placeholder)" />
       <PlaceholderCard label="Card 4: Indicators (placeholder)" />
