@@ -127,6 +127,15 @@ export interface LockedSetup {
     touchCount: number;
     nearEdge: number;
   } | null;
+  /**
+   * Context-scoring engine output frozen at lock time. Optional so legacy
+   * persisted setups (and tests that don't wire ContextScoringService)
+   * still deserialise cleanly. See `ContextScoringService.score`.
+   */
+  contextScore?: number;
+  contextTier?: 'STRONG_BULL' | 'BULL' | 'NEUTRAL' | 'BEAR' | 'STRONG_BEAR';
+  contextCoverage?: number;
+  contextFactors?: import('../types/setup-context.types').ContextFactorBreakdown[];
 }
 
 export interface LockInput {
@@ -156,6 +165,11 @@ export interface LockInput {
     touchCount: number;
     nearEdge: number;
   } | null;
+  /** Context-scoring fields propagated from analyze() into the locked setup. */
+  contextScore?: number;
+  contextTier?: 'STRONG_BULL' | 'BULL' | 'NEUTRAL' | 'BEAR' | 'STRONG_BEAR';
+  contextCoverage?: number;
+  contextFactors?: import('../types/setup-context.types').ContextFactorBreakdown[];
 }
 
 const EOD_AGE_MS = 8 * 60 * 60 * 1000;
@@ -334,6 +348,10 @@ export class SetupTrackerService {
       ticksSinceLastPersist: 0,
       tp1Source: input.tp1Source,
       tp1Obstacle: input.tp1Obstacle ?? null,
+      contextScore: input.contextScore,
+      contextTier: input.contextTier,
+      contextCoverage: input.contextCoverage,
+      contextFactors: input.contextFactors,
     };
     this.active.set(input.token, setup);
     this.logger.log(

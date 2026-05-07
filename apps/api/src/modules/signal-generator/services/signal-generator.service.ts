@@ -23,6 +23,8 @@ import {
 } from './setup-tracker.service';
 import { OptionStrikeSelectorService } from '../../options-chain/services/option-strike-selector.service';
 import { OptionsChainService } from '../../options-chain/services/options-chain.service';
+import { ContextScoringService } from './context-scoring/context-scoring.service';
+import type { ContextFactorBreakdown } from '../types/setup-context.types';
 import { LevelsContextStrategy, classifyRegime } from '../strategies/levels-context.strategy';
 import { ema } from '../strategies/indicators';
 import { SetupContext } from '../types/setup-context.types';
@@ -199,6 +201,15 @@ export type AnalyzeResult =
         touchCount: number;
         nearEdge: number;
       } | null;
+      /**
+       * Context-scoring engine (Mama's 10-factor framework). Optional so
+       * pre-scoring code paths and persisted-only setups still serialise
+       * cleanly. See `ContextScoringService.score`.
+       */
+      contextScore?: number;
+      contextTier?: 'STRONG_BULL' | 'BULL' | 'NEUTRAL' | 'BEAR' | 'STRONG_BEAR';
+      contextCoverage?: number;
+      contextFactors?: ContextFactorBreakdown[];
     }
   | {
       kind: 'no-setup';
@@ -242,6 +253,8 @@ export class SignalGeneratorService {
     private readonly optionStrikeSelector: OptionStrikeSelectorService | null = null,
     @Optional()
     private readonly optionsChainService: OptionsChainService | null = null,
+    @Optional()
+    private readonly contextScoring: ContextScoringService | null = null,
   ) {}
 
   async analyze(
@@ -415,6 +428,61 @@ export class SignalGeneratorService {
       ctx.stoploss,
     );
 
+    // Attach the locked strike to the SetupContext so the GreeksFactor
+    // (and any future strike-aware factor) can read delta/gamma without
+    // an extra injection. Stored as a structurally-loose ref to avoid a
+    // circular import between context-scoring and setup-tracker.
+    ctx.recommendedStrike = recommendedStrike;
+
+    // ─── Context scoring — Mama's 10-factor framework ─────────────
+    // Runs after the strategy fires but BEFORE counter-setup flagging /
+    // lock so the score can soft-gate the grade in-place and the
+    // optional hard-gate can early-exit cleanly.
+    if (this.contextScoring) {
+      try {
+        const scored = await this.contextScoring.score({
+          side: output.side,
+          token,
+          symbol: output.symbol,
+          exchange: output.exchange,
+          setupContext: ctx,
+        });
+        ctx.contextScore = scored.contextScore;
+        ctx.contextTier = scored.contextTier;
+        ctx.contextCoverage = scored.contextCoverage;
+        ctx.contextFactors = scored.contextFactors;
+
+        // Soft-gate: bump grade based on score thresholds. Score is
+        // alignment-with-side so a high positive supports the trade
+        // regardless of direction.
+        if (scored.contextScore >= 60) {
+          ctx.grade = bumpGradeUp(ctx.grade);
+        } else if (scored.contextScore <= -30) {
+          ctx.grade = bumpGradeDown(ctx.grade);
+        }
+
+        // Hard-gate (opt-in via env). When CONTEXT_SCORE_REJECT_BELOW is
+        // set to a number, signals at-or-below that score are rejected
+        // outright. Off by default.
+        const rejectThresholdRaw = process.env.CONTEXT_SCORE_REJECT_BELOW;
+        const rejectBelow = rejectThresholdRaw ? Number(rejectThresholdRaw) : NaN;
+        if (Number.isFinite(rejectBelow) && scored.contextScore <= rejectBelow) {
+          return {
+            kind: 'no-setup',
+            reason: `reject:context-score (score=${scored.contextScore} <= ${rejectBelow})`,
+            levels: snapshotFromBook(book),
+            higherTimeframeTrend,
+            regime,
+            intradayRangeRatio,
+          };
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Context scoring failed for ${output.symbol} — continuing without score: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
     // Counter-setup invalidation: if there's already an open setup for
     // this token in the OPPOSITE direction, the new fire counts as a
     // confirmation that the prior thesis is wrong. Flag the old one
@@ -458,6 +526,10 @@ export class SignalGeneratorService {
       recommendedStrike,
       tp1Source: ctx.tp1Source,
       tp1Obstacle: ctx.tp1Obstacle ?? null,
+      contextScore: ctx.contextScore,
+      contextTier: ctx.contextTier,
+      contextCoverage: ctx.contextCoverage,
+      contextFactors: ctx.contextFactors,
     });
     // lock() returns null when there's already an active setup — fall back
     // to whatever's active (defensive; the short-circuit above usually
@@ -518,6 +590,10 @@ export class SignalGeneratorService {
       invalidationReason: setup.invalidationReason ?? null,
       tp1Source: setup.tp1Source,
       tp1Obstacle: setup.tp1Obstacle ?? null,
+      contextScore: setup.contextScore,
+      contextTier: setup.contextTier,
+      contextCoverage: setup.contextCoverage,
+      contextFactors: setup.contextFactors,
     };
   }
 
@@ -1092,4 +1168,18 @@ export class SignalGeneratorService {
 
     return this.signalRepository.createSignal(input);
   }
+}
+
+/** Promote one grade tier (C → B → A, A stays A). Used by the context-score soft-gate. */
+function bumpGradeUp(grade: 'A' | 'B' | 'C'): 'A' | 'B' | 'C' {
+  if (grade === 'C') return 'B';
+  if (grade === 'B') return 'A';
+  return 'A';
+}
+
+/** Demote one grade tier (A → B → C, C stays C). Used by the context-score soft-gate. */
+function bumpGradeDown(grade: 'A' | 'B' | 'C'): 'A' | 'B' | 'C' {
+  if (grade === 'A') return 'B';
+  if (grade === 'B') return 'C';
+  return 'C';
 }

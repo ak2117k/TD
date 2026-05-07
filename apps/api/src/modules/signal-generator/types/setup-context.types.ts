@@ -181,16 +181,16 @@ export interface SetupContext {
   /**
    * Optional reference to the locked option-strike recommendation, attached
    * to the SetupContext just before scoring runs so factors like
-   * `GreeksFactor` can read delta / gamma without an extra injection. Kept
-   * loose-typed (`unknown`) here to avoid pulling the strike type from
-   * `setup-tracker.service` and creating a circular import; the GreeksFactor
-   * narrows it via a structural check.
+   * `GreeksFactor` can read delta / gamma without an extra injection.
+   * Structurally-typed (just the fields scoring cares about) so the strike
+   * type from `setup-tracker.service` can be assigned in without a
+   * circular import — extra fields on the actual RecommendedStrike are
+   * accepted via TypeScript's excess-property tolerance for assignment.
    */
   recommendedStrike?: {
     strike: number;
     side: 'CE' | 'PE';
     delta: number;
     gamma: number;
-    [key: string]: unknown;
   } | null;
 }
