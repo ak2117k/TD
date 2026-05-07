@@ -9,6 +9,7 @@ import {
   HttpStatus,
   HttpCode,
   Logger,
+  BadRequestException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiQuery, ApiParam } from '@nestjs/swagger';
 import { MarketFeedService } from '../services/market-feed.service';
@@ -346,6 +347,31 @@ export class MarketDataController {
     }
 
     return { token, quote };
+  }
+
+  /**
+   * GET /api/market-data/instruments/:token/depth
+   * Get 5-level market depth (bids/asks) for an instrument. Backs the
+   * StockOverviewPanel's MarketDepthCard (polled every 2s on the
+   * frontend; adapter caches at 1.5s so we don't hammer SmartAPI).
+   *
+   * Returns `{ depth: null }` (200, not 404) when the broker can't supply
+   * depth — typical for indices and unentitled tokens — so the frontend
+   * can render "Depth unavailable" rather than crash on a 404.
+   */
+  @Get('instruments/:token/depth')
+  @ApiOperation({ summary: 'Get 5-level market depth for an instrument' })
+  @ApiParam({ name: 'token', description: 'Instrument token' })
+  @ApiQuery({ name: 'exchange', required: true })
+  async getDepth(
+    @Param('token') token: string,
+    @Query('exchange') exchange: string,
+  ) {
+    if (!exchange) {
+      throw new BadRequestException('exchange query parameter is required');
+    }
+    const depth = await this.angelOneAdapter.getMarketDepth(token, exchange);
+    return { depth };
   }
 
   /**

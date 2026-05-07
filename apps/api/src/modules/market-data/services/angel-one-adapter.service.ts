@@ -10,6 +10,7 @@ import {
 import { AngelOneAuthService } from './angel-one-auth.service';
 import { AngelOneWebSocketService, WsFeedMode, ExchangeType } from './angel-one-websocket.service';
 import { COMMODITIES, INDICES } from '@td/shared/constants';
+import { MarketDepth, MarketDepthLevel } from '@td/shared/types';
 
 /**
  * Tokens that live on BSE (not NSE). SENSEX and other BSE-listed indices
@@ -79,6 +80,19 @@ export class AngelOneAdapterService implements BrokerAdapter {
    * hours, since MarketFeedService keeps a persistent connection.
    */
   private readonly wsTickCache = new Map<string, TickData>();
+
+  /**
+   * 5-level market depth, cached for 1.5s per `${exchange}:${token}` key.
+   * Frontend MarketDepthCard polls at 2s intervals so this prevents tight
+   * double-calls into Angel One's marketData(FULL) endpoint without ever
+   * being too stale to be useful (depth changes meaningfully on the order
+   * of sub-second, but for a UI ladder 1.5s lag is invisible).
+   */
+  private readonly depthCache = new Map<
+    string,
+    { data: MarketDepth; expiresAt: number }
+  >();
+  private static readonly DEPTH_TTL_MS = 1500;
 
   constructor(
     public readonly authService: AngelOneAuthService,
@@ -354,6 +368,125 @@ export class AngelOneAdapterService implements BrokerAdapter {
       const msg = error instanceof Error ? error.message : String(error);
       this.logger.error(`Failed to get live quote for ${token}: ${msg}`);
       throw new Error(`Get live quote failed: ${msg}`);
+    }
+  }
+
+  /**
+   * Fetch 5-level market depth (bids + asks) for a single token.
+   *
+   * Wraps Angel One `marketData({ mode: 'FULL', ... })`, which returns a
+   * `depth: { buy: [...5], sell: [...5] }` block on the entry inside
+   * `data.fetched[]`. Cached for 1.5s per exchange:token to absorb the
+   * frontend's 2s polling cadence without hammering SmartAPI.
+   *
+   * Returns `null` (not throws) when:
+   *   - the token isn't entitled (403) — typical for indices that have
+   *     no order book anyway
+   *   - the response shape is unexpected
+   *   - any network / SDK error
+   * The frontend renders "Depth unavailable" on null, so failure modes
+   * degrade gracefully without blocking the rest of the panel.
+   */
+  async getMarketDepth(
+    token: string,
+    exchange: string,
+  ): Promise<MarketDepth | null> {
+    const key = `${exchange}:${token}`;
+    const cached = this.depthCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.data;
+    }
+
+    try {
+      const smartApi = this.authService.getSmartApi();
+      const response = await smartApi.marketData({
+        mode: 'FULL',
+        exchangeTokens: { [exchange]: [token] },
+      });
+
+      const node = response?.data?.fetched?.[0];
+      if (!node) {
+        this.logger.debug(
+          `getMarketDepth: no data fetched for ${exchange}:${token} ` +
+            `(status=${response?.status} message="${response?.message}")`,
+        );
+        return null;
+      }
+
+      // Angel One docs name the keys `buy` / `sell` and each level carries
+      // `price`, `quantity`, `orders`. Some SDK versions camelCase them
+      // (`bestBids` / `bestAsks`) — fall back through both shapes.
+      const rawBuy: any[] =
+        node.depth?.buy ??
+        node.depth?.bestBids ??
+        node.bestBids ??
+        node.buy ??
+        [];
+      const rawSell: any[] =
+        node.depth?.sell ??
+        node.depth?.bestAsks ??
+        node.bestAsks ??
+        node.sell ??
+        [];
+
+      const mapLevel = (l: any): MarketDepthLevel => ({
+        price: Number(l?.price ?? l?.Price ?? 0),
+        qty: Number(l?.quantity ?? l?.qty ?? l?.Quantity ?? 0),
+        orders: Number(l?.orders ?? l?.noOfOrders ?? l?.NoOfOrders ?? 0),
+      });
+
+      const bids = (Array.isArray(rawBuy) ? rawBuy : [])
+        .slice(0, 5)
+        .map(mapLevel)
+        .filter((l) => l.price > 0);
+      const asks = (Array.isArray(rawSell) ? rawSell : [])
+        .slice(0, 5)
+        .map(mapLevel)
+        .filter((l) => l.price > 0);
+
+      if (bids.length === 0 && asks.length === 0) {
+        // Token returned no depth (indices, illiquid scrips). Cache the
+        // empty result briefly anyway so we don't refetch on every poll.
+        const empty: MarketDepth = {
+          token,
+          exchange,
+          bids,
+          asks,
+          totalBidQty: 0,
+          totalAskQty: 0,
+          ts: Date.now(),
+        };
+        this.depthCache.set(key, {
+          data: empty,
+          expiresAt: Date.now() + AngelOneAdapterService.DEPTH_TTL_MS,
+        });
+        return empty;
+      }
+
+      const totalBidQty = bids.reduce((s, l) => s + l.qty, 0);
+      const totalAskQty = asks.reduce((s, l) => s + l.qty, 0);
+
+      const depth: MarketDepth = {
+        token,
+        exchange,
+        bids,
+        asks,
+        totalBidQty,
+        totalAskQty,
+        ts: Date.now(),
+      };
+      this.depthCache.set(key, {
+        data: depth,
+        expiresAt: Date.now() + AngelOneAdapterService.DEPTH_TTL_MS,
+      });
+      return depth;
+    } catch (err) {
+      this.logger.warn(
+        `getMarketDepth failed for ${exchange}:${token}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
     }
   }
 

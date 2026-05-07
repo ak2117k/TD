@@ -102,6 +102,27 @@ export interface OIData {
   timestamp: Date;
 }
 
+// ---- Market Depth ----
+
+export interface MarketDepthLevel {
+  price: number;
+  qty: number;
+  orders: number;
+}
+
+export interface MarketDepth {
+  token: string;
+  exchange: string;
+  /** Up to 5 levels; sorted with best bid first (highest price). */
+  bids: MarketDepthLevel[];
+  /** Up to 5 levels; sorted with best ask first (lowest price). */
+  asks: MarketDepthLevel[];
+  totalBidQty: number;
+  totalAskQty: number;
+  /** Server timestamp (ms epoch) when the snapshot was taken. */
+  ts: number;
+}
+
 export interface OptionsChainEntry {
   strikePrice: number;
   expiryDate: string;
