@@ -10,6 +10,9 @@ import {
   HttpCode,
   Logger,
   BadRequestException,
+  Optional,
+  Inject,
+  forwardRef,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiQuery, ApiParam } from '@nestjs/swagger';
 import { MarketFeedService } from '../services/market-feed.service';
@@ -17,6 +20,7 @@ import { InstrumentService } from '../services/instrument.service';
 import { CandleAggregatorService } from '../services/candle-aggregator.service';
 import { MarketDataRepository } from '../repositories/market-data.repository';
 import { AngelOneAdapterService } from '../services/angel-one-adapter.service';
+import { LevelBookService } from '../../signal-generator/services/level-book.service';
 import {
   SubscribeDto,
   UnsubscribeDto,
@@ -64,6 +68,13 @@ export class MarketDataController {
     private readonly candleAggregator: CandleAggregatorService,
     private readonly repository: MarketDataRepository,
     private readonly angelOneAdapter: AngelOneAdapterService,
+    // Optional + forwardRef because LevelBookService lives in the
+    // signal-generator module (which is @Global) and we don't want a
+    // hard import cycle. Used only to seed quote responses outside
+    // market hours when no live tick is cached.
+    @Optional()
+    @Inject(forwardRef(() => LevelBookService))
+    private readonly levelBookService: LevelBookService | null,
   ) {}
 
   /**
@@ -321,32 +332,91 @@ export class MarketDataController {
   /**
    * GET /api/market-data/instruments/:token/quote
    * Get the latest live quote for an instrument.
+   *
+   * Resolution order:
+   *   1. Live tick cache (MarketFeedService.getQuote)
+   *   2. LevelBookService lazy-build — outside market hours / for tokens
+   *      not subscribed to the feed, this still gives the frontend usable
+   *      OHLC + VWAP from the daily candle history. Critical for the
+   *      LiveQuoteCard's VWAP/Day H/L/Open/PrevClose row, which would
+   *      otherwise render "—" all evening.
+   *   3. null with a message — only when both paths are empty.
    */
   @Get('instruments/:token/quote')
   @ApiOperation({ summary: 'Get latest quote for an instrument' })
   @ApiParam({ name: 'token', description: 'Instrument token' })
-  async getQuote(@Param('token') token: string) {
+  @ApiQuery({ name: 'exchange', required: false })
+  async getQuote(
+    @Param('token') token: string,
+    @Query('exchange') exchange?: string,
+  ) {
     const quote = this.marketFeedService.getQuote(token);
-
-    if (!quote) {
-      // Try to get instrument info even if no live quote is available
-      const instrument = await this.instrumentService.getByToken(token);
-      if (!instrument) {
-        throw new HttpException(
-          `Instrument not found for token: ${token}`,
-          HttpStatus.NOT_FOUND,
-        );
-      }
-
-      return {
-        token,
-        symbol: instrument.symbol,
-        quote: null,
-        message: 'No live quote available. Token may not be subscribed to the feed.',
-      };
+    if (quote) {
+      return { token, quote };
     }
 
-    return { token, quote };
+    // No live tick — try the level book (seeds OHLC + VWAP from daily
+    // candles even when the feed is offline / market is closed).
+    const instrument = await this.instrumentService.getByToken(token);
+    const constantEntry = resolveTokenFromConstants(token);
+    const resolvedExchange =
+      exchange ?? instrument?.exchange ?? constantEntry?.exchange ?? 'NSE';
+    const resolvedSymbol = instrument?.symbol ?? constantEntry?.symbol ?? '';
+
+    if (this.levelBookService) {
+      try {
+        const book = await this.levelBookService.lazyLoad(
+          token,
+          resolvedExchange,
+          resolvedSymbol,
+        );
+        if (book) {
+          // Build a minimal Quote from what the level book has. Fields
+          // the level book doesn't track (volume, change, changePercent)
+          // are zeroed; the frontend tolerates that. ltp falls back to
+          // spot → vwap → prevClose so we always have *some* number.
+          const ltp = book.spot || book.vwap || book.prevClose || 0;
+          const seededQuote = {
+            token,
+            symbol: resolvedSymbol,
+            exchange: resolvedExchange,
+            ltp,
+            open: 0, // not tracked by LevelBook
+            high: book.todayHigh || 0,
+            low: book.todayLow || 0,
+            close: book.prevClose || 0,
+            volume: 0,
+            change: 0,
+            changePercent: 0,
+            timestamp: book.lastTickAt ?? new Date(),
+            vwap: book.vwap || undefined,
+          };
+          return {
+            token,
+            quote: seededQuote,
+            message: 'Seeded from level book — no live tick cached',
+          };
+        }
+      } catch (err) {
+        this.logger.warn(
+          `LevelBook seed for ${token} failed: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
+    if (!instrument) {
+      throw new HttpException(
+        `Instrument not found for token: ${token}`,
+        HttpStatus.NOT_FOUND,
+      );
+    }
+
+    return {
+      token,
+      symbol: instrument.symbol,
+      quote: null,
+      message: 'No live quote available. Token may not be subscribed to the feed.',
+    };
   }
 
   /**
