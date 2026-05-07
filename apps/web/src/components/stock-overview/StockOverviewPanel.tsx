@@ -1,4 +1,5 @@
 import SetupContextCard, { type AnalysisDto } from './SetupContextCard';
+import LiveQuoteCard from './LiveQuoteCard';
 
 interface Props {
   token: string;
@@ -25,11 +26,17 @@ interface Props {
  *
  * Currently rendering placeholder slots — each lands in a follow-up commit.
  */
-export default function StockOverviewPanel({ analysis, analysisLoading }: Props) {
+export default function StockOverviewPanel({
+  token,
+  exchange,
+  symbol,
+  analysis,
+  analysisLoading,
+}: Props) {
   return (
     <div className="flex flex-col gap-4 p-4 max-w-full">
       <SetupContextCard analysis={analysis} loading={analysisLoading} />
-      <PlaceholderCard label="Card 2: Live Quote (placeholder)" />
+      <LiveQuoteCard token={token} exchange={exchange} symbol={symbol} />
       <PlaceholderCard label="Card 3: Market Depth (placeholder)" />
       <PlaceholderCard label="Card 4: Indicators (placeholder)" />
       <PlaceholderCard label="Card 5: Options Chain Preview (placeholder)" />
