@@ -4,6 +4,7 @@ import MarketDepthCard from './MarketDepthCard';
 import IndicatorsCard from './IndicatorsCard';
 import OptionsChainPreviewCard from './OptionsChainPreviewCard';
 import SymbolNewsCard from './SymbolNewsCard';
+import FundamentalsStubCard from './FundamentalsStubCard';
 
 interface Props {
   token: string;
@@ -46,15 +47,7 @@ export default function StockOverviewPanel({
       <IndicatorsCard token={token} exchange={exchange} timeframe={timeframe} />
       <OptionsChainPreviewCard symbol={symbol} token={token} />
       <SymbolNewsCard symbol={symbol} />
-      <PlaceholderCard label="Card 7: Fundamentals (placeholder)" />
-    </div>
-  );
-}
-
-function PlaceholderCard({ label }: { label: string }) {
-  return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4 text-sm text-zinc-500">
-      {label}
+      <FundamentalsStubCard />
     </div>
   );
 }
