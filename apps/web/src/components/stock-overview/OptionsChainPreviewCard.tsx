@@ -12,7 +12,19 @@ interface Props {
    *  by symbol, but the symbol carried in the WS payload may not match
    *  what the user searched. Keying by token is unambiguous. */
   token?: string;
+  /** NSE / BSE / NFO / MCX / CDS. Used to gate the card off for segments
+   *  whose options chains aren't served by /api/options/chain. */
+  exchange?: string;
 }
+
+/**
+ * Exchange codes whose options chains aren't supported by the equity
+ * /options/chain endpoint. Commodity options (MCX) and currency
+ * derivatives (CDS) live in different segments with different chain
+ * shapes — querying them returns either an unrelated chain or junk data.
+ * Equity F&O on NFO and indices on NSE work normally.
+ */
+const NON_EQUITY_FNO_EXCHANGES = new Set(['MCX', 'CDS']);
 
 interface ChainResponse {
   chain: OptionsChainEntry[];
@@ -34,7 +46,12 @@ interface ChainResponse {
  * for the dedicated Options page; this card needs to follow whatever
  * symbol the chart is showing without fighting the store.
  */
-export default function OptionsChainPreviewCard({ symbol, token }: Props) {
+export default function OptionsChainPreviewCard({ symbol, token, exchange }: Props) {
+  // Segment-level gate computed up front, but the early return is placed
+  // AFTER all hooks below to satisfy the Rules of Hooks (the hook count
+  // must be stable across renders).
+  const unsupportedSegment = !!exchange && NON_EQUITY_FNO_EXCHANGES.has(exchange.toUpperCase());
+
   // Symbol-keyed lookup with a token-based fallback — see LiveQuoteCard
   // for the full rationale. Without this we render a NIFTY-priced ATM
   // strike for a stock when the demo seed has NIFTY in the store.
@@ -94,6 +111,10 @@ export default function OptionsChainPreviewCard({ symbol, token }: Props) {
     const end = Math.min(sorted.length, bestIdx + 4);
     return sorted.slice(start, end);
   }, [data, ltp]);
+
+  // Now that all hooks have run, gate the render. Commodities/currencies
+  // hide unconditionally — their chains aren't equity-shaped.
+  if (unsupportedSegment) return null;
 
   if (loading && !data) {
     return (

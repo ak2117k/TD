@@ -48,7 +48,7 @@ export default function StockOverviewPanel({
       <LiveQuoteCard token={token} exchange={exchange} symbol={symbol} />
       <MarketDepthCard token={token} exchange={exchange} />
       <IndicatorsCard token={token} exchange={exchange} timeframe={timeframe} />
-      <OptionsChainPreviewCard symbol={symbol} token={token} />
+      <OptionsChainPreviewCard symbol={symbol} token={token} exchange={exchange} />
       <SymbolNewsCard symbol={symbol} />
       <FundamentalsCard symbol={symbol} exchange={exchange} />
     </div>
