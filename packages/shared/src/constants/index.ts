@@ -63,7 +63,7 @@ export const MAJOR_STOCKS = {
 export const COMMODITIES: Record<string, { symbol: string; token: string; exchange: string; sector: string }> = {
   GOLD: { symbol: 'GOLD', token: '477904', exchange: 'MCX', sector: 'Gold' },         // GOLDM03APR26FUT
   SILVER: { symbol: 'SILVER', token: '457532', exchange: 'MCX', sector: 'Silver' },    // SILVER05MAY26FUT
-  CRUDEOIL: { symbol: 'CRUDEOIL', token: '486502', exchange: 'MCX', sector: 'Crude Oil' },    // CRUDEOIL20APR26FUT
+  CRUDEOIL: { symbol: 'CRUDEOIL', token: '488290', exchange: 'MCX', sector: 'Crude Oil' },    // CRUDEOIL19MAY26FUT — rolled 2026-05-07 (April expired)
   NATURALGAS: { symbol: 'NATURALGAS', token: '538685', exchange: 'MCX', sector: 'Natural Gas' }, // NATURALGAS28JUL26FUT
   COPPER: { symbol: 'COPPER', token: '488791', exchange: 'MCX', sector: 'Copper' },     // COPPER30APR26FUT
 };
