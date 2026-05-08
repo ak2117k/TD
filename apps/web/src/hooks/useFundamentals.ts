@@ -71,7 +71,13 @@ export function useFundamentals(symbol: string, exchange: string): UseFundamenta
   const refetch = useCallback(() => setRetryTick((n) => n + 1), []);
 
   useEffect(() => {
-    if (!symbol || !exchange) {
+    // Skip the fetch entirely for segments where the backend has no
+    // fundamentals concept (MCX commodities, NFO derivatives, CDS).
+    // The card hides for these too — but if the hook fires anyway, we
+    // generate noisy 400/404s in the network tab. Guarding here keeps
+    // the request count clean and matches what the card renders.
+    const equityExchange = exchange === 'NSE' || exchange === 'BSE';
+    if (!symbol || !exchange || !equityExchange) {
       setData(null);
       setLoading(false);
       setError(null);

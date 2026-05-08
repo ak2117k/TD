@@ -67,7 +67,16 @@ export default function OptionsChainPreviewCard({ symbol, token, exchange }: Pro
   const [errored, setErrored] = useState(false);
 
   useEffect(() => {
-    if (!symbol) return;
+    // Skip the fetch when the segment isn't supported (commodities,
+    // currency derivatives) — the card hides anyway, but firing the
+    // request just to hide the result generates noisy 404s in the
+    // network tab. Stay quiet on the wire.
+    if (!symbol || unsupportedSegment) {
+      setData(null);
+      setErrored(false);
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     setErrored(false);
@@ -88,7 +97,7 @@ export default function OptionsChainPreviewCard({ symbol, token, exchange }: Pro
     return () => {
       cancelled = true;
     };
-  }, [symbol]);
+  }, [symbol, unsupportedSegment]);
 
   // Prefer the WS quote LTP (real-time), fall back to the spotPrice the
   // backend returned with the chain (some indices have no token in the
