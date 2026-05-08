@@ -1,5 +1,6 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { BullModule } from '@nestjs/bull';
+import { HttpModule } from '@nestjs/axios';
 import { MarketDataController } from './controllers/market-data.controller';
 import { MarketDataGateway } from './gateways/market-data.gateway';
 import { MarketFeedService, BROKER_ADAPTER_TOKEN } from './services/market-feed.service';
@@ -13,6 +14,8 @@ import { AngelOneWebSocketService } from './services/angel-one-websocket.service
 import { AngelOneAdapterService } from './services/angel-one-adapter.service';
 import { YahooFinanceService } from './services/yahoo-finance.service';
 import { MarketContextService } from './services/market-context.service';
+import { CommodityRollService } from './services/commodity-roll.service';
+import { CommodityRollCron } from './services/commodity-roll.cron';
 import { OptionsChainModule } from '../options-chain/options-chain.module';
 // LevelBookService comes from SignalGeneratorModule which is @Global —
 // no import needed here. Importing the module would create a bootstrap
@@ -23,6 +26,9 @@ import { OptionsChainModule } from '../options-chain/options-chain.module';
     BullModule.registerQueue({
       name: 'oi-tracker',
     }),
+    // ScripMaster fetch (~30MB JSON) for the commodity-roll service.
+    // 60s timeout — Angel's CDN sometimes takes 20-30s for the full file.
+    HttpModule.register({ timeout: 60_000, maxContentLength: 100 * 1024 * 1024 }),
     // forwardRef avoids the circular import: OptionsChainModule imports
     // MarketDataModule (for MarketFeedService) and we now need
     // OptionsChainService here for MarketContextService.
@@ -55,6 +61,12 @@ import { OptionsChainModule } from '../options-chain/options-chain.module';
     // (downtime, restarts, holidays). Together with the one-shot backfill
     // script, keeps the candle table complete without manual intervention.
     DailyBackfillWorker,
+
+    // Daily 08:30 IST cron — detects MCX commodity FUTCOM contract
+    // expiry and rolls the instrument row's token to the new front-month
+    // automatically. Replaces the manual roll-mcx-front-month.mjs script.
+    CommodityRollService,
+    CommodityRollCron,
 
     // Wire the Angel One adapter as the broker adapter
     {

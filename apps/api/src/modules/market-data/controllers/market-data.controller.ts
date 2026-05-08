@@ -20,6 +20,7 @@ import { InstrumentService } from '../services/instrument.service';
 import { CandleAggregatorService } from '../services/candle-aggregator.service';
 import { MarketDataRepository } from '../repositories/market-data.repository';
 import { AngelOneAdapterService } from '../services/angel-one-adapter.service';
+import { CommodityRollService } from '../services/commodity-roll.service';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
 import {
   SubscribeDto,
@@ -68,6 +69,7 @@ export class MarketDataController {
     private readonly candleAggregator: CandleAggregatorService,
     private readonly repository: MarketDataRepository,
     private readonly angelOneAdapter: AngelOneAdapterService,
+    private readonly commodityRollService: CommodityRollService,
     // Optional + forwardRef because LevelBookService lives in the
     // signal-generator module (which is @Global) and we don't want a
     // hard import cycle. Used only to seed quote responses outside
@@ -774,5 +776,39 @@ export class MarketDataController {
         stack: err instanceof Error ? err.stack?.split('\n').slice(0, 5).join('\n') : null,
       };
     }
+  }
+
+  /**
+   * POST /api/market-data/commodity-roll/trigger
+   *
+   * Manual trigger for the same commodity-roll logic that runs daily at
+   * 08:30 IST via CommodityRollCron. Returns the per-symbol result so ops
+   * can audit which contracts rolled, what the new tokens are, and whether
+   * post-roll backfill / level-book invalidation / WS swap succeeded.
+   *
+   * Body (all optional):
+   *   { dryRun?: boolean, symbols?: string[] }
+   *
+   *   dryRun:  detect changes but don't persist. Useful before a real roll.
+   *   symbols: restrict to a subset (e.g. ["CRUDEOIL"]). Default: all
+   *            commodities in the COMMODITIES constant.
+   */
+  @Post('commodity-roll/trigger')
+  @HttpCode(HttpStatus.OK)
+  async triggerCommodityRoll(
+    @Body() body: { dryRun?: boolean; symbols?: string[] } = {},
+  ) {
+    const results = await this.commodityRollService.runRoll({
+      dryRun: body.dryRun,
+      symbols: body.symbols,
+    });
+    return {
+      ok: true,
+      dryRun: !!body.dryRun,
+      rolled: results.filter((r) => r.status === 'ROLLED').length,
+      noop: results.filter((r) => r.status === 'NOOP').length,
+      errored: results.filter((r) => r.status === 'ERROR').length,
+      results,
+    };
   }
 }
