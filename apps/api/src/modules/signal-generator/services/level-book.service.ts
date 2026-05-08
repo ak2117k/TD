@@ -242,6 +242,70 @@ export class LevelBookService {
     return had;
   }
 
+  /**
+   * Force-refresh daily statics (PDH/PDL/prevClose/atr14) from the broker
+   * directly, ignoring whatever's in the DB. Live intraday accumulators
+   * (VWAP, today's H/L, OR, cumPV/cumV, lastTickAt) are preserved across
+   * the re-seed thanks to seedSession's intraday-preservation logic.
+   *
+   * Used by `analyze()` to make the chart's Setup card self-healing —
+   * every analysis request gets fresh PDH/PDL/atr14 from Angel, which
+   * eliminates the staleness vector that the level-book cache + DB path
+   * could otherwise introduce (cron didn't fire, contract rolled, etc.).
+   *
+   * Returns the refreshed public book, or null if the broker fetch
+   * failed / didn't return enough daily candles for ATR. On null, the
+   * caller should fall back to the existing `lazyLoad` path which
+   * tolerates partial data.
+   */
+  async refreshFromBroker(
+    token: string,
+    exchange: string,
+    symbol: string,
+  ): Promise<LevelBook | null> {
+    if (!this.brokerAdapter?.getHistoricalData) return null;
+
+    const now = new Date();
+    const sessionOpen = getTodayMidnightIstAsUtc(now);
+    const dailyFrom = new Date(sessionOpen.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    try {
+      const brokerDaily = await this.brokerAdapter.getHistoricalData(
+        token,
+        exchange,
+        '1d',
+        dailyFrom,
+        sessionOpen,
+      );
+      const dailyCandles = brokerDaily
+        .filter((c: { timestamp: Date | string }) => new Date(c.timestamp).getTime() < sessionOpen.getTime())
+        .slice(-21) // keep last 21 closed daily bars; computeAtr only needs 14
+        .map((c: { timestamp: Date | string; open: number; high: number; low: number; close: number; volume: number }) => ({
+          timestamp: new Date(c.timestamp),
+          open: Number(c.open),
+          high: Number(c.high),
+          low: Number(c.low),
+          close: Number(c.close),
+          volume: Number(c.volume) || 0,
+        }));
+
+      if (dailyCandles.length < 14) {
+        this.logger.debug(
+          `refreshFromBroker: ${symbol} returned only ${dailyCandles.length} daily candles, need ≥14`,
+        );
+        return null;
+      }
+
+      this.seedSession({ token, symbol, exchange, recentDailyCandles: dailyCandles });
+      return this.getLevels(token);
+    } catch (err) {
+      this.logger.warn(
+        `refreshFromBroker(${symbol}): broker daily fetch failed — ${err instanceof Error ? err.message : err}`,
+      );
+      return null;
+    }
+  }
+
   async lazyLoad(
     token: string,
     exchange: string,

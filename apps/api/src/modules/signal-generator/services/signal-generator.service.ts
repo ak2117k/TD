@@ -267,6 +267,18 @@ export class SignalGeneratorService {
     // this token, return its FROZEN entry/SL/target rather than re-running
     // the strategy. This is the whole point of locking — every poll on the
     // same setup must return the same numbers, not drift with spot.
+    // Step 2 of the broker-direct pivot: every analyze() pulls the
+    // daily statics (PDH/PDL/prevClose/atr14) fresh from Angel before
+    // reading the level book. Live intraday accumulators (VWAP, today's
+    // H/L, OR) are preserved by seedSession across the refresh, so the
+    // WS-fed live fields stay coherent.
+    //
+    // We DON'T fail if the broker refresh returns null — fall through to
+    // the existing lazyLoad path which has its own DB + broker fallback
+    // logic and tolerates partial data (e.g. fresh symbols with < 14
+    // daily candles).
+    await this.levelBookService.refreshFromBroker(token, exchange, symbol);
+
     const existing = this.setupTracker.getActive(token);
     if (
       existing &&
