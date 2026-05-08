@@ -718,24 +718,33 @@ export class MarketDataController {
         if (!instrument) {
           return { ok: false, error: `no instrument record for token ${token}` };
         }
-        // Upsert each row so we can overwrite stale (revised) candles, not
-        // just add missing ones. saveCandles' skipDuplicates would only
-        // insert; we want both insert + update on conflict.
-        const upsertResults = await Promise.all(
-          rows.map((c: any) =>
-            this.repository.upsertCandle({
-              instrumentId: instrument.id,
-              timeframe,
-              timestamp: new Date(c.timestamp),
-              open: Number(c.open),
-              high: Number(c.high),
-              low: Number(c.low),
-              close: Number(c.close),
-              volume: Number(c.volume) || 0,
-            }),
-          ),
-        );
-        persisted = upsertResults.length;
+        // Upsert in chunks of 50 sequentially. The previous Promise.all over
+        // every row opened N concurrent Prisma connections — for a 10k-row
+        // 1m backfill that exhausts the pool ("Timed out fetching a new
+        // connection"). Sequential chunks keep concurrency bounded; chunk
+        // size 50 keeps each batch's wall time small (a few hundred ms)
+        // while still amortizing per-call overhead well below the
+        // single-await-per-row alternative.
+        const CHUNK_SIZE = 50;
+        persisted = 0;
+        for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+          const chunk = rows.slice(i, i + CHUNK_SIZE);
+          const upsertResults = await Promise.all(
+            chunk.map((c: any) =>
+              this.repository.upsertCandle({
+                instrumentId: instrument.id,
+                timeframe,
+                timestamp: new Date(c.timestamp),
+                open: Number(c.open),
+                high: Number(c.high),
+                low: Number(c.low),
+                close: Number(c.close),
+                volume: Number(c.volume) || 0,
+              }),
+            ),
+          );
+          persisted += upsertResults.length;
+        }
       }
 
       // After a successful persist, drop the cached level book so the

@@ -56,6 +56,30 @@ const TIMEFRAME_MAP: Record<string, string> = {
   '1d': 'ONE_DAY',
 };
 
+/**
+ * Per-interval maximum date range Angel One's getCandleData accepts in a
+ * single call. Wider windows return HTTP 200 with an EMPTY data array
+ * (silent truncation — no error) which is a real footgun for backfills.
+ *
+ * Numbers per Angel One SmartAPI Historical API docs (Apr 2026 revision).
+ * Conservative — Angel sometimes lowers these without notice; the
+ * `getHistoricalData` wrapper auto-chunks any wider range so callers
+ * don't have to know these limits.
+ */
+const TIMEFRAME_MAX_RANGE_DAYS: Record<string, number> = {
+  ONE_MINUTE: 25,        // docs say 30 but cliff edges silently truncate; staying below
+  THREE_MINUTE: 50,
+  FIVE_MINUTE: 6,        // docs imply 7 — confirmed empirically that exactly-7d returns 0
+  TEN_MINUTE: 90,
+  FIFTEEN_MINUTE: 180,
+  THIRTY_MINUTE: 180,
+  ONE_HOUR: 365,
+  ONE_DAY: 1800,
+};
+
+/** Pacing between chunked historical calls — Angel One historical limit is 3 req/sec; 350ms keeps us under. */
+const HISTORICAL_CHUNK_PACE_MS = 350;
+
 @Injectable()
 export class AngelOneAdapterService implements BrokerAdapter {
   private readonly logger = new Logger(AngelOneAdapterService.name);
@@ -490,6 +514,21 @@ export class AngelOneAdapterService implements BrokerAdapter {
     }
   }
 
+  /**
+   * Fetch historical candles, auto-chunking the date range to stay within
+   * Angel One's per-interval window limits (see TIMEFRAME_MAX_RANGE_DAYS).
+   *
+   * Angel One's getCandleData silently returns HTTP 200 + empty `data` when
+   * the range exceeds the limit for the requested interval — so callers
+   * who pass a wide range used to think the broker had no data when really
+   * they were over the limit. This wrapper splits the range into safe
+   * chunks, paces each call (350ms — Angel historical is 3 req/sec), and
+   * concatenates results. Caller sees one logical fetch.
+   *
+   * Order of returned candles is chronological (chunks fetched oldest →
+   * newest); deduplicated on timestamp in case Angel returns overlapping
+   * boundary bars between consecutive chunks.
+   */
   async getHistoricalData(
     token: string,
     exchange: string,
@@ -497,10 +536,74 @@ export class AngelOneAdapterService implements BrokerAdapter {
     from: Date,
     to: Date,
   ): Promise<any[]> {
+    const interval = TIMEFRAME_MAP[timeframe] ?? timeframe;
+    const maxDays = TIMEFRAME_MAX_RANGE_DAYS[interval] ?? 30; // conservative default if interval unknown
+    const maxRangeMs = maxDays * 24 * 60 * 60 * 1000;
+    const totalRangeMs = to.getTime() - from.getTime();
+
+    // Single-shot path — range fits within Angel's limit, no chunking needed.
+    if (totalRangeMs <= maxRangeMs) {
+      return this.fetchHistoricalChunk(token, exchange, interval, from, to);
+    }
+
+    // Multi-chunk path — slice into [maxDays]-wide windows.
+    this.logger.log(
+      `Auto-chunking historical fetch: token=${token} interval=${interval} ` +
+      `range=${(totalRangeMs / (24 * 60 * 60 * 1000)).toFixed(1)}d > limit=${maxDays}d`,
+    );
+
+    const merged: any[] = [];
+    const seenTs = new Set<number>();
+    let cursor = from.getTime();
+    let chunkIndex = 0;
+    while (cursor < to.getTime()) {
+      const chunkEnd = Math.min(cursor + maxRangeMs, to.getTime());
+      const chunk = await this.fetchHistoricalChunk(
+        token,
+        exchange,
+        interval,
+        new Date(cursor),
+        new Date(chunkEnd),
+      );
+      for (const c of chunk) {
+        const ts = c.timestamp.getTime();
+        if (!seenTs.has(ts)) {
+          seenTs.add(ts);
+          merged.push(c);
+        }
+      }
+      chunkIndex++;
+      // Pacer between chunks — only sleep when there's another chunk to fetch.
+      if (chunkEnd < to.getTime()) {
+        await new Promise((resolve) => setTimeout(resolve, HISTORICAL_CHUNK_PACE_MS));
+      }
+      cursor = chunkEnd;
+    }
+
+    this.logger.log(
+      `Auto-chunked fetch complete: ${chunkIndex} chunks → ${merged.length} unique candles`,
+    );
+    // Sort by timestamp ascending so callers can rely on chronological order.
+    merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+    return merged;
+  }
+
+  /**
+   * Single-call historical fetch — direct passthrough to Angel One. Used
+   * by the chunking wrapper above; do not call directly from outside the
+   * adapter unless you've already validated the range is within
+   * TIMEFRAME_MAX_RANGE_DAYS for the interval.
+   */
+  private async fetchHistoricalChunk(
+    token: string,
+    exchange: string,
+    interval: string,
+    from: Date,
+    to: Date,
+  ): Promise<any[]> {
     try {
       const smartApi = this.authService.getSmartApi();
 
-      const interval = TIMEFRAME_MAP[timeframe] ?? timeframe;
       const fromStr = this.formatDateTime(from);
       const toStr = this.formatDateTime(to);
 
