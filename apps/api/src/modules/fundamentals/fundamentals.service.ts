@@ -1,7 +1,21 @@
-import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, Logger, ServiceUnavailableException, NotFoundException } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import type { FundamentalsResponse } from './types';
+
+/**
+ * Strip Angel One series suffixes so the symbol we send to Yahoo is the
+ * bare ticker. NSE/BSE attach short alphabetic series codes after a hyphen
+ * (-EQ, -BE, -BL, -SM, -ST, -AF, -BZ, -IL, -SG, -BT, -SL, -RR, -W1…) to
+ * classify listings. Yahoo doesn't carry the series — it expects the bare
+ * ticker. We strip any trailing `-XXX` (1-3 alpha chars) suffix, which
+ * covers every series code we've encountered without nuking legitimate
+ * symbols (no Indian listing has letters after a hyphen unless it's a
+ * series classification).
+ */
+function normalizeSymbol(raw: string): string {
+  return raw.toUpperCase().trim().replace(/-[A-Z]{1,3}$/, '');
+}
 
 /**
  * Yahoo's quoteSummary fields can come back as either a raw number/string
@@ -141,7 +155,7 @@ export class FundamentalsService {
    *   (controller) maps that to HTTP 503.
    */
   async get(symbol: string, exchange: 'NSE' | 'BSE'): Promise<FundamentalsResponse> {
-    const upper = symbol.toUpperCase().trim();
+    const upper = normalizeSymbol(symbol);
     const key = `${exchange}:${upper}`;
 
     const cached = this.cache.get(key);
@@ -185,10 +199,10 @@ export class FundamentalsService {
         try {
           raw = await this.callQuoteSummary(yahooSymbol);
         } catch (err2) {
-          throw this.toServiceUnavailable(err2, yahooSymbol);
+          throw this.toHttpException(err2, yahooSymbol);
         }
       } else {
-        throw this.toServiceUnavailable(err, yahooSymbol);
+        throw this.toHttpException(err, yahooSymbol);
       }
     }
 
@@ -287,10 +301,33 @@ export class FundamentalsService {
     return status === 401;
   }
 
-  /** Wrap any upstream failure as a 503 ServiceUnavailableException. */
-  private toServiceUnavailable(err: unknown, yahooSymbol: string): ServiceUnavailableException {
+  /** Detect axios's 404 shape — Yahoo has no listing for this ticker. */
+  private isNotFound(err: unknown): boolean {
+    if (!err || typeof err !== 'object') return false;
+    const status = (err as { response?: { status?: number } }).response?.status;
+    return status === 404;
+  }
+
+  /**
+   * Wrap an upstream failure as the right HTTP exception:
+   *   - Yahoo 404 → NotFoundException (the ticker has no Yahoo listing —
+   *     usually an index/F&O/CDS contract that shouldn't have been queried,
+   *     or a fresh listing Yahoo hasn't indexed yet). Retrying won't help.
+   *   - Anything else → ServiceUnavailableException (transient — Retry is
+   *     a sensible UX response).
+   */
+  private toHttpException(
+    err: unknown,
+    yahooSymbol: string,
+  ): NotFoundException | ServiceUnavailableException {
     const message = err instanceof Error ? err.message : String(err);
     this.logger.warn(`Yahoo quoteSummary fetch failed for ${yahooSymbol}: ${message}`);
+    if (this.isNotFound(err)) {
+      return new NotFoundException({
+        error: 'fundamentals_not_listed',
+        message: `Yahoo Finance has no fundamentals for ${yahooSymbol}`,
+      });
+    }
     return new ServiceUnavailableException({
       error: 'fundamentals_unavailable',
       message: `Upstream Yahoo Finance request failed: ${message}`,

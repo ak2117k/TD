@@ -94,12 +94,21 @@ export function useFundamentals(symbol: string, exchange: string): UseFundamenta
       })
       .catch((err) => {
         if (cancelRef.current) return;
-        // Backend returns `{ error: 'fundamentals_unavailable', message }`
-        // on 503; surface that key so the card can branch on it without
-        // string-matching the human message.
+        // Backend returns either:
+        //   503 + { error: 'fundamentals_unavailable' } — Yahoo blip / 5xx (retryable)
+        //   404 + { error: 'fundamentals_not_listed'  } — ticker has no Yahoo
+        //                                                 listing (e.g. F&O,
+        //                                                 indices, fresh IPOs)
+        // Surface the code so the card can pick a quiet "Not available"
+        // vs. an alarming "Server error + Retry" UX.
+        const status = err?.response?.status;
         const code =
           err?.response?.data?.error ??
-          (err?.response?.status === 503 ? 'fundamentals_unavailable' : 'fetch_failed');
+          (status === 404
+            ? 'fundamentals_not_listed'
+            : status === 503
+              ? 'fundamentals_unavailable'
+              : 'fetch_failed');
         setError(code);
         setData(null);
       })

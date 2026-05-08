@@ -84,12 +84,12 @@ export default function LiveQuoteCard({ token, exchange, symbol }: Props) {
           {positive ? '+' : ''}
           {q.change.toFixed(2)} ({q.changePercent.toFixed(2)}%)
         </div>
-        <Stat label="Day H" value={q.high.toFixed(2)} />
-        <Stat label="Day L" value={q.low.toFixed(2)} />
-        <Stat label="Open" value={q.open.toFixed(2)} />
-        <Stat label="Prev Close" value={q.close.toFixed(2)} />
-        <Stat label="VWAP" value={q.vwap !== undefined ? q.vwap.toFixed(2) : '—'} />
-        <Stat label="Volume" value={q.volume.toLocaleString('en-IN')} />
+        <Stat label="Day H" value={fmtPriceOrDash(q.high)} />
+        <Stat label="Day L" value={fmtPriceOrDash(q.low)} />
+        <Stat label="Open" value={fmtPriceOrDash(q.open)} />
+        <Stat label="Prev Close" value={fmtPriceOrDash(q.close)} />
+        <Stat label="VWAP" value={q.vwap ? q.vwap.toFixed(2) : '—'} />
+        <Stat label="Volume" value={q.volume > 0 ? q.volume.toLocaleString('en-IN') : '—'} />
       </div>
 
       {/* Day-range bar — LTP position within day H/L */}
@@ -110,4 +110,14 @@ export default function LiveQuoteCard({ token, exchange, symbol }: Props) {
       )}
     </Card>
   );
+}
+
+/**
+ * Render a price field, but coerce 0 → "—". The level-book-seeded quote
+ * (used after-hours when no live tick is cached) reports 0 for fields the
+ * book doesn't track yet (Day H/L/Open before today's first tick). Showing
+ * "0.00" in that case is misleading — the value is unknown, not zero.
+ */
+function fmtPriceOrDash(value: number): string {
+  return value > 0 ? value.toFixed(2) : '—';
 }

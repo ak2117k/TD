@@ -6,8 +6,25 @@ interface Props {
   exchange: string;
 }
 
-/** Exchange codes that have no fundamentals concept — indices and commodities. */
-const NON_EQUITY_EXCHANGES = new Set(['NSE_INDEX', 'BSE_INDEX', 'MCX']);
+/** Exchange codes that have no fundamentals concept — commodities + derivatives. */
+const NON_EQUITY_EXCHANGES = new Set(['MCX', 'NFO', 'CDS']);
+
+/**
+ * Index symbols that ride the NSE exchange code but aren't equities. Yahoo
+ * doesn't carry fundamentals for these — sending them would 404 the
+ * endpoint and (without this guard) flash a Retry button on the user.
+ */
+const INDEX_SYMBOLS = new Set([
+  'NIFTY',
+  'BANKNIFTY',
+  'FINNIFTY',
+  'MIDCPNIFTY',
+  'NIFTYIT',
+  'NIFTY MIDCAP 50',
+  'NIFTY IT',
+  'SENSEX',
+  'BANKEX',
+]);
 
 /**
  * Card 7 — Fundamentals. Real data from Yahoo Finance via
@@ -24,7 +41,11 @@ const NON_EQUITY_EXCHANGES = new Set(['NSE_INDEX', 'BSE_INDEX', 'MCX']);
 export default function FundamentalsCard({ symbol, exchange }: Props) {
   const { data, loading, error, refetch } = useFundamentals(symbol, exchange);
 
-  if (!symbol || NON_EQUITY_EXCHANGES.has(exchange)) {
+  if (
+    !symbol ||
+    NON_EQUITY_EXCHANGES.has(exchange) ||
+    INDEX_SYMBOLS.has(symbol.toUpperCase())
+  ) {
     return null;
   }
 
@@ -37,10 +58,22 @@ export default function FundamentalsCard({ symbol, exchange }: Props) {
   }
 
   if (error || !data) {
+    // 404 ('fundamentals_not_listed') = Yahoo doesn't carry this ticker.
+    // Render a quiet caption — Retry won't help, no need to alarm the user.
+    if (error === 'fundamentals_not_listed') {
+      return (
+        <Card title="Fundamentals">
+          <p className="text-sm text-zinc-500">
+            Fundamentals not available for this instrument on Yahoo Finance.
+          </p>
+        </Card>
+      );
+    }
+    // 503 / network blip / unknown — show Retry.
     return (
       <Card title="Fundamentals">
         <div className="flex items-center justify-between gap-3">
-          <p className="text-sm text-zinc-500">Fundamentals unavailable</p>
+          <p className="text-sm text-zinc-500">Fundamentals temporarily unavailable</p>
           <button
             type="button"
             onClick={refetch}

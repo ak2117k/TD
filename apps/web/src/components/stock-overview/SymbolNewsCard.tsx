@@ -9,6 +9,15 @@ interface Props {
 }
 
 /**
+ * Strip Angel One series suffixes (`-EQ`, `-AF`, `-BE`, etc.) from the
+ * symbol before sending to the news endpoint — news is keyed on the bare
+ * ticker, otherwise lookups for `DIXON-AF` miss all `DIXON` headlines.
+ */
+function bareSymbol(s: string): string {
+  return s.toUpperCase().trim().replace(/-[A-Z]{1,3}$/, '');
+}
+
+/**
  * Card 6: Last 10 headlines tagged with the current symbol.
  *
  * Fetches /api/news/symbol/:symbol directly (the existing useNews hook is
@@ -17,16 +26,17 @@ interface Props {
  * sorted by publishedAt desc, capped at 20 — we render the first 10.
  */
 export default function SymbolNewsCard({ symbol }: Props) {
+  const cleanSymbol = bareSymbol(symbol);
   const [news, setNews] = useState<NewsItem[] | null>(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (!symbol) return;
+    if (!cleanSymbol) return;
     let cancelled = false;
     setLoading(true);
     setNews(null);
     api
-      .get<NewsItem[]>(`/news/symbol/${symbol}`)
+      .get<NewsItem[]>(`/news/symbol/${cleanSymbol}`)
       .then((r) => {
         if (cancelled) return;
         setNews(Array.isArray(r.data) ? r.data : []);
@@ -41,7 +51,7 @@ export default function SymbolNewsCard({ symbol }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [symbol]);
+  }, [cleanSymbol]);
 
   if (loading && !news) {
     return (
@@ -53,7 +63,7 @@ export default function SymbolNewsCard({ symbol }: Props) {
   if (!news || news.length === 0) {
     return (
       <Card title="News">
-        <p className="text-sm text-zinc-500">No recent news for {symbol}.</p>
+        <p className="text-sm text-zinc-500">No recent news for {cleanSymbol}.</p>
       </Card>
     );
   }
@@ -62,7 +72,7 @@ export default function SymbolNewsCard({ symbol }: Props) {
     <Card
       title="News"
       action={
-        <Link to={`/news?symbol=${symbol}`} className="text-xs text-blue-400 hover:text-blue-300">
+        <Link to={`/news?symbol=${cleanSymbol}`} className="text-xs text-blue-400 hover:text-blue-300">
           View all →
         </Link>
       }
