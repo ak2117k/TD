@@ -16,6 +16,7 @@ import { YahooFinanceService } from './services/yahoo-finance.service';
 import { MarketContextService } from './services/market-context.service';
 import { CommodityRollService } from './services/commodity-roll.service';
 import { CommodityRollCron } from './services/commodity-roll.cron';
+import { GapDetectorService } from './services/gap-detector.service';
 import { OptionsChainModule } from '../options-chain/options-chain.module';
 // LevelBookService comes from SignalGeneratorModule which is @Global —
 // no import needed here. Importing the module would create a bootstrap
@@ -67,6 +68,11 @@ import { OptionsChainModule } from '../options-chain/options-chain.module';
     // automatically. Replaces the manual roll-mcx-front-month.mjs script.
     CommodityRollService,
     CommodityRollCron,
+
+    // Boot-time + on-demand: scans tracked instruments for stale daily
+    // candles (cron didn't fire / API was offline overnight) and
+    // auto-backfills the gap. Safety net for the daily-backfill cron.
+    GapDetectorService,
 
     // Wire the Angel One adapter as the broker adapter
     {

@@ -21,6 +21,7 @@ import { CandleAggregatorService } from '../services/candle-aggregator.service';
 import { MarketDataRepository } from '../repositories/market-data.repository';
 import { AngelOneAdapterService } from '../services/angel-one-adapter.service';
 import { CommodityRollService } from '../services/commodity-roll.service';
+import { GapDetectorService } from '../services/gap-detector.service';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
 import {
   SubscribeDto,
@@ -70,6 +71,7 @@ export class MarketDataController {
     private readonly repository: MarketDataRepository,
     private readonly angelOneAdapter: AngelOneAdapterService,
     private readonly commodityRollService: CommodityRollService,
+    private readonly gapDetector: GapDetectorService,
     // Optional + forwardRef because LevelBookService lives in the
     // signal-generator module (which is @Global) and we don't want a
     // hard import cycle. Used only to seed quote responses outside
@@ -809,6 +811,41 @@ export class MarketDataController {
       noop: results.filter((r) => r.status === 'NOOP').length,
       errored: results.filter((r) => r.status === 'ERROR').length,
       results,
+    };
+  }
+
+  /**
+   * POST /api/market-data/gap-check/trigger
+   *
+   * Manual trigger for the same gap-detection logic that runs at boot
+   * (deferred 10s after onModuleInit). Useful for ops to:
+   *   - Audit what's stale right now without restarting the API
+   *   - Run a dry-run to preview which instruments would be backfilled
+   *   - Force a backfill mid-day after fixing a broker auth issue
+   *
+   * Body (all optional):
+   *   { dryRun?: boolean }
+   *
+   *   dryRun: scan + classify but make no broker calls and write nothing.
+   *           Returns DRY_RUN_GAP for any instrument that would have been
+   *           backfilled in a non-dry run.
+   */
+  @Post('gap-check/trigger')
+  @HttpCode(HttpStatus.OK)
+  async triggerGapCheck(@Body() body: { dryRun?: boolean } = {}) {
+    const results = await this.gapDetector.scanAndBackfill({ dryRun: body.dryRun });
+    return {
+      ok: true,
+      dryRun: !!body.dryRun,
+      checked: results.length,
+      ok_count: results.filter((r) => r.status === 'OK').length,
+      backfilled: results.filter((r) => r.status === 'BACKFILLED').length,
+      gapsFound: results.filter((r) => r.status === 'DRY_RUN_GAP').length,
+      errored: results.filter((r) => r.status === 'ERROR').length,
+      // Skip OK rows in the response body to keep it skim-friendly when
+      // most instruments are healthy. Errored / backfilled / gap rows
+      // are what an operator wants to see.
+      interesting: results.filter((r) => r.status !== 'OK'),
     };
   }
 }
