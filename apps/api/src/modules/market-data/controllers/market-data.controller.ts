@@ -59,6 +59,22 @@ function resolveTokenFromConstants(
   return null;
 }
 
+/**
+ * Per-request coalescing cache for the candles endpoint. Multiple users
+ * (or a single user mashing refresh) hitting the same token+timeframe+
+ * range within CANDLE_CACHE_TTL_MS share one in-flight broker call,
+ * keeping us under Angel One's 3 req/sec historical rate limit.
+ *
+ * Module-scope rather than per-request so concurrent requests across
+ * different connections coalesce too.
+ */
+interface CandleCacheEntry {
+  promise: Promise<unknown>;
+  expiresAt: number;
+}
+const candleCache = new Map<string, CandleCacheEntry>();
+const CANDLE_CACHE_TTL_MS = 30_000;
+
 @ApiTags('Market Data')
 @Controller('api/market-data')
 export class MarketDataController {
@@ -229,108 +245,155 @@ export class MarketDataController {
 
   /**
    * GET /api/market-data/instruments/:token/candles
-   * Get historical candles for an instrument.
+   *
+   * Live-first chart data path. Pulls directly from Angel One every
+   * request — the DB is no longer the primary source for the chart.
+   *
+   * Why: chart staleness has been the #1 source of bugs in this repo
+   * (PDH/PDL pinned to expired contracts, daily-backfill cron didn't
+   * fire, level-book cache held stale values, etc.). Going direct to
+   * the broker eliminates the entire class.
+   *
+   * Tradeoffs:
+   *   - First-paint latency goes from ~50ms (DB) to ~500-1500ms (Angel REST).
+   *     WebSocket tick stream still updates the chart in real time after
+   *     first paint, so subsequent renders feel instant.
+   *   - In-memory request-coalescing cache (30s TTL) protects against
+   *     refresh-mashing and shared chart loads across users — concurrent
+   *     identical requests share one broker call.
+   *   - DB fallback retained for degraded mode: if Angel fails (rate
+   *     limit, transient outage), we serve whatever the DB has with a
+   *     `source: 'db_fallback_stale'` marker so the chart can show
+   *     SOMETHING rather than a blank canvas.
+   *
+   * Note: DB writes from this path are gone. The candle table is still
+   * populated by the WS tick aggregator (live ticks → 1m candles) and
+   * by the daily-backfill cron (post-close), which is what backtests
+   * read from. Chart and backtest now use different read paths.
    */
   @Get('instruments/:token/candles')
-  @ApiOperation({ summary: 'Get historical candles for an instrument' })
+  @ApiOperation({ summary: 'Get historical candles direct from Angel One (live, no DB cache)' })
   @ApiParam({ name: 'token', description: 'Instrument token' })
   async getCandles(
     @Param('token') token: string,
     @Query() query: GetCandlesQueryDto,
   ) {
-    try {
-      const instrument = await this.instrumentService.getByToken(token);
+    const from = new Date(query.from);
+    const to = new Date(query.to);
 
-      const from = new Date(query.from);
-      const to = new Date(query.to);
+    if (isNaN(from.getTime()) || isNaN(to.getTime())) {
+      throw new HttpException(
+        'Invalid date format for from/to parameters',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
 
-      if (isNaN(from.getTime()) || isNaN(to.getTime())) {
-        throw new HttpException(
-          'Invalid date format for from/to parameters',
-          HttpStatus.BAD_REQUEST,
-        );
+    // Resolve exchange + symbol once. We still touch the DB for the
+    // INSTRUMENT METADATA (cheap single-row read, ~5ms) — the heavy
+    // candle table is what we're avoiding.
+    const instrument = await this.instrumentService.getByToken(token);
+    const constantEntry = resolveTokenFromConstants(token);
+    const exchange =
+      query.exchange ?? instrument?.exchange ?? constantEntry?.exchange ?? 'NSE';
+    const symbol = instrument?.symbol ?? constantEntry?.symbol ?? token;
+
+    // Coalesce concurrent identical requests onto a single broker call.
+    // Cache key includes from/to so a chart panning to a different range
+    // gets its own fetch.
+    const cacheKey = `${exchange}:${token}:${query.timeframe}:${from.toISOString()}:${to.toISOString()}`;
+    // Lazy sweep — drop expired entries on every read so the Map doesn't
+    // grow unbounded. Cheap (one Map iteration per request).
+    if (candleCache.size > 256) {
+      const now = Date.now();
+      for (const [k, v] of candleCache) {
+        if (v.expiresAt <= now) candleCache.delete(k);
       }
+    }
+    const cached = candleCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.promise;
+    }
 
-      // When the instrument exists in the DB, attempt the DB candle lookup first.
-      if (instrument) {
-        const dbCandles = await this.repository.getCandles(
-          instrument.id,
+    const fetchPromise = (async () => {
+      try {
+        const liveCandles = await this.angelOneAdapter.getHistoricalData(
+          token,
+          exchange,
           query.timeframe,
           from,
           to,
         );
-
-        if (dbCandles.length > 0) {
-          return {
-            token,
-            symbol: instrument.symbol,
-            timeframe: query.timeframe,
-            candles: dbCandles.map((c) => ({
-              timestamp: c.timestamp,
-              open: c.open,
-              high: c.high,
-              low: c.low,
-              close: c.close,
-              volume: Number(c.volume),
-            })),
-            count: dbCandles.length,
-            source: 'database',
-          };
+        return {
+          token,
+          symbol,
+          timeframe: query.timeframe,
+          candles: liveCandles.map((c) => ({
+            timestamp: c.timestamp,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+            volume: Number(c.volume),
+          })),
+          count: liveCandles.length,
+          source: 'angel_one_live',
+        };
+      } catch (err) {
+        // Angel failed — degraded fallback to whatever the DB has so the
+        // chart isn't blank. The aggregator keeps the DB ~current via WS
+        // ticks + the daily-backfill cron, so this is usually serviceable
+        // (just possibly minutes-to-hours stale on intraday timeframes).
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `Angel candles fetch failed for ${exchange}:${token} ${query.timeframe} ` +
+          `${query.from}→${query.to}: ${message}. Falling back to DB cache.`,
+        );
+        if (instrument) {
+          const dbCandles = await this.repository.getCandles(
+            instrument.id,
+            query.timeframe,
+            from,
+            to,
+          );
+          if (dbCandles.length > 0) {
+            return {
+              token,
+              symbol: instrument.symbol,
+              timeframe: query.timeframe,
+              candles: dbCandles.map((c) => ({
+                timestamp: c.timestamp,
+                open: c.open,
+                high: c.high,
+                low: c.low,
+                close: c.close,
+                volume: Number(c.volume),
+              })),
+              count: dbCandles.length,
+              source: 'db_fallback_stale',
+              fallbackReason: message,
+            };
+          }
         }
+        // No DB fallback either — propagate the broker error.
+        throw new HttpException(
+          `Failed to retrieve candles: ${message}`,
+          HttpStatus.INTERNAL_SERVER_ERROR,
+        );
       }
+    })();
 
-      // Determine which exchange and symbol to use for the Angel One API call.
-      // Priority: query param > instrument record > constants lookup > default (NSE).
-      const constantEntry = resolveTokenFromConstants(token);
+    candleCache.set(cacheKey, {
+      promise: fetchPromise,
+      expiresAt: Date.now() + CANDLE_CACHE_TTL_MS,
+    });
 
-      const exchange =
-        query.exchange ??
-        instrument?.exchange ??
-        constantEntry?.exchange ??
-        'NSE';
+    // On rejection, evict immediately so a retry doesn't return the
+    // failed promise. Successful entries linger for the TTL.
+    fetchPromise.catch(() => {
+      candleCache.delete(cacheKey);
+    });
 
-      const symbol = instrument?.symbol ?? constantEntry?.symbol ?? token;
-
-      // Fetch from Angel One historical API (works for both known and unknown
-      // instruments — e.g., MCX commodity tokens not yet in the local DB).
-      this.logger.log(
-        `Fetching candles from Angel One for token=${token} exchange=${exchange}` +
-          (instrument ? '' : ' (instrument not in local DB)'),
-      );
-
-      const liveCandles = await this.angelOneAdapter.getHistoricalData(
-        token,
-        exchange,
-        query.timeframe,
-        from,
-        to,
-      );
-
-      return {
-        token,
-        symbol,
-        timeframe: query.timeframe,
-        candles: liveCandles.map((c) => ({
-          timestamp: c.timestamp,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-          volume: Number(c.volume),
-        })),
-        count: liveCandles.length,
-        source: 'angel_one',
-      };
-    } catch (error) {
-      if (error instanceof HttpException) throw error;
-      this.logger.error(
-        `Failed to get candles for ${token}: ${error instanceof Error ? error.message : error}`,
-      );
-      throw new HttpException(
-        'Failed to retrieve candles',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
+    return fetchPromise;
   }
 
   /**
