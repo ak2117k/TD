@@ -738,11 +738,22 @@ export class MarketDataController {
         persisted = upsertResults.length;
       }
 
+      // After a successful persist, drop the cached level book so the
+      // next chart/analyze call rebuilds PDH/PDL/atr14 from the freshly-
+      // upserted candles. Without this, the chart keeps serving the
+      // pre-catch-up values for up to LAZY_FRESH_MS (5 min) — the exact
+      // failure mode that prompted adding the invalidate() method.
+      let levelBookInvalidated = false;
+      if (persist && persisted && this.levelBookService) {
+        levelBookInvalidated = this.levelBookService.invalidate(token);
+      }
+
       return {
         ok: true,
         rowCount: rows.length,
         persisted,
         tokenRepointed,
+        levelBookInvalidated,
         first: rows[0] ?? null,
         last: rows.length > 0 ? rows[rows.length - 1] : null,
         sample: rows.slice(0, 3),

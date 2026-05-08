@@ -226,6 +226,22 @@ export class LevelBookService {
     book.topVolStrikes = strikes;
   }
 
+  /**
+   * Drop the in-memory book for a token so the next read rebuilds from the
+   * DB. Call this after a manual catch-up (debug-broker-fetch) that
+   * upserted new daily candles — without it, the chart keeps serving the
+   * pre-catch-up PDH/PDL because the cached book was seeded from stale DB
+   * rows. The live-fed `liveBooks` membership is preserved so the WS path
+   * doesn't lose its tick stream subscription on next tick.
+   */
+  invalidate(token: string): boolean {
+    const had = this.books.delete(token);
+    if (had) {
+      this.logger.debug(`invalidate(${token}): cleared in-memory book — next read will rebuild from DB`);
+    }
+    return had;
+  }
+
   async lazyLoad(
     token: string,
     exchange: string,
