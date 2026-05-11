@@ -79,5 +79,10 @@ export const useDrawingStore = create<DrawingState>((set) => ({
   clearInFlight: () => set({ inFlight: null }),
 }));
 
+// Stable empty array reference. Returning a fresh `[]` each call would
+// trip React's useSyncExternalStore "result of getSnapshot should be cached"
+// warning and re-render the consumer on every store tick.
+const EMPTY_DRAWINGS: Drawing[] = [];
+
 export const selectDrawingsForToken = (token: string) =>
-  (s: DrawingState): Drawing[] => s.drawings[token] ?? [];
+  (s: DrawingState): Drawing[] => s.drawings[token] ?? EMPTY_DRAWINGS;

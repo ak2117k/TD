@@ -427,7 +427,11 @@ export default function DrawingsOverlay({ token, chart, series, realTimeMap }: D
   const captureEvents = activeTool !== null || selectedId !== null || inFlight !== null;
 
   return (
-    <div ref={containerRef} className="absolute inset-0" style={{ pointerEvents: 'none' }}>
+    <div
+      ref={containerRef}
+      className="absolute inset-0"
+      style={{ pointerEvents: 'none', zIndex: 5 }}
+    >
       <canvas
         ref={canvasRef}
         onMouseDown={handleMouseDown}
