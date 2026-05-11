@@ -16,6 +16,11 @@ export interface LevelsSnapshot {
   todayHigh: number;
   todayLow: number;
   atr14: number;
+  // Previous trading day's opening-range high/low. Used as fallback when
+  // today's `orh`/`orl` are still null (e.g. pre-market, OR not yet locked).
+  // The frontend renders these as dimmed `Y-ORH`/`Y-ORL` lines on the chart.
+  prevOrh?: number | null;
+  prevOrl?: number | null;
 }
 
 export interface IndicatorReadings {

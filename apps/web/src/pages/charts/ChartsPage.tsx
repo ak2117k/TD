@@ -165,14 +165,30 @@ export default function ChartsPage() {
   // we're not in signal-mode and the analyze endpoint returned a level
   // book — works for both setup and no-setup states. VWAP is omitted
   // when 0 since the lazy-build path leaves it at 0 outside market hours.
+  //
+  // ORH/ORL fallback: when today's OR hasn't locked yet (null), fall back
+  // to the previous session's OR via `prevOrh`/`prevOrl` and render those
+  // as dimmed `Y-ORH`/`Y-ORL` lines. The `else` (not addition) means the
+  // prior-session lines disappear the moment today's OR locks — no
+  // visual duplication.
   const analysisOverlayLevels = useMemo(() => {
     if (setupContext || !analysis?.levels) return [];
     const lb = analysis.levels;
+    const orhLine = lb.orh !== null
+      ? { type: 'ORH', value: lb.orh, color: LEVEL_COLORS.ORH, label: 'ORH' }
+      : lb.prevOrh != null
+        ? { type: 'Y_ORH', value: lb.prevOrh, color: LEVEL_COLORS.Y_ORH, label: 'Y-ORH' }
+        : null;
+    const orlLine = lb.orl !== null
+      ? { type: 'ORL', value: lb.orl, color: LEVEL_COLORS.ORL, label: 'ORL' }
+      : lb.prevOrl != null
+        ? { type: 'Y_ORL', value: lb.prevOrl, color: LEVEL_COLORS.Y_ORL, label: 'Y-ORL' }
+        : null;
     return [
       { type: 'PDH', value: lb.pdh, color: LEVEL_COLORS.PDH, label: 'PDH' },
       { type: 'PDL', value: lb.pdl, color: LEVEL_COLORS.PDL, label: 'PDL' },
-      ...(lb.orh !== null ? [{ type: 'ORH', value: lb.orh, color: LEVEL_COLORS.ORH, label: 'ORH' }] : []),
-      ...(lb.orl !== null ? [{ type: 'ORL', value: lb.orl, color: LEVEL_COLORS.ORL, label: 'ORL' }] : []),
+      ...(orhLine ? [orhLine] : []),
+      ...(orlLine ? [orlLine] : []),
       ...(lb.vwap > 0 ? [{ type: 'VWAP', value: lb.vwap, color: LEVEL_COLORS.VWAP, label: 'VWAP' }] : []),
     ];
   }, [analysis, setupContext]);

@@ -57,6 +57,10 @@ export default function LevelOverlay({ series, levels }: LevelOverlayProps) {
 export const LEVEL_COLORS: Record<string, string> = {
   PDH: '#ef4444', PDL: '#22c55e',
   ORH: '#a855f7', ORL: '#a855f7',
+  // Previous-session OR fallback — dimmed (50% alpha) purple to visually
+  // signal "this is yesterday's OR, today's hasn't locked yet".
+  // lightweight-charts accepts 8-char hex on price lines.
+  Y_ORH: '#a855f780', Y_ORL: '#a855f780',
   VWAP: '#06b6d4',
   ROUND: '#94a3b8',
   VOL_STRIKE: '#f59e0b',
