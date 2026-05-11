@@ -25,6 +25,7 @@ import { AnandSniperV25CombinedStrategy } from './strategies/anand-sniper-v25-co
 import { LevelBookService } from './services/level-book.service';
 import { LevelBookCron } from './services/level-book.cron';
 import { SetupTrackerService } from './services/setup-tracker.service';
+import { MtfAlignmentService } from './services/mtf-alignment.service';
 import { ZoneRepository } from './repositories/zone.repository';
 import { StrongZoneDetectorService } from './services/strong-zone-detector.service';
 import { ContextScoringService } from './services/context-scoring/context-scoring.service';
@@ -95,6 +96,12 @@ import type { ContextFactor } from './services/context-scoring/types';
     // setup re-evaluated on subsequent polls returns the same numbers.
     SetupTrackerService,
 
+    // Multi-timeframe alignment gate — Chartink MTF rule. Pulls candles
+    // for the 4 reference timeframes (1d/1h/15m/5m) and reports whether
+    // their last-close directions agree. Consumed by the chartink gate
+    // and exposed to other modules through the module exports list.
+    MtfAlignmentService,
+
     // Strong-zone persistence cache. Used by SignalGeneratorService to feed
     // the TP1-at-obstacle algorithm with the active S/R zone set per token.
     ZoneRepository,
@@ -150,6 +157,7 @@ import type { ContextFactor } from './services/context-scoring/types';
     LevelBookService,
     SetupTrackerService,
     ContextScoringService,
+    MtfAlignmentService,
   ],
 })
 export class SignalGeneratorModule {}
