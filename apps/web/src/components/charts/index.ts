@@ -11,3 +11,5 @@ export { default as PnLChart } from './PnLChart';
 export { default as WinRateDonut } from './WinRateDonut';
 export { default as SegmentBreakdown } from './SegmentBreakdown';
 export { default as BacktestEquityCurve } from './BacktestEquityCurve';
+export { default as DrawingToolbar } from './DrawingToolbar';
+export { default as DrawingsOverlay } from './DrawingsOverlay';

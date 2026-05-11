@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import clsx from 'clsx';
-import { CandlestickChart, ChartToolbar, IndicatorPanel, OIOverlay } from '@/components/charts';
+import { CandlestickChart, ChartToolbar, IndicatorPanel, OIOverlay, DrawingToolbar, DrawingsOverlay } from '@/components/charts';
 import type { CandlestickChartHandle } from '@/components/charts';
 import LevelOverlay, { LEVEL_COLORS } from '@/components/charts/LevelOverlay';
 import SetupMarker from '@/components/charts/SetupMarker';
@@ -9,6 +9,7 @@ import EntryTargetOverlay from '@/components/charts/EntryTargetOverlay';
 import StockOverviewPanel from '@/components/stock-overview/StockOverviewPanel';
 import { useChartData } from '@/hooks/useChartData';
 import { useChartAnalysis } from '@/hooks/useChartAnalysis';
+import { useDrawingPersistence } from '@/hooks/useDrawingPersistence';
 import { useChartStore, type SelectedSymbol } from '@/stores/chart-store';
 import api from '@/services/api';
 import type { SetupContext } from '@/types';
@@ -20,8 +21,8 @@ const WATCHLIST_ITEMS: SelectedSymbol[] = [
   { symbol: 'SENSEX', token: '99919000', exchange: 'BSE', name: 'SENSEX' },
   { symbol: 'NIFTY MIDCAP 50', token: '99926025', exchange: 'NSE', name: 'NIFTY MIDCAP' },
   { symbol: 'NIFTY IT', token: '99926013', exchange: 'NSE', name: 'NIFTY IT' },
-  { symbol: 'GOLD', token: '477904', exchange: 'MCX', name: 'GOLD' },
-  { symbol: 'SILVER', token: '457532', exchange: 'MCX', name: 'SILVER' },
+  { symbol: 'GOLD', token: '459277', exchange: 'MCX', name: 'GOLD' },
+  { symbol: 'SILVER', token: '464150', exchange: 'MCX', name: 'SILVER' },
   { symbol: 'NATURALGAS', token: '538685', exchange: 'MCX', name: 'NATURAL GAS' },
 ];
 
@@ -37,13 +38,14 @@ export default function ChartsPage() {
   const chartRef = useRef<CandlestickChartHandle>(null);
   const [showIndicators, setShowIndicators] = useState(false);
   const [crosshairData, setCrosshairData] = useState<CrosshairData | null>(null);
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const selectedSymbol = useChartStore((s) => s.selectedSymbol);
   const setSymbol = useChartStore((s) => s.setSymbol);
   const indicators = useChartStore((s) => s.indicators);
   const isFullscreen = useChartStore((s) => s.isFullscreen);
   const timeframe = useChartStore((s) => s.timeframe);
+  const setTimeframe = useChartStore((s) => s.setTimeframe);
 
   // Live always-on chart analysis. Polls /signals/analyze every 60s and
   // returns either a setup payload (entry/SL/target/grade) or a no-setup
@@ -58,20 +60,83 @@ export default function ChartsPage() {
     timeframe,
   );
 
-  // Sync chart store with URL query params (e.g. navigating from Market page)
+  // ─── URL ↔ chart-store sync (refresh-safe) ──────────────────────────
+  //
+  // The chart's selected symbol and timeframe live in two places:
+  //   1. zustand store  (in-memory, lost on refresh)
+  //   2. URL query string  (durable across refreshes, shareable)
+  //
+  // We keep them in sync bidirectionally:
+  //   - URL → store: when the user lands with `?symbol=…&token=…&tf=…`
+  //     (refresh, deeplink, click from Market page), hydrate the store.
+  //   - store → URL: when the user picks a different symbol from search
+  //     or a different timeframe from the toolbar, push it into the URL
+  //     with `replace: true` so the browser back button doesn't pile up
+  //     a history entry per click.
+  //
+  // The two effects don't loop because each guards on equality —
+  // re-applying values that already match is a no-op.
+
+  // URL → store
   useEffect(() => {
     const symbol = searchParams.get('symbol');
-    const exchange = searchParams.get('exchange');
     const token = searchParams.get('token');
-    if (symbol) {
+    const exchange = searchParams.get('exchange') ?? 'NSE';
+    const tf = searchParams.get('tf');
+
+    if (
+      symbol &&
+      token &&
+      (symbol !== selectedSymbol.symbol ||
+        token !== selectedSymbol.token ||
+        exchange !== selectedSymbol.exchange)
+    ) {
       setSymbol({
         symbol,
-        token: token ?? '',
-        exchange: exchange ?? 'NSE',
-        name: symbol,
+        token,
+        exchange,
+        name: searchParams.get('name') ?? symbol,
       });
     }
-  }, [searchParams, setSymbol]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (tf && tf !== timeframe) {
+      setTimeframe(tf);
+    }
+    // Reads selectedSymbol/timeframe via closure for the equality guard,
+    // but only re-runs on URL changes — including them as deps would
+    // create a circular trigger with the store→URL effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, setSymbol, setTimeframe]);
+
+  // store → URL
+  useEffect(() => {
+    if (!selectedSymbol.token) return;
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.set('symbol', selectedSymbol.symbol);
+        next.set('token', selectedSymbol.token);
+        next.set('exchange', selectedSymbol.exchange);
+        next.set('tf', timeframe);
+        if (
+          selectedSymbol.name &&
+          selectedSymbol.name !== selectedSymbol.symbol
+        ) {
+          next.set('name', selectedSymbol.name);
+        } else {
+          next.delete('name');
+        }
+        return next;
+      },
+      { replace: true },
+    );
+  }, [
+    selectedSymbol.symbol,
+    selectedSymbol.token,
+    selectedSymbol.exchange,
+    selectedSymbol.name,
+    timeframe,
+    setSearchParams,
+  ]);
 
   // Signal mode: fetch setupContext when ?signal=<id> is in the URL
   const signalId = searchParams.get('signal');
@@ -121,7 +186,11 @@ export default function ChartsPage() {
     priceChange,
     priceChangePercent,
     realTimeMap,
+    loadOlder,
+    isLoadingMore,
   } = useChartData();
+
+  useDrawingPersistence(selectedSymbol.token);
 
   const handleCrosshairMove = useCallback((params: unknown) => {
     const p = params as { seriesData?: Map<unknown, unknown> };
@@ -217,17 +286,31 @@ export default function ChartsPage() {
           </div>
         )}
 
+        {/* Drawing toolbar — left-side vertical, Groww-style */}
+        <DrawingToolbar token={selectedSymbol.token} />
+
         {/* Chart area. h-full is required because the inner CandlestickChart
             uses height: '100%' which can't resolve on a flex item without an
             explicit definite height when the row's outer container is
             min-h-* (not a fixed h-*). Without this, the chart collapsed to
             its 300px minHeight or disappeared entirely. */}
         <div className="flex-1 relative min-w-0 h-full">
-          {isLoading && candles.length === 0 && (
-            <div className="absolute inset-0 flex items-center justify-center bg-[var(--color-bg-primary)] z-10">
+          {/* Full-area loader during any candle fetch. The chart's `key`
+              prop already unmounts the previous symbol's chart on switch,
+              so the loader overlays an empty area — no flash of stale
+              chart shape underneath. Holds until candles fully load. */}
+          {isLoading && (
+            <div className="absolute inset-0 flex items-center justify-center bg-[var(--color-bg-primary)]/95 backdrop-blur-sm z-10">
               <div className="flex flex-col items-center gap-3">
-                <div className="w-8 h-8 border-2 border-[var(--color-accent-blue)] border-t-transparent rounded-full animate-spin" />
-                <span className="text-sm text-[var(--color-text-muted)]">Loading chart data...</span>
+                <div className="w-10 h-10 border-2 border-[var(--color-accent-blue)] border-t-transparent rounded-full animate-spin" />
+                <div className="flex flex-col items-center gap-0.5">
+                  <span className="text-sm font-medium text-[var(--color-text-primary)]">
+                    Loading {selectedSymbol.symbol}
+                  </span>
+                  <span className="text-xs text-[var(--color-text-muted)]">
+                    {selectedSymbol.exchange} · {timeframe}
+                  </span>
+                </div>
               </div>
             </div>
           )}
@@ -249,6 +332,16 @@ export default function ChartsPage() {
             candles={candles}
             onCrosshairMove={handleCrosshairMove}
             showVolume={indicators.volume}
+            realTimeMap={realTimeMap}
+            onReachStart={loadOlder}
+            isLoadingMore={isLoadingMore}
+          />
+
+          {/* User-drawn annotations (hline, hzone, trend, vline, rect, fib, text, arrow) */}
+          <DrawingsOverlay
+            token={selectedSymbol.token}
+            chart={chartRef.current?.chart ?? null}
+            series={chartRef.current?.candleSeries ?? null}
             realTimeMap={realTimeMap}
           />
 
