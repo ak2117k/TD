@@ -13,11 +13,14 @@ function fmtDelta(receivedAt: string, triggeredAt: string): string {
 }
 
 function fmtKindCount(setups: ChartinkAlert['setups']): string {
-  const counts: Record<string, number> = { setup: 0, 'no-setup': 0, unresolved: 0, error: 0 };
+  const counts: Record<string, number> = {
+    setup: 0, 'no-setup': 0, 'mtf-misaligned': 0, unresolved: 0, error: 0,
+  };
   for (const s of setups ?? []) counts[s.kind] = (counts[s.kind] ?? 0) + 1;
   const parts: string[] = [];
   if (counts.setup) parts.push(`${counts.setup} setups`);
   if (counts['no-setup']) parts.push(`${counts['no-setup']} no-setup`);
+  if (counts['mtf-misaligned']) parts.push(`${counts['mtf-misaligned']} mtf-misaligned`);
   if (counts.unresolved) parts.push(`${counts.unresolved} unresolved`);
   if (counts.error) parts.push(`${counts.error} error`);
   return parts.length ? parts.join(' · ') : '—';
