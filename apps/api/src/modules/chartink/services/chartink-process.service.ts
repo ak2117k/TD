@@ -3,13 +3,14 @@ import { ChartinkRepository } from '../repositories/chartink.repository';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { SignalGeneratorService } from '../../signal-generator/services/signal-generator.service';
 import { SetupTrackerService } from '../../signal-generator/services/setup-tracker.service';
+import { MtfAlignmentService } from '../../signal-generator/services/mtf-alignment.service';
 
 interface Hit {
   symbol: string;
   hitPrice: number;
 }
 
-const RATE_LIMIT_MS = 350; // matches Angel One historical-API serial pacer (per memory)
+const RATE_LIMIT_MS = 350;
 
 @Injectable()
 export class ChartinkProcessService {
@@ -20,20 +21,15 @@ export class ChartinkProcessService {
     private readonly mdRepo: MarketDataRepository,
     private readonly signalSvc: SignalGeneratorService,
     private readonly tracker: SetupTrackerService,
+    private readonly mtf: MtfAlignmentService,
   ) {}
 
-  /**
-   * Process every hit in an alert sequentially, with rate-limit pacing
-   * between symbols (broker historical API caps at ~3 req/s).
-   */
   async processAlert(alertId: string, hits: Hit[]): Promise<void> {
     this.logger.log(`Processing Chartink alert ${alertId} — ${hits.length} hits`);
     for (let i = 0; i < hits.length; i++) {
       try {
         await this.processOne(alertId, hits[i]);
       } catch (err) {
-        // Per-symbol failures already get a 'error' AlertSetup row in processOne;
-        // this catch is the absolute belt-and-braces for unexpected throws.
         this.logger.warn(
           `processOne unexpected throw for ${hits[i].symbol}: ${err instanceof Error ? err.message : err}`,
         );
@@ -42,10 +38,6 @@ export class ChartinkProcessService {
     }
   }
 
-  /**
-   * One symbol → one ChartinkAlertSetup row. Branches on whether the
-   * symbol resolves, whether analyze() returns a setup, no-setup, or throws.
-   */
   async processOne(alertId: string, hit: Hit): Promise<void> {
     const instrument = await this.mdRepo.getInstrumentBySymbol(hit.symbol, 'NSE');
     if (!instrument) {
@@ -57,6 +49,23 @@ export class ChartinkProcessService {
         kind: 'unresolved',
         setupId: null,
         rejectReason: 'symbol not in local DB',
+      });
+      return;
+    }
+
+    // MTF gate — 4-TF directional agreement check before any deeper analysis.
+    // On misalignment we persist immediately and skip analyze() to save
+    // additional broker calls per hit.
+    const mtf = await this.mtf.check(instrument.token, 'NSE');
+    if (!mtf.aligned) {
+      await this.repo.createAlertSetup({
+        alertId,
+        symbol: hit.symbol,
+        token: instrument.token,
+        hitPrice: hit.hitPrice,
+        kind: 'mtf-misaligned',
+        setupId: null,
+        rejectReason: `TF: ${mtf.summary}`,
       });
       return;
     }
