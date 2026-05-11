@@ -188,6 +188,34 @@ export class SignalRepository {
     }
   }
 
+  /**
+   * One-time / ongoing cleanup for legacy rows that pre-date the
+   * expiresAt-on-create fix. Any signal older than 24h with a null
+   * expiry is unambiguously stale (no live trader is acting on a day-old
+   * signal), so we flip isActive off. The cron sweep runs this every
+   * 5 min — once the backlog is drained, subsequent calls are no-ops
+   * because new signals all have explicit expiry.
+   */
+  async deactivateLegacyNullExpiry(): Promise<number> {
+    try {
+      const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const result = await this.prisma.signal.updateMany({
+        where: {
+          isActive: true,
+          expiresAt: null,
+          createdAt: { lt: cutoff },
+        },
+        data: { isActive: false },
+      });
+      return result.count;
+    } catch (error) {
+      this.logger.error(
+        `Failed to deactivate legacy null-expiry signals: ${error instanceof Error ? error.message : error}`,
+      );
+      throw error;
+    }
+  }
+
   async getSignalById(id: string) {
     return this.prisma.signal.findUnique({
       where: { id },

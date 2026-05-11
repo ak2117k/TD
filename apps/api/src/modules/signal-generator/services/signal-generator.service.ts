@@ -29,6 +29,7 @@ import { LevelsContextStrategy, classifyRegime, buildIndicatorReadings } from '.
 import { ema } from '../strategies/indicators';
 import { SetupContext, IndicatorReadings } from '../types/setup-context.types';
 import { LevelBook } from '../types/level-book.types';
+import { computeExpiry } from '../utils/compute-expiry';
 import {
   TIMEFRAMES,
   MARKET_OPEN_HOUR,
@@ -41,58 +42,6 @@ import {
   MCX_CLOSE_MINUTE,
 } from '@td/shared/constants';
 import { Exchange } from '@td/shared/types';
-
-/**
- * Floor on signal lifetime — even a signal created near session close
- * should stay actionable long enough for a manual trader to react. We
- * always give the trader at least this much window.
- */
-const MIN_SIGNAL_TTL_MINUTES = 120;
-
-/**
- * Hard cap on signal lifetime. If the session-end calculation would
- * push expiry beyond this, we clamp. Prevents weekend-generated signals
- * from staying "active" through Monday.
- */
-const MAX_SIGNAL_TTL_HOURS = 14;
-
-/**
- * Compute when a signal should expire based on its exchange's session
- * close. NSE/BSE: 15:30 IST. MCX: 23:30 IST. Signals get a 2h floor
- * so end-of-session generation still gives the trader a window. If the
- * session is already closed for today (e.g. scan-now after hours),
- * defaults to MAX_SIGNAL_TTL_HOURS.
- */
-function computeExpiry(exchange: string, now: Date = new Date()): Date {
-  const isMcx = exchange === 'MCX';
-  const closeHour = isMcx ? MCX_CLOSE_HOUR : MARKET_CLOSE_HOUR;
-  const closeMinute = isMcx ? MCX_CLOSE_MINUTE : MARKET_CLOSE_MINUTE;
-
-  // IST is UTC+5:30. Build today's session-close in UTC.
-  const istOffsetMs = 5.5 * 60 * 60 * 1000;
-  const istNow = new Date(now.getTime() + istOffsetMs);
-  const istClose = new Date(
-    Date.UTC(
-      istNow.getUTCFullYear(),
-      istNow.getUTCMonth(),
-      istNow.getUTCDate(),
-      closeHour,
-      closeMinute,
-      0,
-      0,
-    ),
-  );
-  const utcClose = new Date(istClose.getTime() - istOffsetMs);
-
-  const floor = new Date(now.getTime() + MIN_SIGNAL_TTL_MINUTES * 60 * 1000);
-  const cap = new Date(now.getTime() + MAX_SIGNAL_TTL_HOURS * 60 * 60 * 1000);
-
-  // Take the later of (session-close, floor) so end-of-day signals get
-  // their 2h window. Then clamp to the hard cap so off-hours signals
-  // (weekends, late-night) don't live forever.
-  const candidate = utcClose.getTime() > floor.getTime() ? utcClose : floor;
-  return candidate.getTime() > cap.getTime() ? cap : candidate;
-}
 
 /** Minimum number of timeframes that must agree for signal confirmation. */
 const MIN_TIMEFRAME_AGREEMENT = 2;
@@ -955,6 +904,15 @@ export class SignalGeneratorService {
 
       if (count > 0) {
         this.logger.log(`Expired ${count} old signals`);
+      }
+
+      // Legacy backfill: signals created before the expiresAt-on-create
+      // fix have a NULL expiry and would otherwise live forever. Sweep
+      // anything older than 24h with no TTL set. Safe to run every tick —
+      // it's idempotent (updateMany only flips rows still isActive=true).
+      const legacy = await this.signalRepository.deactivateLegacyNullExpiry();
+      if (legacy > 0) {
+        this.logger.log(`Deactivated ${legacy} legacy signals with null expiresAt`);
       }
     } catch (error) {
       this.logger.error(

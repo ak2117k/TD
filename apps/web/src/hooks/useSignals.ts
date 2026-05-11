@@ -27,10 +27,20 @@ export function useSignals() {
   const avgConfidence = useSignalStore(selectAvgConfidence);
 
   const signals = useMemo(() => {
+    // Today-only cutoff — recompute per render so a session that crosses
+    // midnight rolls forward without a manual reload.
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const startOfTodayMs = startOfToday.getTime();
+
     let filtered = rawSignals.filter((s) => {
       if (filters.strategy !== 'all' && s.strategy !== filters.strategy) return false;
       if (filters.segment !== 'all' && s.segment !== (filters.segment as Segment)) return false;
       if (!matchesMinConfidence(s.confidence, filters.minConfidence)) return false;
+      if (filters.todayOnly) {
+        const createdMs = new Date(s.createdAt).getTime();
+        if (createdMs < startOfTodayMs) return false;
+      }
       return true;
     });
 

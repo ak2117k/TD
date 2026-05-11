@@ -10,6 +10,7 @@ import { TradeExecutionService } from '../../trade-engine/services/trade-executi
 import { AnandSniperV25CombinedStrategy } from '../strategies/anand-sniper-v25-combined.strategy';
 import { LevelsContextStrategy } from '../strategies/levels-context.strategy';
 import { LevelBookService } from '../services/level-book.service';
+import { computeExpiry } from '../utils/compute-expiry';
 import {
   CandleData,
   MarketSnapshot,
@@ -259,6 +260,10 @@ export class UniverseScannerWorker implements OnModuleInit {
                 timeframe: lcSignal.timeframe ?? '5m',
                 reason: lcSignal.reason,
                 isActive: true,
+                // Session-aware TTL — without this the 5-min expiry sweep
+                // skips the row (it filters by expiresAt < now) and the
+                // signal lives forever on the /signals page.
+                expiresAt: computeExpiry(w.exchange),
                 // setupContext carries the full SetupContext (level type, setup
                 // type, grade, level-book snapshot, etc.). Prisma accepts Json? —
                 // the Prisma client was regenerated in Task 8 to include this field.

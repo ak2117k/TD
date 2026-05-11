@@ -86,6 +86,17 @@ export default function SignalFilters({
         />
       </div>
 
+      {/* Today-only toggle — defaults on so the page doesn't accumulate
+          weeks of signals if a legacy row slips past the backend sweep. */}
+      <div className="flex items-center gap-1.5">
+        <Toggle
+          checked={filters.todayOnly}
+          onChange={(checked) => onFilterChange({ todayOnly: checked })}
+          label="Today only"
+          size="sm"
+        />
+      </div>
+
       {/* Sort */}
       <div className="ml-auto flex items-center gap-1.5">
         <label className="text-[10px] font-medium uppercase tracking-wide text-gray-500">

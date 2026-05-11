@@ -7,6 +7,13 @@ export interface SignalFilters {
   segment: string;
   minConfidence: string;
   isActive: boolean;
+  /**
+   * When true (default), hide signals whose `createdAt` is before
+   * today's local-midnight. Belt-and-braces guard against the
+   * /signals page surfacing weeks-old rows even if a backend sweep
+   * misses a legacy null-expiry row.
+   */
+  todayOnly: boolean;
   sortBy: 'confidence' | 'time' | 'riskReward';
 }
 
@@ -49,6 +56,7 @@ export const useSignalStore = create<SignalState>((set, get) => ({
     segment: 'all',
     minConfidence: 'all',
     isActive: true,
+    todayOnly: true,
     sortBy: 'confidence',
   },
   isLoading: false,
@@ -132,6 +140,10 @@ export const useSignalStore = create<SignalState>((set, get) => ({
 export function selectFilteredSignals(state: SignalState): TradeSignal[] {
   const { signals, filters } = state;
 
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const startOfTodayMs = startOfToday.getTime();
+
   let filtered = signals.filter((s) => {
     if (filters.strategy !== 'all' && s.strategy !== filters.strategy)
       return false;
@@ -142,6 +154,10 @@ export function selectFilteredSignals(state: SignalState): TradeSignal[] {
       return false;
     if (!matchesMinConfidence(s.confidence, filters.minConfidence))
       return false;
+    if (filters.todayOnly) {
+      const createdMs = new Date(s.createdAt).getTime();
+      if (createdMs < startOfTodayMs) return false;
+    }
     return true;
   });
 
