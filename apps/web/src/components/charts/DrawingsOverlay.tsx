@@ -259,6 +259,37 @@ export default function DrawingsOverlay({ token, chart, series, realTimeMap }: D
     };
   }, [token, series]);
 
+  // Forward a mouse event to the chart canvas underneath. Used when the
+  // overlay captured a click on empty space — we deselect and let the
+  // chart respond normally (panning, crosshair pickup, etc.). Without
+  // this, having any drawing on the chart would freeze pan/zoom.
+  function forwardEventToChartCanvas(
+    clientX: number,
+    clientY: number,
+    type: 'mousedown' | 'mouseup',
+  ) {
+    const overlay = canvasRef.current;
+    if (!overlay) return;
+    // Temporarily turn off our pointer-events so elementFromPoint sees
+    // the canvas underneath instead of ourselves.
+    const savedPE = overlay.style.pointerEvents;
+    overlay.style.pointerEvents = 'none';
+    const below = document.elementFromPoint(clientX, clientY);
+    overlay.style.pointerEvents = savedPE;
+    if (below && below.tagName === 'CANVAS' && below !== overlay) {
+      below.dispatchEvent(
+        new MouseEvent(type, {
+          clientX,
+          clientY,
+          button: 0,
+          buttons: type === 'mousedown' ? 1 : 0,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    }
+  }
+
   function handleMouseDown(e: React.MouseEvent) {
     if (!conv || !canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
@@ -288,7 +319,10 @@ export default function DrawingsOverlay({ token, chart, series, realTimeMap }: D
       setSelected(hit.id);
       dragRef.current = { id: hit.id, handle: 'body', startMouse: { x: mx, y: my }, origin: hit };
     } else {
+      // Empty click in cursor mode: deselect AND forward to chart so the
+      // user can still pan/zoom on a chart that has drawings on it.
       setSelected(null);
+      forwardEventToChartCanvas(e.clientX, e.clientY, 'mousedown');
     }
   }
 
@@ -345,8 +379,14 @@ export default function DrawingsOverlay({ token, chart, series, realTimeMap }: D
     }
   }
 
-  function handleMouseUp() {
+  function handleMouseUp(e: React.MouseEvent) {
+    const wasDragging = dragRef.current !== null;
     dragRef.current = null;
+    if (!wasDragging) {
+      // If the mousedown was forwarded to the chart, the chart's pan
+      // gesture needs a matching mouseup to end cleanly.
+      forwardEventToChartCanvas(e.clientX, e.clientY, 'mouseup');
+    }
   }
 
   function handleDrawClick(kind: ToolKind, point: TimePricePoint) {
@@ -424,7 +464,17 @@ export default function DrawingsOverlay({ token, chart, series, realTimeMap }: D
     return () => window.removeEventListener('keydown', onKey);
   }, [selectedId, token, setActiveTool, clearInFlight, setSelected, deleteDrawing]);
 
-  const captureEvents = activeTool !== null || selectedId !== null || inFlight !== null;
+  // Capture pointer events whenever we MIGHT need to react: a tool is armed
+  // (to place new drawings), something is selected (to drag-edit), an
+  // in-flight multi-click draw is collecting points, OR any drawings exist
+  // for this token (so they can be hit-tested for selection). When no
+  // drawings exist and nothing is going on, the overlay stays fully
+  // transparent so the chart's own pan/zoom/crosshair work unimpeded.
+  const captureEvents =
+    activeTool !== null ||
+    selectedId !== null ||
+    inFlight !== null ||
+    drawings.length > 0;
 
   return (
     <div
