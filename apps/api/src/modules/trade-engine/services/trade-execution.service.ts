@@ -307,10 +307,26 @@ export class TradeExecutionService {
     if (trade.isPaperTrade) {
       const paperResponse =
         await this.paperTradeService.simulateOrder(closeOrder);
-      // For paper trades, use the LTP or entry price as base
-      exitPrice = instrument
-        ? (await this.getLastPrice(instrument.token, instrument.exchange)) ?? trade.entryPrice ?? 0
-        : trade.entryPrice ?? 0;
+
+      // Prefer the simulator's slippage-adjusted fillPrice (mirrors the
+      // entry-side fix). Fall back to live LTP and then to entryPrice as
+      // last-resort defensive measures. Without this, paper closes would
+      // ignore simulated exit slippage and silently corrupt every closed
+      // paper trade's P&L on the exit side — the journal becomes
+      // unreliable evidence for evaluating scanners.
+      const lastPrice = instrument
+        ? await this.getLastPrice(instrument.token, instrument.exchange)
+        : null;
+      exitPrice =
+        paperResponse.fillPrice ?? lastPrice ?? trade.entryPrice ?? 0;
+
+      if (!exitPrice || exitPrice <= 0) {
+        this.logger.error(
+          `Paper close ${paperResponse.orderId} resolved no exitPrice — ` +
+            `fillPrice=${paperResponse.fillPrice}, lastPrice=${lastPrice}, ` +
+            `trade.entryPrice=${trade.entryPrice}. This will corrupt P&L.`,
+        );
+      }
 
       this.logger.log(
         `[Paper] Close order ${paperResponse.orderId}: ${paperResponse.status}`,

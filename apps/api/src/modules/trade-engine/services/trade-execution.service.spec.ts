@@ -302,3 +302,153 @@ describe('TradeExecutionService.executeTrade — paper-trade entry price', () =>
     expect(trade.entryPrice).toBe(99.5);
   });
 });
+
+/**
+ * Sibling regression spec for the paper-trade EXIT price bug.
+ *
+ * closeTrade() used to ignore paperResponse.fillPrice on the close side
+ * and unconditionally fall back to getLastPrice() — so paper exits did
+ * not reflect simulated exit slippage and every closed paper trade's
+ * P&L was subtly wrong on the exit side. The journal (which we use to
+ * evaluate which Chartink scanners produce winners) was being silently
+ * corrupted. Mirror of the entry-side fix in e0c20c7.
+ */
+describe('TradeExecutionService.closeTrade — paper-trade exit price', () => {
+  let module: TestingModule;
+  let service: TradeExecutionService;
+  let repo: ReturnType<typeof buildMockRepo>;
+  let paperService: { simulateOrder: jest.Mock; simulateTick: jest.Mock };
+  let brokerAdapter: { getLiveQuote: jest.Mock; placeOrder: jest.Mock };
+
+  beforeEach(async () => {
+    repo = buildMockRepo();
+    repo._trades['trade_1'] = {
+      id: 'trade_1',
+      status: 'OPEN',
+      side: 'BUY',
+      quantity: 50,
+      entryPrice: 100,
+      isPaperTrade: true,
+      positionType: 'INTRADAY',
+      notes: null,
+      instrument: { symbol: 'NIFTY24MAY22500CE', token: '99926000', exchange: 'NFO' },
+    };
+
+    paperService = {
+      simulateOrder: jest.fn(async () => ({
+        orderId: 'paper_close_1',
+        status: 'FILLED',
+        message: 'Paper trade filled at 130.50 (slippage: 0.0381)',
+        fillPrice: 130.5,
+      })),
+      simulateTick: jest.fn(),
+    };
+
+    brokerAdapter = {
+      getLiveQuote: jest.fn(async () => ({ ltp: 125.0 })),
+      placeOrder: jest.fn(),
+    };
+
+    module = await Test.createTestingModule({
+      providers: [
+        TradeExecutionService,
+        { provide: BROKER_ADAPTER_TOKEN, useValue: brokerAdapter },
+        { provide: PaperTradeService, useValue: paperService },
+        {
+          provide: RiskManagerService,
+          useValue: {
+            validateTrade: jest.fn(async () => ({ allowed: true })),
+            getDailyRiskStatus: jest.fn(async () => ({})),
+            activateKillSwitch: jest.fn(),
+          },
+        },
+        { provide: OrderTrackerService, useValue: { trackOrder: jest.fn() } },
+        {
+          provide: PositionManagerService,
+          useValue: {
+            addPosition: jest.fn(),
+            removePosition: jest.fn(),
+            updatePositionPnL: jest.fn(),
+          },
+        },
+        { provide: TradeRepository, useValue: repo },
+        {
+          provide: TradeGateway,
+          useValue: {
+            emitTradeUpdate: jest.fn(),
+            emitKillSwitchActivated: jest.fn(),
+            emitRiskStatus: jest.fn(),
+          },
+        },
+        {
+          provide: SettingsService,
+          useValue: {
+            getSettings: jest.fn(async () => ({ paperTrading: true })),
+            activateKillSwitch: jest.fn(),
+          },
+        },
+        {
+          provide: MarketFeedService,
+          useValue: { getQuote: jest.fn(() => null), getBreadth: jest.fn() },
+        },
+        {
+          provide: MarketContextService,
+          useValue: { snapshot: jest.fn(async () => null) },
+        },
+      ],
+    }).compile();
+
+    service = module.get(TradeExecutionService);
+  });
+
+  it('records the simulator fillPrice as exitPrice for paper closes', async () => {
+    const trade = await service.closeTrade('trade_1', {
+      exitReasonTag: ExitReasonTag.HIT_TARGET,
+      exitNotes: 'Target reached',
+    });
+
+    expect(paperService.simulateOrder).toHaveBeenCalledTimes(1);
+    expect(trade.exitPrice).toBe(130.5);
+    // P&L = (130.5 - 100) * 50 = 1525
+    expect(trade.pnl).toBeCloseTo(1525, 2);
+    expect(trade.status).toBe('CLOSED');
+  });
+
+  it('falls back to getLastPrice() when the simulator omits fillPrice', async () => {
+    paperService.simulateOrder.mockResolvedValueOnce({
+      orderId: 'paper_close_legacy',
+      status: 'FILLED',
+      message: 'legacy',
+      // no fillPrice
+    });
+
+    const trade = await service.closeTrade('trade_1');
+
+    // getLiveQuote returned ltp: 125.0 — that's the next fallback in the chain
+    expect(trade.exitPrice).toBe(125.0);
+  });
+
+  it('logs an error when both fillPrice and lastPrice are missing AND entryPrice is 0', async () => {
+    // Force every layer to fail: simulator omits fillPrice, broker throws,
+    // and seed the trade with entryPrice=0 so the final fallback also fails.
+    paperService.simulateOrder.mockResolvedValueOnce({
+      orderId: 'paper_close_broken',
+      status: 'FILLED',
+      message: 'broken',
+    });
+    brokerAdapter.getLiveQuote.mockRejectedValueOnce(new Error('feed down'));
+    repo._trades['trade_1'].entryPrice = 0;
+
+    const errSpy = jest
+      .spyOn((service as any).logger, 'error')
+      .mockImplementation(() => {});
+
+    const trade = await service.closeTrade('trade_1');
+
+    expect(trade.exitPrice).toBe(0);
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    expect(errSpy.mock.calls[0][0]).toMatch(
+      /Paper close .* resolved no exitPrice/,
+    );
+  });
+});
