@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { hitTestDrawing, type ScreenPoint, type DrawingScreen } from './hitTest';
+import { hitTestDrawing, type DrawingScreen } from './hitTest';
 
 const TOLERANCE = 4;
 
