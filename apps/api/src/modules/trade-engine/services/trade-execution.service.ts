@@ -132,8 +132,21 @@ export class TradeExecutionService {
 
       if (paperResponse.status === 'FILLED') {
         initialStatus = 'OPEN';
-        entryPrice = request.price ?? request.triggerPrice;
+        // Prefer the simulator's slippage-adjusted fillPrice. Fall back to
+        // request.price / triggerPrice only as a defensive measure — for
+        // MARKET orders these are undefined, which is precisely the bug
+        // that previously persisted entryPrice = null/0 and corrupted P&L.
+        entryPrice =
+          paperResponse.fillPrice ?? request.price ?? request.triggerPrice;
         entryTime = new Date();
+
+        if (!entryPrice || entryPrice <= 0) {
+          this.logger.error(
+            `Paper trade ${orderId} filled but no entryPrice resolved — ` +
+              `fillPrice=${paperResponse.fillPrice}, request.price=${request.price}, ` +
+              `triggerPrice=${request.triggerPrice}. This will corrupt P&L.`,
+          );
+        }
       }
 
       this.logger.log(

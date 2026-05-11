@@ -154,3 +154,151 @@ describe('TradeExecutionService.closeTrade — exit-reason persistence', () => {
     expect(persisted.status).toBe('CLOSED');
   });
 });
+
+/**
+ * Regression spec for the "paper trade entryPrice = 0/null" bug.
+ *
+ * The simulator now returns fillPrice; executeTrade must record it as
+ * the trade's entryPrice so P&L and the position manager use the real
+ * slippage-adjusted fill, not undefined/0.
+ */
+describe('TradeExecutionService.executeTrade — paper-trade entry price', () => {
+  let module: TestingModule;
+  let service: TradeExecutionService;
+  let repo: ReturnType<typeof buildMockRepo>;
+  let paperService: { simulateOrder: jest.Mock; simulateTick: jest.Mock };
+  let positionManager: {
+    addPosition: jest.Mock;
+    removePosition: jest.Mock;
+    updatePositionPnL: jest.Mock;
+  };
+
+  beforeEach(async () => {
+    repo = buildMockRepo();
+    paperService = {
+      simulateOrder: jest.fn(async () => ({
+        orderId: 'paper_order_42',
+        status: 'FILLED',
+        message: 'Paper trade filled at 127.43 (slippage: 0.0381)',
+        fillPrice: 127.43,
+      })),
+      simulateTick: jest.fn(),
+    };
+    positionManager = {
+      addPosition: jest.fn(),
+      removePosition: jest.fn(),
+      updatePositionPnL: jest.fn(),
+    };
+
+    module = await Test.createTestingModule({
+      providers: [
+        TradeExecutionService,
+        { provide: BROKER_ADAPTER_TOKEN, useValue: null },
+        { provide: PaperTradeService, useValue: paperService },
+        {
+          provide: RiskManagerService,
+          useValue: {
+            validateTrade: jest.fn(async () => ({ allowed: true })),
+            getDailyRiskStatus: jest.fn(async () => ({})),
+            activateKillSwitch: jest.fn(),
+          },
+        },
+        { provide: OrderTrackerService, useValue: { trackOrder: jest.fn() } },
+        { provide: PositionManagerService, useValue: positionManager },
+        { provide: TradeRepository, useValue: repo },
+        {
+          provide: TradeGateway,
+          useValue: {
+            emitTradeUpdate: jest.fn(),
+            emitKillSwitchActivated: jest.fn(),
+            emitRiskStatus: jest.fn(),
+          },
+        },
+        {
+          provide: SettingsService,
+          useValue: {
+            getSettings: jest.fn(async () => ({ paperTrading: true })),
+            activateKillSwitch: jest.fn(),
+          },
+        },
+        {
+          provide: MarketFeedService,
+          useValue: { getQuote: jest.fn(() => null), getBreadth: jest.fn() },
+        },
+        {
+          provide: MarketContextService,
+          useValue: {
+            snapshot: jest.fn(async () => ({
+              underlying: 'NIFTY',
+              spot: 22500,
+              vix: 14.5,
+              vixRegime: 'NORMAL',
+              pcr: 1.1,
+              maxPain: 22400,
+              adRatio: 1.2,
+              capturedAt: new Date(),
+            })),
+          },
+        },
+      ],
+    }).compile();
+
+    service = module.get(TradeExecutionService);
+  });
+
+  it('records the simulator fillPrice as entryPrice for filled MARKET paper orders', async () => {
+    const trade = await service.executeTrade({
+      symbol: 'NIFTY24MAY22500CE',
+      token: '99926000',
+      exchange: 'NFO',
+      side: 'BUY' as any,
+      orderType: 'MARKET' as any,
+      quantity: 50,
+      positionType: 'INTRADAY' as any,
+      // NOTE: no price / triggerPrice — this is what trips the original bug
+    } as any);
+
+    expect(paperService.simulateOrder).toHaveBeenCalledTimes(1);
+    expect(trade.entryPrice).toBe(127.43);
+    expect(trade.status).toBe('OPEN');
+    expect(trade.entryTime).toBeInstanceOf(Date);
+  });
+
+  it('propagates the fillPrice into the position-manager averagePrice', async () => {
+    await service.executeTrade({
+      symbol: 'NIFTY24MAY22500CE',
+      token: '99926000',
+      exchange: 'NFO',
+      side: 'BUY' as any,
+      orderType: 'MARKET' as any,
+      quantity: 50,
+      positionType: 'INTRADAY' as any,
+    } as any);
+
+    expect(positionManager.addPosition).toHaveBeenCalledTimes(1);
+    const [, position] = positionManager.addPosition.mock.calls[0];
+    expect(position.averagePrice).toBe(127.43);
+  });
+
+  it('falls back to request.price when the simulator omits fillPrice (defensive)', async () => {
+    // Simulate an older/buggy implementation that doesn't return fillPrice.
+    paperService.simulateOrder.mockResolvedValueOnce({
+      orderId: 'paper_order_old',
+      status: 'FILLED',
+      message: 'legacy',
+    });
+
+    const trade = await service.executeTrade({
+      symbol: 'NIFTY24MAY22500CE',
+      token: '99926000',
+      exchange: 'NFO',
+      side: 'BUY' as any,
+      orderType: 'LIMIT' as any,
+      quantity: 50,
+      price: 99.5,
+      positionType: 'INTRADAY' as any,
+    } as any);
+
+    expect(trade.entryPrice).toBe(99.5);
+  });
+});

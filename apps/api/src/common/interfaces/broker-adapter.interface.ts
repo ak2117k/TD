@@ -39,6 +39,11 @@ export interface OrderResponse {
   orderId: string;
   status: string;
   message: string;
+  /**
+   * Filled price (with slippage applied) for paper-trade MARKET orders;
+   * undefined for limit-pending or live orders.
+   */
+  fillPrice?: number;
 }
 
 export interface PositionData {

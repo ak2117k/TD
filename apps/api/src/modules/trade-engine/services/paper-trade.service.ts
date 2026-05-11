@@ -220,6 +220,7 @@ export class PaperTradeService {
       orderId,
       status: 'FILLED',
       message: `Paper trade filled at ${fillPrice.toFixed(2)} (slippage: ${slippage.toFixed(4)})`,
+      fillPrice,
     };
   }
 
