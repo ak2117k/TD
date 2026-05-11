@@ -164,6 +164,10 @@ export class LevelBookService {
       orh: existing?.orh ?? null,
       orl: existing?.orl ?? null,
       orLocked: existing?.orLocked ?? false,
+      // Preserve previous-session OR across a re-seed; lazyLoad recomputes
+      // it explicitly when it has the broker/DB context to do so.
+      prevOrh: existing?.prevOrh ?? null,
+      prevOrl: existing?.prevOrl ?? null,
       spot: existing?.spot ?? 0,
       vwap: existing?.vwap ?? 0,
       todayHigh: existing?.todayHigh ?? 0,
@@ -465,7 +469,82 @@ export class LevelBookService {
       });
     }
 
+    // Compute previous trading day's OR for display fallback when today's
+    // OR is null. "Previous trading day" = the most recent weekday before
+    // today's session open. Fetch first 3 completed 5m bars of that session
+    // and compute max(high)/min(low).
+    const prevSessionOR = await this.computePrevSessionOR(
+      token,
+      exchange,
+      instrument?.id,
+      sessionOpen,
+    );
+    const cachedBook = this.books.get(token);
+    if (cachedBook) {
+      cachedBook.prevOrh = prevSessionOR?.orh ?? null;
+      cachedBook.prevOrl = prevSessionOR?.orl ?? null;
+    }
+
     return this.getLevels(token);
+  }
+
+  /**
+   * Walk back up to 5 calendar days from `todaySessionOpen` looking for a
+   * session with at least 3 completed 5m bars in its first 15 minutes
+   * (09:15–09:30 IST). Returns {orh, orl} = max(high) / min(low) over those
+   * 3 bars, or null when nothing was found in the lookback window (long
+   * holiday weekends, newly listed instruments, etc.).
+   *
+   * DB-first, broker fallback. Skips the broker call entirely when DB
+   * already has 3 bars — keeps us under the Angel 3 req/sec ceiling.
+   */
+  private async computePrevSessionOR(
+    token: string,
+    exchange: string,
+    instrumentId: string | undefined,
+    todaySessionOpen: Date,
+  ): Promise<{ orh: number; orl: number } | null> {
+    const istOffsetMs = 5.5 * 60 * 60 * 1000;
+    for (let dayOffset = 1; dayOffset <= 5; dayOffset++) {
+      const prevDayUtc = new Date(todaySessionOpen.getTime() - dayOffset * 24 * 60 * 60 * 1000);
+      const prevIst = new Date(prevDayUtc.getTime() + istOffsetMs);
+      const prevSessionOpenIst = new Date(Date.UTC(
+        prevIst.getUTCFullYear(), prevIst.getUTCMonth(), prevIst.getUTCDate(),
+        9, 15, 0, 0,
+      ));
+      const prevSessionOROpen = new Date(prevSessionOpenIst.getTime() - istOffsetMs);
+      const prevSessionORClose = new Date(prevSessionOROpen.getTime() + 15 * 60 * 1000);
+
+      // Try DB first, broker fallback.
+      let bars: Array<{ high: number; low: number }> = [];
+      if (instrumentId && this.marketDataRepository) {
+        const rows = await this.marketDataRepository.getCandles(
+          instrumentId, TIMEFRAMES.FIVE_MIN, prevSessionOROpen, prevSessionORClose,
+        );
+        bars = rows.map((c) => ({ high: c.high, low: c.low }));
+      }
+      if (bars.length < 3 && this.brokerAdapter?.getHistoricalData) {
+        try {
+          const broker = await this.brokerAdapter.getHistoricalData(
+            token, exchange, '5m', prevSessionOROpen, prevSessionORClose,
+          );
+          bars = broker.map((c: { high: number | string; low: number | string }) => ({
+            high: Number(c.high),
+            low: Number(c.low),
+          }));
+        } catch {
+          // Quiet — try the next day back.
+        }
+      }
+      if (bars.length >= 3) {
+        const orBars = bars.slice(0, 3);
+        return {
+          orh: Math.max(...orBars.map((b) => b.high)),
+          orl: Math.min(...orBars.map((b) => b.low)),
+        };
+      }
+    }
+    return null;
   }
 
   /**

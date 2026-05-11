@@ -17,6 +17,19 @@ export interface LevelBook {
   orl: number | null;
   orLocked: boolean;
 
+  /**
+   * Previous trading day's opening range, computed from yesterday's first
+   * 3 completed 5m bars. Populated regardless of whether today's OR is
+   * locked, so the consumer can pick whichever to display. null when prior-
+   * day data isn't available (newly listed instrument, weekend with no
+   * Friday data within lookback window, etc.).
+   *
+   * Used by the chart as a fallback to render dimmed `Y-ORH` / `Y-ORL`
+   * lines pre-9:30 IST, before today's OR has locked.
+   */
+  prevOrh: number | null;
+  prevOrl: number | null;
+
   // Dynamic — rolling on every tick
   spot: number;
   vwap: number;

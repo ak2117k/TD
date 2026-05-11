@@ -221,4 +221,153 @@ describe('LevelBookService', () => {
       expect(book).toBeNull();
     });
   });
+
+  describe('lazyLoad → prevOrh/prevOrl (previous-session opening range)', () => {
+    // 16 trailing daily candles so the seedSession ATR gate passes.
+    const mkDaily = (offsetDays: number, h: number, l: number, c: number) => {
+      const ts = new Date();
+      ts.setUTCDate(ts.getUTCDate() - offsetDays);
+      ts.setUTCHours(0, 0, 0, 0);
+      return {
+        timestamp: ts,
+        open: c, high: h, low: l, close: c,
+        volume: BigInt(1000),
+      };
+    };
+
+    // 5m bar in the prev-session OR window (high/low only — that's what
+    // computePrevSessionOR consumes).
+    const mk5m = (h: number, l: number) => ({
+      high: h, low: l, open: l, close: h, timestamp: new Date(), volume: BigInt(0),
+    });
+
+    const dailyRows = () =>
+      Array.from({ length: 16 }, (_, i) => mkDaily(16 - i, 110 + i, 90 + i, 100 + i));
+
+    it('populates prevOrh/prevOrl from 3 prior-day 5m bars in the DB', async () => {
+      const instrumentService = {
+        getByToken: jest.fn().mockResolvedValue({ id: 'inst1' }),
+      } as any;
+      // Repo answers: daily candles for the seed, 5m bars for today's session
+      // (empty), then 5m bars for the prev-day OR window (3 bars).
+      const fiveMinPrevDay = [mk5m(124, 118), mk5m(126, 119), mk5m(122, 117)];
+      const repo = {
+        getCandles: jest.fn().mockImplementation(
+          async (_id: string, tf: string, from: Date) => {
+            if (tf === '1d') return dailyRows();
+            if (tf === '5m') {
+              // Today's session fetch starts at today's 09:15 IST. The
+              // prev-day OR fetch starts at any earlier UTC. Distinguish
+              // by relative time vs now.
+              const now = Date.now();
+              if (from.getTime() < now - 12 * 3600 * 1000) {
+                return fiveMinPrevDay;
+              }
+              return [];
+            }
+            return [];
+          },
+        ),
+      } as any;
+      const svc = new LevelBookService(instrumentService, repo);
+
+      const book = await svc.lazyLoad('TKN_P1', 'NSE', 'X');
+      expect(book).not.toBeNull();
+      expect(book!.prevOrh).toBe(126); // max(124, 126, 122)
+      expect(book!.prevOrl).toBe(117); // min(118, 119, 117)
+    });
+
+    it('returns null prevOrh/prevOrl when no bars in 5-day lookback window', async () => {
+      const instrumentService = {
+        getByToken: jest.fn().mockResolvedValue({ id: 'inst1' }),
+      } as any;
+      const repo = {
+        getCandles: jest.fn().mockImplementation(
+          async (_id: string, tf: string) => (tf === '1d' ? dailyRows() : []),
+        ),
+      } as any;
+      // No broker either — nothing returns 3 bars in any of the past 5 days.
+      const svc = new LevelBookService(instrumentService, repo);
+
+      const book = await svc.lazyLoad('TKN_P2', 'NSE', 'X');
+      expect(book).not.toBeNull();
+      expect(book!.prevOrh).toBeNull();
+      expect(book!.prevOrl).toBeNull();
+    });
+
+    it('skips broker call when DB already has 3 prev-day bars (cost-saver)', async () => {
+      const instrumentService = {
+        getByToken: jest.fn().mockResolvedValue({ id: 'inst1' }),
+      } as any;
+      const fiveMinPrevDay = [mk5m(124, 118), mk5m(126, 119), mk5m(122, 117)];
+      const repo = {
+        getCandles: jest.fn().mockImplementation(
+          async (_id: string, tf: string, from: Date) => {
+            if (tf === '1d') return dailyRows();
+            if (tf === '5m') {
+              const now = Date.now();
+              if (from.getTime() < now - 12 * 3600 * 1000) {
+                return fiveMinPrevDay; // First prev-day attempt finds 3 bars.
+              }
+              return [];
+            }
+            return [];
+          },
+        ),
+      } as any;
+      const brokerAdapter = {
+        getHistoricalData: jest.fn().mockResolvedValue([]),
+      } as any;
+      const svc = new LevelBookService(instrumentService, repo, brokerAdapter);
+
+      const book = await svc.lazyLoad('TKN_P3', 'NSE', 'X');
+      expect(book).not.toBeNull();
+      expect(book!.prevOrh).toBe(126);
+      // Broker SHOULD still get called for the daily-candle fallback path
+      // (fires when DB has < 14 daily) and the today-session 5m fallback
+      // (DB had 0 bars). What it MUST NOT do is fire for the prev-day OR
+      // walkback — i.e. there must be no 5m broker call with a `from`
+      // older than ~12h ago when the DB already supplied the 3 bars.
+      const prevDay5mBrokerCalls = brokerAdapter.getHistoricalData.mock.calls.filter(
+        (args: any[]) => {
+          const [, , tf, from] = args;
+          if (tf !== '5m') return false;
+          return (from as Date).getTime() < Date.now() - 12 * 3600 * 1000;
+        },
+      );
+      expect(prevDay5mBrokerCalls.length).toBe(0);
+    });
+
+    it('falls back to broker when DB has 0 prev-day bars', async () => {
+      const instrumentService = {
+        getByToken: jest.fn().mockResolvedValue({ id: 'inst1' }),
+      } as any;
+      const repo = {
+        getCandles: jest.fn().mockImplementation(
+          async (_id: string, tf: string) => (tf === '1d' ? dailyRows() : []),
+        ),
+      } as any;
+      // Broker returns 3 bars on the very first prev-day attempt.
+      const brokerAdapter = {
+        getHistoricalData: jest.fn().mockImplementation(
+          async (_t: string, _e: string, tf: string, from: Date) => {
+            if (tf === '5m' && from.getTime() < Date.now() - 12 * 3600 * 1000) {
+              return [
+                { high: 130, low: 122, open: 122, close: 128, volume: 0, timestamp: from },
+                { high: 132, low: 124, open: 128, close: 131, volume: 0, timestamp: from },
+                { high: 129, low: 123, open: 131, close: 125, volume: 0, timestamp: from },
+              ];
+            }
+            return [];
+          },
+        ),
+      } as any;
+      const svc = new LevelBookService(instrumentService, repo, brokerAdapter);
+
+      const book = await svc.lazyLoad('TKN_P4', 'NSE', 'X');
+      expect(book).not.toBeNull();
+      expect(book!.prevOrh).toBe(132);
+      expect(book!.prevOrl).toBe(122);
+    });
+  });
 });

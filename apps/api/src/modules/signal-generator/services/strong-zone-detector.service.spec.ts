@@ -284,6 +284,8 @@ describe('StrongZoneDetectorService', () => {
       orh: null,
       orl: null,
       orLocked: false,
+      prevOrh: null,
+      prevOrl: null,
       spot: 100,
       vwap: 100,
       todayHigh: 102,
@@ -452,6 +454,7 @@ describe('StrongZoneDetectorService — swap zone detection', () => {
       token: '99926000', symbol: 'NIFTY', exchange: 'NSE',
       asOf: new Date(), pdh: spot + 100, pdl: spot - 100, prevClose: spot,
       orh: null, orl: null, orLocked: false,
+      prevOrh: null, prevOrl: null,
       spot, vwap: 0, todayHigh: spot, todayLow: spot,
       atr14: 100, lastTickAt: new Date(), roundNumbers: [],
     };

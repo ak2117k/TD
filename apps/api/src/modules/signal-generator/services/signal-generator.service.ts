@@ -99,6 +99,13 @@ export interface LevelsSnapshot {
   pdl: number;
   orh: number | null;
   orl: number | null;
+  /**
+   * Previous trading day's opening range. Surfaced so the chart can render
+   * dimmed `Y-ORH` / `Y-ORL` lines as a fallback when today's OR hasn't
+   * locked yet (pre-9:30 IST). null when prior-day data isn't available.
+   */
+  prevOrh: number | null;
+  prevOrl: number | null;
   vwap: number;
   todayHigh: number;
   todayLow: number;
@@ -175,6 +182,8 @@ function snapshotFromBook(book: LevelBook): LevelsSnapshot {
     pdl: book.pdl,
     orh: book.orh,
     orl: book.orl,
+    prevOrh: book.prevOrh,
+    prevOrl: book.prevOrl,
     vwap: book.vwap,
     todayHigh: book.todayHigh,
     todayLow: book.todayLow,
@@ -610,6 +619,7 @@ export class SignalGeneratorService {
         ? snapshotFromBook(book)
         : {
             pdh: 0, pdl: 0, orh: null, orl: null,
+            prevOrh: null, prevOrl: null,
             vwap: 0, todayHigh: 0, todayLow: 0, atr14: setup.atr14,
           },
       reason: setup.reason,

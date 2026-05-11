@@ -46,6 +46,8 @@ describe('LevelsContextStrategy.analyze', () => {
     orh: 24160,
     orl: 24080,
     orLocked: true,
+    prevOrh: null,
+    prevOrl: null,
     spot: 24100,
     vwap: 24090,
     todayHigh: 24160,
@@ -474,6 +476,7 @@ describe('computeSlAndTarget — obstacle-aware TP1', () => {
     token: '99926000', symbol: 'NIFTY', exchange: 'NSE',
     asOf: new Date(), pdh: 24100, pdl: 23900, prevClose: 24000,
     orh: null, orl: null, orLocked: false,
+    prevOrh: null, prevOrl: null,
     spot: 24000, vwap: 0, todayHigh: 24000, todayLow: 24000,
     atr14: 100, lastTickAt: new Date(), roundNumbers: [],
   };
