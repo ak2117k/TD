@@ -20,9 +20,13 @@ export interface CreateAlertSetupInput {
   symbol: string;
   token: string | null;
   hitPrice: number;
-  kind: 'setup' | 'no-setup' | 'unresolved' | 'error';
+  kind: 'setup' | 'no-setup' | 'unresolved' | 'error' | 'mtf-misaligned';
   setupId: string | null;
   rejectReason: string | null;
+  // Scoring + lot sizing (added 2026-05-12)
+  score?: number | null;
+  lotCount?: number | null;
+  scoreBreakdown?: unknown;
 }
 
 @Injectable()
@@ -73,7 +77,21 @@ export class ChartinkRepository {
 
   async createAlertSetup(input: CreateAlertSetupInput): Promise<void> {
     await this.prisma.chartinkAlertSetup.create({
-      data: input,
+      data: {
+        alertId: input.alertId,
+        symbol: input.symbol,
+        token: input.token,
+        hitPrice: input.hitPrice,
+        kind: input.kind,
+        setupId: input.setupId,
+        rejectReason: input.rejectReason,
+        score: input.score ?? null,
+        lotCount: input.lotCount ?? null,
+        scoreBreakdown:
+          input.scoreBreakdown == null
+            ? Prisma.JsonNull
+            : (input.scoreBreakdown as Prisma.InputJsonValue),
+      },
     });
   }
 

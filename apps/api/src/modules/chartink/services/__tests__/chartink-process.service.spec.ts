@@ -5,6 +5,7 @@ import { MarketDataRepository } from '../../../market-data/repositories/market-d
 import { SignalGeneratorService } from '../../../signal-generator/services/signal-generator.service';
 import { SetupTrackerService } from '../../../signal-generator/services/setup-tracker.service';
 import { MtfAlignmentService } from '../../../signal-generator/services/mtf-alignment.service';
+import { ChartinkScoringService } from '../chartink-scoring.service';
 
 describe('ChartinkProcessService', () => {
   let service: ChartinkProcessService;
@@ -13,6 +14,7 @@ describe('ChartinkProcessService', () => {
   let signalSvc: { analyze: jest.Mock };
   let tracker: { getActive: jest.Mock };
   let mtf: { check: jest.Mock };
+  let scoring: { score: jest.Mock; scoreToLotCount: jest.Mock };
 
   beforeEach(async () => {
     repo = { createAlertSetup: jest.fn().mockResolvedValue(undefined) };
@@ -27,6 +29,10 @@ describe('ChartinkProcessService', () => {
         summary: '1d=UP 1h=UP 15m=UP 5m=UP',
       }),
     };
+    scoring = {
+      score: jest.fn().mockResolvedValue({ score: 70, lotCount: 2, checks: [] }),
+      scoreToLotCount: jest.fn(),
+    };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -36,6 +42,7 @@ describe('ChartinkProcessService', () => {
         { provide: SignalGeneratorService, useValue: signalSvc },
         { provide: SetupTrackerService, useValue: tracker },
         { provide: MtfAlignmentService, useValue: mtf },
+        { provide: ChartinkScoringService, useValue: scoring },
       ],
     }).compile();
 
@@ -60,12 +67,12 @@ describe('ChartinkProcessService', () => {
   it('persists kind=setup when analyze returns a setup', async () => {
     mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'i1', token: '2885' });
     signalSvc.analyze.mockResolvedValue({ kind: 'setup', symbol: 'RELIANCE' });
-    tracker.getActive.mockReturnValue({ id: 'setup-xyz' });
+    tracker.getActive.mockReturnValue({ id: 'setup-xyz', entry: 1470, stoploss: 1460 });
 
     await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 1467.4 });
 
     expect(signalSvc.analyze).toHaveBeenCalledWith('2885', 'NSE', 'RELIANCE', '15m');
-    expect(repo.createAlertSetup).toHaveBeenCalledWith({
+    expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
       alertId: 'alert-1',
       symbol: 'RELIANCE',
       token: '2885',
@@ -73,7 +80,7 @@ describe('ChartinkProcessService', () => {
       kind: 'setup',
       setupId: 'setup-xyz',
       rejectReason: null,
-    });
+    }));
   });
 
   it('persists kind=no-setup when analyze rejects', async () => {
@@ -184,5 +191,43 @@ describe('ChartinkProcessService', () => {
         kind: 'unresolved',
       }));
     });
+  });
+
+  it('persists score and lotCount when analyze returns a setup', async () => {
+    mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', symbol: 'RELIANCE' });
+    mtf.check.mockResolvedValue({
+      aligned: true,
+      agreedDirection: 'UP',
+      directions: { '1d': 'UP', '1h': 'UP', '15m': 'UP', '5m': 'UP' },
+      summary: '1d=UP 1h=UP 15m=UP 5m=UP',
+    });
+    signalSvc.analyze.mockResolvedValue({ kind: 'setup' });
+    tracker.getActive.mockReturnValue({
+      id: 'setup-1',
+      entry: 2890,
+      stoploss: 2850,
+      levelBookSnapshot: { pdh: 2920, pdl: 2850, orh: 2900, orl: 2860, vwap: 2880 },
+    });
+    scoring.score.mockResolvedValue({
+      score: 73,
+      lotCount: 2,
+      checks: [{ name: 'Sector aligned', points: 20, pointsPossible: 20, passed: true }],
+    });
+
+    await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+    expect(scoring.score).toHaveBeenCalledWith(expect.objectContaining({
+      token: '2885',
+      symbol: 'RELIANCE',
+      exchange: 'NSE',
+      side: 'BUY',
+      entryPrice: 2890,
+    }));
+    expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'setup',
+      score: 73,
+      lotCount: 2,
+      scoreBreakdown: expect.any(Array),
+    }));
   });
 });

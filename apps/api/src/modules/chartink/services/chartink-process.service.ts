@@ -4,6 +4,7 @@ import { MarketDataRepository } from '../../market-data/repositories/market-data
 import { SignalGeneratorService } from '../../signal-generator/services/signal-generator.service';
 import { SetupTrackerService } from '../../signal-generator/services/setup-tracker.service';
 import { MtfAlignmentService } from '../../signal-generator/services/mtf-alignment.service';
+import { ChartinkScoringService, type SetupSide } from './chartink-scoring.service';
 
 interface Hit {
   symbol: string;
@@ -22,6 +23,7 @@ export class ChartinkProcessService {
     private readonly signalSvc: SignalGeneratorService,
     private readonly tracker: SetupTrackerService,
     private readonly mtf: MtfAlignmentService,
+    private readonly scoring: ChartinkScoringService,
   ) {}
 
   async processAlert(alertId: string, hits: Hit[]): Promise<void> {
@@ -103,6 +105,38 @@ export class ChartinkProcessService {
 
     if (result.kind === 'setup') {
       const locked = this.tracker.getActive(instrument.token);
+      // Run 9-check scoring on the locked setup. Guard against throws so a
+      // scoring failure never blocks the underlying setup persistence — fall
+      // back to null score/lotCount in that case.
+      let scoring = null as Awaited<ReturnType<typeof this.scoring.score>> | null;
+      if (locked) {
+        try {
+          scoring = await this.scoring.score({
+            token: instrument.token,
+            symbol: hit.symbol,
+            exchange: 'NSE',
+            side: (locked.entry > locked.stoploss ? 'BUY' : 'SELL') as SetupSide,
+            entryPrice: locked.entry,
+            // LockedSetup may carry a levelBookSnapshot at runtime (set by the
+            // strategy when the setup is locked); the type doesn't expose it
+            // yet so we cast defensively. If absent at runtime the S/R-room
+            // check returns "no level book" → 0 points without throwing.
+            setupContext: locked as unknown as {
+              levelBookSnapshot?: {
+                pdh: number;
+                pdl: number;
+                orh: number | null;
+                orl: number | null;
+                vwap: number;
+              };
+            },
+          });
+        } catch (err) {
+          this.logger.warn(
+            `scoring failed for ${hit.symbol}: ${err instanceof Error ? err.message : err}`,
+          );
+        }
+      }
       await this.repo.createAlertSetup({
         alertId,
         symbol: hit.symbol,
@@ -111,6 +145,9 @@ export class ChartinkProcessService {
         kind: 'setup',
         setupId: locked?.id ?? null,
         rejectReason: null,
+        score: scoring?.score ?? null,
+        lotCount: scoring?.lotCount ?? null,
+        scoreBreakdown: scoring?.checks ?? null,
       });
     } else {
       await this.repo.createAlertSetup({
