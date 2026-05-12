@@ -81,4 +81,51 @@ describe('ChartinkIngestService', () => {
     expect(istDate.getUTCHours()).toBe(14);
     expect(istDate.getUTCMinutes()).toBe(34);
   });
+
+  it('returns same alertId for identical payloads within 60s', async () => {
+    repo.createAlert.mockResolvedValueOnce({ id: 'a1' });
+    const first = await service.ingest(dto());
+    expect(first.alertId).toBe('a1');
+
+    const second = await service.ingest(dto());
+    expect(second.alertId).toBe('a1');
+    expect(second.hitCount).toBe(first.hitCount);
+
+    expect(repo.createAlert).toHaveBeenCalledTimes(1);
+    expect(repo.upsertScanner).toHaveBeenCalledTimes(1);
+    expect(queue.add).toHaveBeenCalledTimes(1);
+  });
+
+  it('creates new alert when payload differs in any tracked field', async () => {
+    repo.createAlert
+      .mockResolvedValueOnce({ id: 'a1' })
+      .mockResolvedValueOnce({ id: 'a2' })
+      .mockResolvedValueOnce({ id: 'a3' });
+
+    // differs in `stocks`
+    await service.ingest(dto({ stocks: 'A', trigger_prices: '10' }));
+    await service.ingest(dto({ stocks: 'B', trigger_prices: '10' }));
+    // differs in `trigger_prices` only (same stocks as call #2)
+    await service.ingest(dto({ stocks: 'B', trigger_prices: '20' }));
+
+    expect(repo.createAlert).toHaveBeenCalledTimes(3);
+    expect(queue.add).toHaveBeenCalledTimes(3);
+  });
+
+  it('creates new alert after dedup window expires', async () => {
+    repo.createAlert
+      .mockResolvedValueOnce({ id: 'a1' })
+      .mockResolvedValueOnce({ id: 'a2' });
+
+    const first = await service.ingest(dto());
+    expect(first.alertId).toBe('a1');
+
+    // Simulate dedup window expiry by clearing the in-memory cache.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (service as any).recentPayloads.clear();
+
+    const second = await service.ingest(dto());
+    expect(second.alertId).toBe('a2');
+    expect(repo.createAlert).toHaveBeenCalledTimes(2);
+  });
 });

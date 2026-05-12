@@ -1,6 +1,7 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
+import { createHash } from 'crypto';
 import { Prisma } from '@prisma/client';
 import { ChartinkWebhookDto } from '../dto/chartink-webhook.dto';
 import { ChartinkRepository } from '../repositories/chartink.repository';
@@ -21,12 +22,39 @@ export interface ChartinkProcessJobData {
 export class ChartinkIngestService {
   private readonly logger = new Logger(ChartinkIngestService.name);
 
+  /**
+   * Recent payload hashes for dedup. Keyed by payload-hash, value is the
+   * alertId returned the first time. TTL'd to 60s — Chartink's retry
+   * window is shorter than this in practice.
+   */
+  private readonly recentPayloads = new Map<
+    string,
+    { alertId: string; hitCount: number; receivedAt: number }
+  >();
+  private static readonly DEDUP_WINDOW_MS = 60_000;
+
   constructor(
     private readonly repo: ChartinkRepository,
     @InjectQueue('chartink-process') private readonly queue: Queue<ChartinkProcessJobData>,
   ) {}
 
   async ingest(payload: ChartinkWebhookDto): Promise<{ alertId: string; hitCount: number }> {
+    const hash = this.payloadHash(payload);
+    const now = Date.now();
+    // Sweep stale entries (cheap, prevents unbounded growth)
+    for (const [h, v] of this.recentPayloads) {
+      if (now - v.receivedAt > ChartinkIngestService.DEDUP_WINDOW_MS) {
+        this.recentPayloads.delete(h);
+      }
+    }
+    const seen = this.recentPayloads.get(hash);
+    if (seen && now - seen.receivedAt < ChartinkIngestService.DEDUP_WINDOW_MS) {
+      this.logger.log(
+        `Chartink dedup: identical payload received ${Math.round((now - seen.receivedAt) / 1000)}s ago — returning original alertId ${seen.alertId}`,
+      );
+      return { alertId: seen.alertId, hitCount: seen.hitCount };
+    }
+
     const hits = this.parseHits(payload.stocks, payload.trigger_prices);
     const triggeredAt = this.deriveTriggeredAt(payload.triggered_at, new Date());
 
@@ -49,7 +77,25 @@ export class ChartinkIngestService {
       `Ingested Chartink alert ${alert.id} (${payload.scan_name}) — ${hits.length} hits`,
     );
 
+    this.recentPayloads.set(hash, {
+      alertId: alert.id,
+      hitCount: hits.length,
+      receivedAt: now,
+    });
+
     return { alertId: alert.id, hitCount: hits.length };
+  }
+
+  private payloadHash(body: ChartinkWebhookDto): string {
+    // Hash includes the fields that matter for uniqueness. webhook_url is
+    // Chartink echoing our URL — ignore. alert_name is human label — ignore.
+    const canonical = JSON.stringify({
+      scan_url: body.scan_url,
+      stocks: body.stocks,
+      trigger_prices: body.trigger_prices,
+      triggered_at: body.triggered_at,
+    });
+    return createHash('sha256').update(canonical).digest('hex').slice(0, 16);
   }
 
   private parseHits(stocksCsv: string, pricesCsv: string): ParsedHit[] {
