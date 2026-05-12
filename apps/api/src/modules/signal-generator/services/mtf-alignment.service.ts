@@ -48,11 +48,30 @@ export class MtfAlignmentService {
       if (i < TIMEFRAMES.length - 1) await this.sleep(RATE_LIMIT_MS);
     }
 
+    // Alignment semantics: NEUTRAL is a silent voter (insufficient data or
+    // exactly equal closes — no opinion). We require at least 2 of the 4
+    // timeframes to have an actual opinion (non-NEUTRAL), and all
+    // opinionated timeframes must agree (no UP-vs-DOWN conflict).
+    //
+    // Why: the strict "all 4 agree" rule was unusable in the first 30 min
+    // of the trading session because the 15m timeframe needs two completed
+    // bars (30 min of data) before it can compute direction. Treating
+    // insufficient-data NEUTRAL as a blocker effectively shut the gate for
+    // every pre-10:00 IST scanner fire. Silent NEUTRALs preserve the
+    // genuine-conflict rejection (the gate's whole point) while letting
+    // legitimate single-direction consensus through earlier in the session.
     const values = Object.values(directions);
-    const allUp = values.every((d) => d === 'UP');
-    const allDown = values.every((d) => d === 'DOWN');
-    const aligned = allUp || allDown;
-    const agreedDirection: 'UP' | 'DOWN' | null = allUp ? 'UP' : allDown ? 'DOWN' : null;
+    const upCount = values.filter((d) => d === 'UP').length;
+    const downCount = values.filter((d) => d === 'DOWN').length;
+    const opinionatedCount = upCount + downCount;
+    // Need ≥ 2 opinions AND no UP-vs-DOWN conflict. Both checks are needed:
+    // 4 NEUTRALs would pass "no conflict" but should still reject.
+    const aligned = opinionatedCount >= 2 && (upCount === 0 || downCount === 0);
+    const agreedDirection: 'UP' | 'DOWN' | null = aligned
+      ? upCount > 0
+        ? 'UP'
+        : 'DOWN'
+      : null;
 
     const summary = TIMEFRAMES.map((tf) => `${tf}=${directions[tf]}`).join(' ');
 
