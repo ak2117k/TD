@@ -39,7 +39,17 @@ export class ChartinkProcessService {
   }
 
   async processOne(alertId: string, hit: Hit): Promise<void> {
-    const instrument = await this.mdRepo.getInstrumentBySymbol(hit.symbol, 'NSE');
+    // Chartink sends bare symbols ("LLOYDSENGG"), but our local Instrument
+    // table stores them with the NSE series suffix ("LLOYDSENGG-EQ" for
+    // regular equity, "-BE" for trade-to-trade, etc.). Try the bare lookup
+    // first (in case anything ever stores symbols both ways), then fall
+    // back to "-EQ" which is the canonical equity series identifier on NSE
+    // (covers the vast majority of liquid stocks). If neither hits, mark
+    // unresolved as before.
+    let instrument = await this.mdRepo.getInstrumentBySymbol(hit.symbol, 'NSE');
+    if (!instrument) {
+      instrument = await this.mdRepo.getInstrumentBySymbol(`${hit.symbol}-EQ`, 'NSE');
+    }
     if (!instrument) {
       await this.repo.createAlertSetup({
         alertId,
@@ -48,7 +58,7 @@ export class ChartinkProcessService {
         hitPrice: hit.hitPrice,
         kind: 'unresolved',
         setupId: null,
-        rejectReason: 'symbol not in local DB',
+        rejectReason: 'symbol not in local DB (tried bare and -EQ)',
       });
       return;
     }
