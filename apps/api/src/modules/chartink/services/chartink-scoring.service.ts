@@ -1,6 +1,7 @@
 // apps/api/src/modules/chartink/services/chartink-scoring.service.ts
 import { Injectable, Logger } from '@nestjs/common';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
+import { NseSectorIndexService } from '../../market-data/services/nse-sector-index.service';
 import { ema, macd, atr, supertrend } from '../../signal-generator/strategies/indicators';
 
 export type SetupSide = 'BUY' | 'SELL';
@@ -28,30 +29,6 @@ export interface ScoringResult {
   checks: ScoreCheckResult[];
 }
 
-// Static stock → sector-index map. Seeded from SECTOR_INDICES. Sized for the
-// liquid-stock universe we trade. Stocks not in this map fail check #1 with
-// detail.reason = 'no sector mapping'.
-const STOCK_TO_SECTOR_INDEX: Record<string, string> = {
-  // Banks / FinServ
-  HDFCBANK: '99926009', ICICIBANK: '99926009', SBIN: '99926009', AXISBANK: '99926009',
-  KOTAKBANK: '99926009', INDUSINDBK: '99926009', BAJFINANCE: '99926011',
-  // IT
-  TCS: '99926013', INFY: '99926013', WIPRO: '99926013', HCLTECH: '99926013',
-  TECHM: '99926013', LTIM: '99926013',
-  // Auto
-  MARUTI: '99926021', TATAMOTORS: '99926021', M_M: '99926021', BAJAJ_AUTO: '99926021',
-  // Energy
-  RELIANCE: '99926019', ONGC: '99926019', GAIL: '99926019', BPCL: '99926019', IOC: '99926019',
-  HINDPETRO: '99926019', NTPC: '99926019', POWERGRID: '99926019',
-  // Metals
-  TATASTEEL: '99926023', HINDALCO: '99926023', JSWSTEEL: '99926023', VEDL: '99926023',
-  HINDCOPPER: '99926023', HINDZINC: '99926023',
-  // Pharma
-  SUNPHARMA: '99926017', DIVISLAB: '99926017', DRREDDY: '99926017', CIPLA: '99926017',
-  // FMCG
-  HINDUNILVR: '99926015', ITC: '99926015', NESTLEIND: '99926015', BRITANNIA: '99926015',
-};
-
 const NIFTY_TOKEN = '99926000';
 const NIFTY_EXCHANGE = 'NSE';
 
@@ -61,10 +38,13 @@ const LOT_BAND_THRESHOLDS = [50, 65, 80] as const;
 export class ChartinkScoringService {
   private readonly logger = new Logger(ChartinkScoringService.name);
 
-  constructor(private readonly adapter: AngelOneAdapterService) {}
+  constructor(
+    private readonly adapter: AngelOneAdapterService,
+    private readonly nseSectors: NseSectorIndexService,
+  ) {}
 
   /**
-   * Score a Chartink setup against the 9-check table. Returns score 0-100
+   * Score a Chartink setup against the 10-check table. Returns score 0-100
    * plus per-check breakdown. Never throws — failed checks return points=0
    * with detail.error.
    */
@@ -72,8 +52,10 @@ export class ChartinkScoringService {
     const checks: ScoreCheckResult[] = [];
 
     // Run checks sequentially to respect the 350ms broker rate-limit pacer.
-    // Total worst case: 9 * 350ms = ~3.15s per setup. Acceptable for now.
+    // Total worst case: 10 * 350ms = ~3.5s per setup. Acceptable for now.
     checks.push(await this.checkSectorAligned(input));
+    await this.sleep(350);
+    checks.push(await this.checkRelativeStrength(input));
     await this.sleep(350);
     checks.push(await this.checkIndexAligned(input));
     await this.sleep(350);
@@ -107,26 +89,77 @@ export class ChartinkScoringService {
 
   private async checkSectorAligned(input: ScoringInput): Promise<ScoreCheckResult> {
     const name = 'Sector aligned';
-    const pointsPossible = 20;
-    const sectorToken = STOCK_TO_SECTOR_INDEX[input.symbol.toUpperCase()];
+    const pointsPossible = 10;
+    const sectorToken = this.nseSectors.getSectorIndexForSymbol(input.symbol);
     if (!sectorToken) {
       return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'no sector mapping' } };
     }
     try {
-      const candles = await this.fetch15mCandles(sectorToken, 'NSE', 25);
-      if (candles.length < 21) {
+      const candles = await this.fetch15mCandles(sectorToken, 'NSE', 30);
+      const closes = candles.map((c) => c.close);
+      const trend = this.classifyTrend(closes);
+      if (!trend) {
         return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient sector candles' } };
       }
-      const closes = candles.map((c) => c.close);
-      const ema20 = ema(closes, 20);
-      const lastClose = closes[closes.length - 1];
-      if (ema20 === null) {
-        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'ema20 null' } };
-      }
-      const passed = input.side === 'BUY' ? lastClose > ema20 : lastClose < ema20;
+      const expected = input.side === 'BUY' ? 'UP' : 'DOWN';
+      const passed = trend.direction === expected;
       return {
         name, points: passed ? pointsPossible : 0, pointsPossible, passed,
-        detail: { sectorToken, lastClose, ema20 },
+        detail: {
+          sectorToken,
+          sectorTrend: trend.direction,
+          closeLast: trend.closeLast,
+          emaNow: trend.emaNow,
+          emaThen: trend.emaThen,
+        },
+      };
+    } catch (err) {
+      return { name, points: 0, pointsPossible, passed: false, detail: { error: errMsg(err) } };
+    }
+  }
+
+  /**
+   * Relative strength of stock vs its sector over 20 × 15m bars (~5 hours).
+   *   stockReturn = (stock.close[now] - stock.close[then]) / stock.close[then]
+   *   sectorReturn = same for sector
+   *   RS = stockReturn - sectorReturn   (additive RS, in fractional units)
+   *
+   * BUY passes if RS > 0 (stock outperforming sector).
+   * SELL passes if RS < 0 (stock underperforming sector).
+   */
+  private async checkRelativeStrength(input: ScoringInput): Promise<ScoreCheckResult> {
+    const name = 'Relative strength';
+    const pointsPossible = 10;
+    const sectorToken = this.nseSectors.getSectorIndexForSymbol(input.symbol);
+    if (!sectorToken) {
+      return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'no sector mapping' } };
+    }
+    try {
+      const lookback = 20; // bars
+      const stockCandles = await this.fetch15mCandles(input.token, input.exchange, lookback + 2);
+      const sectorCandles = await this.fetch15mCandles(sectorToken, 'NSE', lookback + 2);
+      if (stockCandles.length < lookback || sectorCandles.length < lookback) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient candles' } };
+      }
+      const sNow = stockCandles[stockCandles.length - 1].close;
+      const sThen = stockCandles[stockCandles.length - lookback].close;
+      const iNow = sectorCandles[sectorCandles.length - 1].close;
+      const iThen = sectorCandles[sectorCandles.length - lookback].close;
+      if (sThen === 0 || iThen === 0) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'zero baseline' } };
+      }
+      const stockReturn = (sNow - sThen) / sThen;
+      const sectorReturn = (iNow - iThen) / iThen;
+      const rs = stockReturn - sectorReturn;
+      const passed = input.side === 'BUY' ? rs > 0 : rs < 0;
+      return {
+        name, points: passed ? pointsPossible : 0, pointsPossible, passed,
+        detail: {
+          stockReturn: +(stockReturn * 100).toFixed(2),
+          sectorReturn: +(sectorReturn * 100).toFixed(2),
+          rs: +(rs * 100).toFixed(2),
+          lookbackBars: lookback,
+        },
       };
     } catch (err) {
       return { name, points: 0, pointsPossible, passed: false, detail: { error: errMsg(err) } };
@@ -140,20 +173,22 @@ export class ChartinkScoringService {
       return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'setup is on the index itself' } };
     }
     try {
-      const candles = await this.fetch15mCandles(NIFTY_TOKEN, NIFTY_EXCHANGE, 25);
-      if (candles.length < 21) {
+      const candles = await this.fetch15mCandles(NIFTY_TOKEN, NIFTY_EXCHANGE, 30);
+      const closes = candles.map((c) => c.close);
+      const trend = this.classifyTrend(closes);
+      if (!trend) {
         return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient nifty candles' } };
       }
-      const closes = candles.map((c) => c.close);
-      const ema20 = ema(closes, 20);
-      const lastClose = closes[closes.length - 1];
-      if (ema20 === null) {
-        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'ema20 null' } };
-      }
-      const passed = input.side === 'BUY' ? lastClose > ema20 : lastClose < ema20;
+      const expected = input.side === 'BUY' ? 'UP' : 'DOWN';
+      const passed = trend.direction === expected;
       return {
         name, points: passed ? pointsPossible : 0, pointsPossible, passed,
-        detail: { lastClose, ema20 },
+        detail: {
+          niftyTrend: trend.direction,
+          closeLast: trend.closeLast,
+          emaNow: trend.emaNow,
+          emaThen: trend.emaThen,
+        },
       };
     } catch (err) {
       return { name, points: 0, pointsPossible, passed: false, detail: { error: errMsg(err) } };
@@ -193,17 +228,22 @@ export class ChartinkScoringService {
     const pointsPossible = 10;
     try {
       const candles = await this.fetch15mCandles(input.token, input.exchange, 30);
-      if (candles.length < 21) {
+      const closes = candles.map((c) => c.close);
+      const trend = this.classifyTrend(closes);
+      if (!trend) {
         return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient candles' } };
       }
-      const closes = candles.map((c) => c.close);
-      const ema20 = ema(closes, 20);
-      const lastClose = closes[closes.length - 1];
-      if (ema20 === null) {
-        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'ema20 null' } };
-      }
-      const passed = input.side === 'BUY' ? lastClose > ema20 : lastClose < ema20;
-      return { name, points: passed ? pointsPossible : 0, pointsPossible, passed, detail: { lastClose, ema20 } };
+      const expected = input.side === 'BUY' ? 'UP' : 'DOWN';
+      const passed = trend.direction === expected;
+      return {
+        name, points: passed ? pointsPossible : 0, pointsPossible, passed,
+        detail: {
+          trend: trend.direction,
+          closeLast: trend.closeLast,
+          emaNow: trend.emaNow,
+          emaThen: trend.emaThen,
+        },
+      };
     } catch (err) {
       return { name, points: 0, pointsPossible, passed: false, detail: { error: errMsg(err) } };
     }
@@ -294,6 +334,34 @@ export class ChartinkScoringService {
   }
 
   // ─── Helpers ─────────────────────────────────────────────────────────
+
+  /**
+   * Robust trend check: returns 'UP' / 'DOWN' / 'INDETERMINATE'.
+   *   - UP requires: close > EMA20 AND EMA20[now] > EMA20[5 bars ago]
+   *   - DOWN requires: close < EMA20 AND EMA20[now] < EMA20[5 bars ago]
+   *   - Anything else → INDETERMINATE (line wandering or price hovering at EMA)
+   *
+   * Returns the EMA values too for diagnostic display.
+   */
+  private classifyTrend(closes: number[]): {
+    direction: 'UP' | 'DOWN' | 'INDETERMINATE';
+    closeLast: number;
+    emaNow: number | null;
+    emaThen: number | null;
+  } | null {
+    if (closes.length < 26) return null; // need 20 for EMA + 5 lookback + buffer
+    const emaNow = ema(closes, 20);
+    const emaThen = ema(closes.slice(0, -5), 20);
+    if (emaNow === null || emaThen === null) return null;
+    const closeLast = closes[closes.length - 1];
+    if (closeLast > emaNow && emaNow > emaThen) {
+      return { direction: 'UP', closeLast, emaNow, emaThen };
+    }
+    if (closeLast < emaNow && emaNow < emaThen) {
+      return { direction: 'DOWN', closeLast, emaNow, emaThen };
+    }
+    return { direction: 'INDETERMINATE', closeLast, emaNow, emaThen };
+  }
 
   private async fetchCandles(token: string, exchange: string, tf: string, lookback: number): Promise<Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>> {
     const lookbackMs = this.lookbackMsForTf(tf, lookback);
