@@ -39,18 +39,19 @@ export class ChartinkProcessService {
   }
 
   async processOne(alertId: string, hit: Hit): Promise<void> {
-    // Chartink sends bare symbols ("LLOYDSENGG"), but our local Instrument
-    // table stores them with the NSE series suffix ("LLOYDSENGG-EQ" for
-    // regular equity, "-BE" for trade-to-trade — common on micro-caps
-    // and recently-listed stocks). Try bare, then -EQ (canonical liquid
-    // equity), then -BE (trade-to-trade). Covers ~99% of NSE cash
-    // instruments. If still nothing, mark unresolved.
-    let instrument = await this.mdRepo.getInstrumentBySymbol(hit.symbol, 'NSE');
-    if (!instrument) {
-      instrument = await this.mdRepo.getInstrumentBySymbol(`${hit.symbol}-EQ`, 'NSE');
-    }
-    if (!instrument) {
-      instrument = await this.mdRepo.getInstrumentBySymbol(`${hit.symbol}-BE`, 'NSE');
+    // Chartink sends bare symbols ("LLOYDSENGG"). Our local Instrument
+    // table stores them with the NSE series suffix:
+    //   -EQ  regular liquid equity (vast majority of liquid stocks)
+    //   -BE  trade-to-trade (low-liquidity / surveillance)
+    //   -BL  block deal series (sometimes used for ETF tranches)
+    //   -IV  insurance / other special series
+    // Try bare first (defensive), then each suffix.
+    const SUFFIXES = ['', '-EQ', '-BE', '-BL', '-IV'];
+    let instrument = null as Awaited<ReturnType<typeof this.mdRepo.getInstrumentBySymbol>>;
+    for (const suffix of SUFFIXES) {
+      const lookup = suffix ? `${hit.symbol}${suffix}` : hit.symbol;
+      instrument = await this.mdRepo.getInstrumentBySymbol(lookup, 'NSE');
+      if (instrument) break;
     }
     if (!instrument) {
       await this.repo.createAlertSetup({
@@ -60,7 +61,7 @@ export class ChartinkProcessService {
         hitPrice: hit.hitPrice,
         kind: 'unresolved',
         setupId: null,
-        rejectReason: 'symbol not in local DB (tried bare, -EQ, -BE)',
+        rejectReason: `symbol not in local DB (tried ${SUFFIXES.map(s => s || 'bare').join(', ')})`,
       });
       return;
     }

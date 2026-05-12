@@ -52,7 +52,7 @@ describe('ChartinkProcessService', () => {
       hitPrice: 100,
       kind: 'unresolved',
       setupId: null,
-      rejectReason: 'symbol not in local DB',
+      rejectReason: 'symbol not in local DB (tried bare, -EQ, -BE, -BL, -IV)',
     });
     expect(signalSvc.analyze).not.toHaveBeenCalled();
   });
