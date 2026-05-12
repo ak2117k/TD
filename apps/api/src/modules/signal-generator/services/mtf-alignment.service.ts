@@ -48,30 +48,44 @@ export class MtfAlignmentService {
       if (i < TIMEFRAMES.length - 1) await this.sleep(RATE_LIMIT_MS);
     }
 
-    // Alignment semantics: NEUTRAL is a silent voter (insufficient data or
-    // exactly equal closes — no opinion). We require at least 2 of the 4
-    // timeframes to have an actual opinion (non-NEUTRAL), and all
-    // opinionated timeframes must agree (no UP-vs-DOWN conflict).
+    // Two-tier alignment:
     //
-    // Why: the strict "all 4 agree" rule was unusable in the first 30 min
-    // of the trading session because the 15m timeframe needs two completed
-    // bars (30 min of data) before it can compute direction. Treating
-    // insufficient-data NEUTRAL as a blocker effectively shut the gate for
-    // every pre-10:00 IST scanner fire. Silent NEUTRALs preserve the
-    // genuine-conflict rejection (the gate's whole point) while letting
-    // legitimate single-direction consensus through earlier in the session.
+    //  TIER A (primary): 1d AND 1h both have the same non-NEUTRAL direction.
+    //  This is the strongest signal — longer timeframes carry more weight
+    //  than 15m/5m noise. Most gap-up scanners produce hits that look like
+    //  `1d=UP 1h=UP 15m=DOWN 5m=DOWN` (gap-up overnight + intraday pullback
+    //  on open). The old "no UP/DOWN conflict" rule rejected these — but
+    //  the 1d+1h consensus says the bigger trend is UP, and analyze()'s
+    //  own deeper gates (regime, R:R, round-numbers) should make the final
+    //  call, not us rejecting at the structural level.
+    //
+    //  TIER B (fallback for swing setups): no Tier A agreement, but ≥2 of
+    //  the 4 TFs have an opinion and they all agree (no UP-vs-DOWN
+    //  conflict). This is the prior rule, kept for cases where 1d/1h are
+    //  NEUTRAL but 15m+5m agree (e.g., low-volume stock with sparse
+    //  daily/hourly data).
+    const d1d = directions['1d'];
+    const d1h = directions['1h'];
+    const primaryAlignedUp = d1d === 'UP' && d1h === 'UP';
+    const primaryAlignedDown = d1d === 'DOWN' && d1h === 'DOWN';
+    const primaryAligned = primaryAlignedUp || primaryAlignedDown;
+
     const values = Object.values(directions);
     const upCount = values.filter((d) => d === 'UP').length;
     const downCount = values.filter((d) => d === 'DOWN').length;
     const opinionatedCount = upCount + downCount;
-    // Need ≥ 2 opinions AND no UP-vs-DOWN conflict. Both checks are needed:
-    // 4 NEUTRALs would pass "no conflict" but should still reject.
-    const aligned = opinionatedCount >= 2 && (upCount === 0 || downCount === 0);
-    const agreedDirection: 'UP' | 'DOWN' | null = aligned
-      ? upCount > 0
+    const secondaryAligned = opinionatedCount >= 2 && (upCount === 0 || downCount === 0);
+
+    const aligned = primaryAligned || secondaryAligned;
+    const agreedDirection: 'UP' | 'DOWN' | null = !aligned
+      ? null
+      : primaryAlignedUp
         ? 'UP'
-        : 'DOWN'
-      : null;
+        : primaryAlignedDown
+          ? 'DOWN'
+          : upCount > 0
+            ? 'UP'
+            : 'DOWN';
 
     const summary = TIMEFRAMES.map((tf) => `${tf}=${directions[tf]}`).join(' ');
 
