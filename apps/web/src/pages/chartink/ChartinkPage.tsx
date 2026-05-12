@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { listScanners, listAlerts, getAlert } from '@/services/chartink';
 import type { ChartinkScanner, ChartinkAlert } from '@/types';
+import ChartinkScoreTable from '@/components/chartink/ChartinkScoreTable';
 
 const REFRESH_MS = 30_000;
 
@@ -24,6 +25,15 @@ function fmtKindCount(setups: ChartinkAlert['setups']): string {
   if (counts.unresolved) parts.push(`${counts.unresolved} unresolved`);
   if (counts.error) parts.push(`${counts.error} error`);
   return parts.length ? parts.join(' · ') : '—';
+}
+
+function fmtAlertScore(setups: ChartinkAlert['setups']): string {
+  const scored = (setups ?? []).filter((s) => typeof s.score === 'number');
+  if (scored.length === 0) return '—';
+  const max = Math.max(...scored.map((s) => s.score as number));
+  const maxSetup = scored.find((s) => s.score === max);
+  const lots = maxSetup?.lotCount ?? 0;
+  return `${max}/100 (${lots} lot${lots !== 1 ? 's' : ''})`;
 }
 
 export default function ChartinkPage() {
@@ -118,6 +128,7 @@ export default function ChartinkPage() {
                 <th className="px-3 py-2">Triggered</th>
                 <th className="px-3 py-2">Received delta</th>
                 <th className="px-3 py-2">Outcomes</th>
+                <th className="px-3 py-2">Score</th>
               </tr>
             </thead>
             <tbody>
@@ -138,6 +149,7 @@ export default function ChartinkPage() {
                     {fmtDelta(a.receivedAt, a.triggeredAt)}
                   </td>
                   <td className="px-3 py-2">{fmtKindCount(a.setups)}</td>
+                  <td className="px-3 py-2 tabular-nums">{fmtAlertScore(a.setups)}</td>
                 </tr>
               ))}
             </tbody>
@@ -162,30 +174,43 @@ export default function ChartinkPage() {
               </thead>
               <tbody>
                 {(selectedAlert.setups ?? []).map((s) => (
-                  <tr key={s.id} className="border-t border-[var(--color-border-subtle)]">
-                    <td className="px-3 py-2 font-mono">{s.symbol}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{s.hitPrice.toFixed(2)}</td>
-                    <td
-                      className={clsx(
-                        'px-3 py-2 font-semibold uppercase tracking-wider',
-                        s.kind === 'setup' && 'text-emerald-400',
-                        s.kind === 'no-setup' && 'text-amber-400',
-                        s.kind === 'unresolved' && 'text-gray-400',
-                        s.kind === 'error' && 'text-red-400',
-                      )}
-                    >
-                      {s.kind}
-                    </td>
-                    <td className="px-3 py-2 text-[var(--color-text-muted)]">
-                      {s.setupId ? (
-                        <a href={`/signals?signalId=${s.setupId}`} className="hover:underline">
-                          → setup {s.setupId}
-                        </a>
-                      ) : (
-                        s.rejectReason ?? '—'
-                      )}
-                    </td>
-                  </tr>
+                  <React.Fragment key={s.id}>
+                    <tr className="border-t border-[var(--color-border-subtle)]">
+                      <td className="px-3 py-2 font-mono">{s.symbol}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{s.hitPrice.toFixed(2)}</td>
+                      <td
+                        className={clsx(
+                          'px-3 py-2 font-semibold uppercase tracking-wider',
+                          s.kind === 'setup' && 'text-emerald-400',
+                          s.kind === 'no-setup' && 'text-amber-400',
+                          s.kind === 'unresolved' && 'text-gray-400',
+                          s.kind === 'error' && 'text-red-400',
+                        )}
+                      >
+                        {s.kind}
+                      </td>
+                      <td className="px-3 py-2 text-[var(--color-text-muted)]">
+                        {s.setupId ? (
+                          <a href={`/signals?signalId=${s.setupId}`} className="hover:underline">
+                            → setup {s.setupId}
+                          </a>
+                        ) : (
+                          s.rejectReason ?? '—'
+                        )}
+                      </td>
+                    </tr>
+                    {s.scoreBreakdown && typeof s.score === 'number' && typeof s.lotCount === 'number' && (
+                      <tr className="border-t border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)]/40">
+                        <td colSpan={4} className="px-3 py-2">
+                          <ChartinkScoreTable
+                            score={s.score}
+                            lotCount={s.lotCount as 0 | 1 | 2 | 3}
+                            checks={s.scoreBreakdown}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
                 ))}
               </tbody>
             </table>
