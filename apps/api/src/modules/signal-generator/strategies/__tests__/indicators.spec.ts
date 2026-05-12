@@ -1,4 +1,4 @@
-import { ema, rsi, macd, bollinger, roc } from '../indicators';
+import { ema, rsi, macd, bollinger, roc, atr, supertrend } from '../indicators';
 
 describe('indicators', () => {
   describe('ema', () => {
@@ -114,6 +114,49 @@ describe('indicators', () => {
     it('returns negative for a drawdown', () => {
       const closes = [100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 90];
       expect(roc(closes, 10)).toBeCloseTo(-10, 6);
+    });
+  });
+
+  describe('atr', () => {
+    it('returns null for insufficient candles', () => {
+      expect(atr([1, 2], [0.5, 1], [0.8, 1.5], 14)).toBeNull();
+    });
+
+    it('computes ATR for a 14-bar rising series', () => {
+      const n = 30;
+      const h = Array.from({ length: n }, (_, i) => 100 + i);
+      const l = Array.from({ length: n }, (_, i) => 99 + i);
+      const c = Array.from({ length: n }, (_, i) => 99.5 + i);
+      const v = atr(h, l, c, 14);
+      expect(v).not.toBeNull();
+      expect(v!).toBeGreaterThan(0);
+      expect(v!).toBeLessThan(5); // small range, ATR should be modest
+    });
+  });
+
+  describe('supertrend', () => {
+    it('returns null for insufficient candles', () => {
+      expect(supertrend([1, 2], [0.5, 1], [0.8, 1.5])).toBeNull();
+    });
+
+    it('reports UP direction for a strongly rising series', () => {
+      const n = 30;
+      const h = Array.from({ length: n }, (_, i) => 100 + i * 2);
+      const l = Array.from({ length: n }, (_, i) => 99 + i * 2);
+      const c = Array.from({ length: n }, (_, i) => 99.5 + i * 2);
+      const r = supertrend(h, l, c, 10, 3);
+      expect(r).not.toBeNull();
+      expect(r!.direction).toBe('UP');
+    });
+
+    it('reports DOWN direction for a strongly falling series', () => {
+      const n = 30;
+      const h = Array.from({ length: n }, (_, i) => 200 - i * 2);
+      const l = Array.from({ length: n }, (_, i) => 199 - i * 2);
+      const c = Array.from({ length: n }, (_, i) => 199.5 - i * 2);
+      const r = supertrend(h, l, c, 10, 3);
+      expect(r).not.toBeNull();
+      expect(r!.direction).toBe('DOWN');
     });
   });
 });
