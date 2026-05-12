@@ -17,6 +17,7 @@ import { MarketContextService } from './services/market-context.service';
 import { CommodityRollService } from './services/commodity-roll.service';
 import { CommodityRollCron } from './services/commodity-roll.cron';
 import { GapDetectorService } from './services/gap-detector.service';
+import { NseSectorIndexService } from './services/nse-sector-index.service';
 import { OptionsChainModule } from '../options-chain/options-chain.module';
 // LevelBookService comes from SignalGeneratorModule which is @Global —
 // no import needed here. Importing the module would create a bootstrap
@@ -74,6 +75,13 @@ import { OptionsChainModule } from '../options-chain/options-chain.module';
     // auto-backfills the gap. Safety net for the daily-backfill cron.
     GapDetectorService,
 
+    // Daily 06:00 IST cron — pulls sector-index constituent CSVs from
+    // archives.nseindia.com and builds a symbol → sector-token map.
+    // Replaces the hardcoded ~40-symbol map in ChartinkScoringService
+    // with dynamic ~150+ stock coverage. Falls back to static map if NSE
+    // unreachable; preserves last good map on transient outages.
+    NseSectorIndexService,
+
     // Wire the Angel One adapter as the broker adapter
     {
       provide: BROKER_ADAPTER_TOKEN,
@@ -90,6 +98,7 @@ import { OptionsChainModule } from '../options-chain/options-chain.module';
     AngelOneAdapterService,
     YahooFinanceService,
     MarketContextService,
+    NseSectorIndexService,
     BROKER_ADAPTER_TOKEN,
   ],
 })
