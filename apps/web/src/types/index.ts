@@ -282,6 +282,15 @@ export interface ChartinkAlertSetup {
   setupId: string | null;
   rejectReason: string | null;
   processedAt: string;
+  score?: number | null;
+  lotCount?: 0 | 1 | 2 | 3 | null;
+  scoreBreakdown?: Array<{
+    name: string;
+    points: number;
+    pointsPossible: number;
+    passed: boolean;
+    detail?: Record<string, unknown>;
+  }> | null;
 }
 
 export interface ChartinkAlert {
