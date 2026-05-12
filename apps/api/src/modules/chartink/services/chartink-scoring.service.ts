@@ -1,0 +1,336 @@
+// apps/api/src/modules/chartink/services/chartink-scoring.service.ts
+import { Injectable, Logger } from '@nestjs/common';
+import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
+import { ema, macd, atr, supertrend } from '../../signal-generator/strategies/indicators';
+
+export type SetupSide = 'BUY' | 'SELL';
+
+export interface ScoreCheckResult {
+  name: string;
+  points: number;
+  pointsPossible: number;
+  passed: boolean;
+  detail?: Record<string, unknown>;
+}
+
+export interface ScoringInput {
+  token: string;
+  symbol: string;
+  exchange: string;
+  side: SetupSide;
+  entryPrice: number;
+  setupContext?: { levelBookSnapshot?: { pdh: number; pdl: number; orh: number | null; orl: number | null; vwap: number } } | null;
+}
+
+export interface ScoringResult {
+  score: number;
+  lotCount: 0 | 1 | 2 | 3;
+  checks: ScoreCheckResult[];
+}
+
+// Static stock → sector-index map. Seeded from SECTOR_INDICES. Sized for the
+// liquid-stock universe we trade. Stocks not in this map fail check #1 with
+// detail.reason = 'no sector mapping'.
+const STOCK_TO_SECTOR_INDEX: Record<string, string> = {
+  // Banks / FinServ
+  HDFCBANK: '99926009', ICICIBANK: '99926009', SBIN: '99926009', AXISBANK: '99926009',
+  KOTAKBANK: '99926009', INDUSINDBK: '99926009', BAJFINANCE: '99926011',
+  // IT
+  TCS: '99926013', INFY: '99926013', WIPRO: '99926013', HCLTECH: '99926013',
+  TECHM: '99926013', LTIM: '99926013',
+  // Auto
+  MARUTI: '99926021', TATAMOTORS: '99926021', M_M: '99926021', BAJAJ_AUTO: '99926021',
+  // Energy
+  RELIANCE: '99926019', ONGC: '99926019', GAIL: '99926019', BPCL: '99926019', IOC: '99926019',
+  HINDPETRO: '99926019', NTPC: '99926019', POWERGRID: '99926019',
+  // Metals
+  TATASTEEL: '99926023', HINDALCO: '99926023', JSWSTEEL: '99926023', VEDL: '99926023',
+  HINDCOPPER: '99926023', HINDZINC: '99926023',
+  // Pharma
+  SUNPHARMA: '99926017', DIVISLAB: '99926017', DRREDDY: '99926017', CIPLA: '99926017',
+  // FMCG
+  HINDUNILVR: '99926015', ITC: '99926015', NESTLEIND: '99926015', BRITANNIA: '99926015',
+};
+
+const NIFTY_TOKEN = '99926000';
+const NIFTY_EXCHANGE = 'NSE';
+
+const LOT_BAND_THRESHOLDS = [50, 65, 80] as const;
+
+@Injectable()
+export class ChartinkScoringService {
+  private readonly logger = new Logger(ChartinkScoringService.name);
+
+  constructor(private readonly adapter: AngelOneAdapterService) {}
+
+  /**
+   * Score a Chartink setup against the 9-check table. Returns score 0-100
+   * plus per-check breakdown. Never throws — failed checks return points=0
+   * with detail.error.
+   */
+  async score(input: ScoringInput): Promise<ScoringResult> {
+    const checks: ScoreCheckResult[] = [];
+
+    // Run checks sequentially to respect the 350ms broker rate-limit pacer.
+    // Total worst case: 9 * 350ms = ~3.15s per setup. Acceptable for now.
+    checks.push(await this.checkSectorAligned(input));
+    await this.sleep(350);
+    checks.push(await this.checkIndexAligned(input));
+    await this.sleep(350);
+    checks.push(await this.checkMacdDaily(input));
+    await this.sleep(350);
+    checks.push(await this.checkMacdOneMin(input));
+    await this.sleep(350);
+    checks.push(await this.checkMacdFiveMin(input));
+    await this.sleep(350);
+    checks.push(await this.checkPriceVs20Ema(input));
+    await this.sleep(350);
+    checks.push(await this.checkSupertrend(input));
+    await this.sleep(350);
+    checks.push(await this.checkSrRoom(input));
+    await this.sleep(350);
+    checks.push(await this.checkVolume(input));
+
+    const score = checks.reduce((sum, c) => sum + c.points, 0);
+    const lotCount = this.scoreToLotCount(score);
+    return { score, lotCount, checks };
+  }
+
+  scoreToLotCount(score: number): 0 | 1 | 2 | 3 {
+    if (score < LOT_BAND_THRESHOLDS[0]) return 0;
+    if (score < LOT_BAND_THRESHOLDS[1]) return 1;
+    if (score < LOT_BAND_THRESHOLDS[2]) return 2;
+    return 3;
+  }
+
+  // ─── Individual checks ──────────────────────────────────────────────────
+
+  private async checkSectorAligned(input: ScoringInput): Promise<ScoreCheckResult> {
+    const name = 'Sector aligned';
+    const pointsPossible = 20;
+    const sectorToken = STOCK_TO_SECTOR_INDEX[input.symbol.toUpperCase()];
+    if (!sectorToken) {
+      return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'no sector mapping' } };
+    }
+    try {
+      const candles = await this.fetch15mCandles(sectorToken, 'NSE', 25);
+      if (candles.length < 21) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient sector candles' } };
+      }
+      const closes = candles.map((c) => c.close);
+      const ema20 = ema(closes, 20);
+      const lastClose = closes[closes.length - 1];
+      if (ema20 === null) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'ema20 null' } };
+      }
+      const passed = input.side === 'BUY' ? lastClose > ema20 : lastClose < ema20;
+      return {
+        name, points: passed ? pointsPossible : 0, pointsPossible, passed,
+        detail: { sectorToken, lastClose, ema20 },
+      };
+    } catch (err) {
+      return { name, points: 0, pointsPossible, passed: false, detail: { error: errMsg(err) } };
+    }
+  }
+
+  private async checkIndexAligned(input: ScoringInput): Promise<ScoreCheckResult> {
+    const name = 'Index aligned';
+    const pointsPossible = 20;
+    if (input.token === NIFTY_TOKEN) {
+      return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'setup is on the index itself' } };
+    }
+    try {
+      const candles = await this.fetch15mCandles(NIFTY_TOKEN, NIFTY_EXCHANGE, 25);
+      if (candles.length < 21) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient nifty candles' } };
+      }
+      const closes = candles.map((c) => c.close);
+      const ema20 = ema(closes, 20);
+      const lastClose = closes[closes.length - 1];
+      if (ema20 === null) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'ema20 null' } };
+      }
+      const passed = input.side === 'BUY' ? lastClose > ema20 : lastClose < ema20;
+      return {
+        name, points: passed ? pointsPossible : 0, pointsPossible, passed,
+        detail: { lastClose, ema20 },
+      };
+    } catch (err) {
+      return { name, points: 0, pointsPossible, passed: false, detail: { error: errMsg(err) } };
+    }
+  }
+
+  private async checkMacdAtTf(
+    input: ScoringInput, tf: '1d' | '1m' | '5m', pointsPossible: number, lookback: number,
+  ): Promise<ScoreCheckResult> {
+    const name = `MACD on ${tf}`;
+    try {
+      const candles = await this.fetchCandles(input.token, input.exchange, tf, lookback);
+      if (candles.length < 35) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient candles' } };
+      }
+      const closes = candles.map((c) => c.close);
+      const m = macd(closes);
+      if (!m || m.macd === null || m.signal === null) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'macd null' } };
+      }
+      const passed = input.side === 'BUY' ? m.macd > m.signal : m.macd < m.signal;
+      return {
+        name, points: passed ? pointsPossible : 0, pointsPossible, passed,
+        detail: { macd: m.macd, signal: m.signal },
+      };
+    } catch (err) {
+      return { name, points: 0, pointsPossible, passed: false, detail: { error: errMsg(err) } };
+    }
+  }
+
+  private checkMacdDaily(input: ScoringInput) { return this.checkMacdAtTf(input, '1d', 10, 50); }
+  private checkMacdOneMin(input: ScoringInput) { return this.checkMacdAtTf(input, '1m', 7, 60); }
+  private checkMacdFiveMin(input: ScoringInput) { return this.checkMacdAtTf(input, '5m', 8, 60); }
+
+  private async checkPriceVs20Ema(input: ScoringInput): Promise<ScoreCheckResult> {
+    const name = 'Price vs 20-EMA';
+    const pointsPossible = 10;
+    try {
+      const candles = await this.fetch15mCandles(input.token, input.exchange, 30);
+      if (candles.length < 21) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient candles' } };
+      }
+      const closes = candles.map((c) => c.close);
+      const ema20 = ema(closes, 20);
+      const lastClose = closes[closes.length - 1];
+      if (ema20 === null) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'ema20 null' } };
+      }
+      const passed = input.side === 'BUY' ? lastClose > ema20 : lastClose < ema20;
+      return { name, points: passed ? pointsPossible : 0, pointsPossible, passed, detail: { lastClose, ema20 } };
+    } catch (err) {
+      return { name, points: 0, pointsPossible, passed: false, detail: { error: errMsg(err) } };
+    }
+  }
+
+  private async checkSupertrend(input: ScoringInput): Promise<ScoreCheckResult> {
+    const name = 'SuperTrend match';
+    const pointsPossible = 10;
+    try {
+      const candles = await this.fetch15mCandles(input.token, input.exchange, 30);
+      if (candles.length < 11) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient candles' } };
+      }
+      const highs = candles.map((c) => c.high);
+      const lows = candles.map((c) => c.low);
+      const closes = candles.map((c) => c.close);
+      const st = supertrend(highs, lows, closes, 10, 3);
+      if (!st) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'supertrend null' } };
+      }
+      const passed = input.side === 'BUY' ? st.direction === 'UP' : st.direction === 'DOWN';
+      return { name, points: passed ? pointsPossible : 0, pointsPossible, passed, detail: { value: st.value, direction: st.direction } };
+    } catch (err) {
+      return { name, points: 0, pointsPossible, passed: false, detail: { error: errMsg(err) } };
+    }
+  }
+
+  private async checkSrRoom(input: ScoringInput): Promise<ScoreCheckResult> {
+    const name = 'S/R room';
+    const pointsPossible = 10;
+    const lb = input.setupContext?.levelBookSnapshot;
+    if (!lb) {
+      return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'no level book' } };
+    }
+    try {
+      const candles = await this.fetch15mCandles(input.token, input.exchange, 50);
+      if (candles.length < 21) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient candles for ATR' } };
+      }
+      const highs = candles.map((c) => c.high);
+      const lows = candles.map((c) => c.low);
+      const closes = candles.map((c) => c.close);
+      const atr20 = atr(highs, lows, closes, 20);
+      if (atr20 === null || atr20 <= 0) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'atr null/zero' } };
+      }
+      // Find nearest opposing S/R
+      let nextBlocker: number | null = null;
+      if (input.side === 'BUY') {
+        const candidates = [lb.pdh, lb.orh].filter((x): x is number => typeof x === 'number' && x > input.entryPrice);
+        nextBlocker = candidates.length > 0 ? Math.min(...candidates) : null;
+      } else {
+        const candidates = [lb.pdl, lb.orl].filter((x): x is number => typeof x === 'number' && x < input.entryPrice);
+        nextBlocker = candidates.length > 0 ? Math.max(...candidates) : null;
+      }
+      if (nextBlocker === null) {
+        return { name, points: pointsPossible, pointsPossible, passed: true, detail: { reason: 'no opposing S/R within snapshot — full room' } };
+      }
+      const room = Math.abs(nextBlocker - input.entryPrice);
+      const ratio = room / atr20;
+      const passed = ratio >= 0.4;
+      return { name, points: passed ? pointsPossible : 0, pointsPossible, passed, detail: { entryPrice: input.entryPrice, nextBlocker, atr20, ratio } };
+    } catch (err) {
+      return { name, points: 0, pointsPossible, passed: false, detail: { error: errMsg(err) } };
+    }
+  }
+
+  private async checkVolume(input: ScoringInput): Promise<ScoreCheckResult> {
+    const name = 'Volume confirmation';
+    const pointsPossible = 5;
+    try {
+      const todayCandles = await this.fetchCandles(input.token, input.exchange, '5m', 100);
+      const dailyCandles = await this.fetchCandles(input.token, input.exchange, '1d', 25);
+      if (dailyCandles.length < 20) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient daily candles' } };
+      }
+      const todayVol = todayCandles.reduce((sum, c) => sum + (c.volume || 0), 0);
+      const avgDaily = dailyCandles.slice(-20).reduce((s, c) => s + (c.volume || 0), 0) / 20;
+      if (avgDaily === 0) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'avg daily volume zero' } };
+      }
+      const ratio = todayVol / avgDaily;
+      const passed = ratio > 1.2;
+      return { name, points: passed ? pointsPossible : 0, pointsPossible, passed, detail: { todayVol, avgDaily, ratio } };
+    } catch (err) {
+      return { name, points: 0, pointsPossible, passed: false, detail: { error: errMsg(err) } };
+    }
+  }
+
+  // ─── Helpers ─────────────────────────────────────────────────────────
+
+  private async fetchCandles(token: string, exchange: string, tf: string, lookback: number): Promise<Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>> {
+    const lookbackMs = this.lookbackMsForTf(tf, lookback);
+    const to = new Date();
+    const from = new Date(to.getTime() - lookbackMs);
+    const candles = (await this.adapter.getHistoricalData(token, exchange, tf, from, to)) as any[];
+    return candles.map((c) => ({
+      timestamp: c.timestamp instanceof Date ? c.timestamp : new Date(c.timestamp),
+      open: Number(c.open),
+      high: Number(c.high),
+      low: Number(c.low),
+      close: Number(c.close),
+      volume: Number(c.volume) || 0,
+    }));
+  }
+
+  private fetch15mCandles(token: string, exchange: string, n: number) {
+    return this.fetchCandles(token, exchange, '15m', n);
+  }
+
+  private lookbackMsForTf(tf: string, count: number): number {
+    const perBar: Record<string, number> = {
+      '1m': 60_000,
+      '5m': 5 * 60_000,
+      '15m': 15 * 60_000,
+      '1h': 60 * 60_000,
+      '1d': 24 * 60 * 60_000,
+    };
+    // Wide buffer (3x) since holidays and gaps eat into the window
+    return (perBar[tf] ?? 15 * 60_000) * count * 3;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+}
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
