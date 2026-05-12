@@ -95,7 +95,7 @@ export class ChartinkScoringService {
       return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'no sector mapping' } };
     }
     try {
-      const candles = await this.fetch15mCandles(sectorToken, 'NSE', 30);
+      const candles = await this.fetch15mCandles(sectorToken, 'NSE', 50);
       const closes = candles.map((c) => c.close);
       const trend = this.classifyTrend(closes);
       if (!trend) {
@@ -173,7 +173,7 @@ export class ChartinkScoringService {
       return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'setup is on the index itself' } };
     }
     try {
-      const candles = await this.fetch15mCandles(NIFTY_TOKEN, NIFTY_EXCHANGE, 30);
+      const candles = await this.fetch15mCandles(NIFTY_TOKEN, NIFTY_EXCHANGE, 50);
       const closes = candles.map((c) => c.close);
       const trend = this.classifyTrend(closes);
       if (!trend) {
@@ -227,7 +227,7 @@ export class ChartinkScoringService {
     const name = 'Price vs 20-EMA';
     const pointsPossible = 10;
     try {
-      const candles = await this.fetch15mCandles(input.token, input.exchange, 30);
+      const candles = await this.fetch15mCandles(input.token, input.exchange, 50);
       const closes = candles.map((c) => c.close);
       const trend = this.classifyTrend(closes);
       if (!trend) {
@@ -253,7 +253,7 @@ export class ChartinkScoringService {
     const name = 'SuperTrend match';
     const pointsPossible = 10;
     try {
-      const candles = await this.fetch15mCandles(input.token, input.exchange, 30);
+      const candles = await this.fetch15mCandles(input.token, input.exchange, 50);
       if (candles.length < 11) {
         return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient candles' } };
       }
