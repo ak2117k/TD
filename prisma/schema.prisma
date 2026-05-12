@@ -491,6 +491,10 @@ model ChartinkAlertSetup {
   rejectReason  String?
   processedAt   DateTime       @default(now())
 
+  score          Int?
+  lotCount       Int?
+  scoreBreakdown Json?
+
   @@index([alertId])
   @@index([token])
   @@map("chartink_alert_setups")
