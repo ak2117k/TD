@@ -267,8 +267,11 @@ export function useChartData(): UseChartDataReturn {
     if (!selectedSymbol.token || selectedSymbol.token === '0') return;
     api
       .post(
+        // Empty {} body — axios sends `null` otherwise, which Express
+        // body-parser rejects with strict-mode "not valid JSON" → 400.
+        // The endpoint has no @Body() decorator; the empty object is ignored.
         `/market-data/instruments/${selectedSymbol.token}/watch`,
-        null,
+        {},
         { params: { exchange: selectedSymbol.exchange } },
       )
       .catch(() => {
