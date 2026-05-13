@@ -86,9 +86,23 @@ const TIMEFRAME_MAX_RANGE_DAYS: Record<string, number> = {
 /** Pacing between chunked historical calls — Angel One historical limit is 3 req/sec; 350ms keeps us under. */
 const HISTORICAL_CHUNK_PACE_MS = 350;
 
+/** Minimum gap between ANY two historical calls (across all callers). 3 req/sec hard cap → 350ms. */
+const HISTORICAL_MIN_GAP_MS = 350;
+
 @Injectable()
 export class AngelOneAdapterService implements BrokerAdapter {
   private readonly logger = new Logger(AngelOneAdapterService.name);
+
+  /**
+   * Serialized promise chain for ALL historical SmartAPI calls (across all
+   * callers). Without this, multiple concurrent fetches (scoring's ~8-10
+   * back-to-back calls) can saturate Angel One's 3 req/sec hard cap; Angel
+   * silently returns empty data when exceeded. The chunker's own pacer
+   * only serializes WITHIN one getHistoricalData call — this one serializes
+   * BETWEEN all calls.
+   */
+  private historicalChain: Promise<unknown> = Promise.resolve();
+  private lastHistoricalCallAt = 0;
 
   /**
    * Most-recent tick per token captured directly off the WebSocket feed.
@@ -617,13 +631,15 @@ export class AngelOneAdapterService implements BrokerAdapter {
         `Fetching historical data: token=${token} exchange=${exchange} interval=${interval} ${fromStr} to ${toStr}`,
       );
 
-      const response = await smartApi.getCandleData({
-        exchange,
-        symboltoken: token,
-        interval,
-        fromdate: fromStr,
-        todate: toStr,
-      });
+      const response: any = await this.serializeHistoricalCall<any>(() =>
+        smartApi.getCandleData({
+          exchange,
+          symboltoken: token,
+          interval,
+          fromdate: fromStr,
+          todate: toStr,
+        }),
+      );
 
       if (!response?.data) {
         return [];
@@ -1039,6 +1055,26 @@ export class AngelOneAdapterService implements BrokerAdapter {
   /**
    * Format a Date to the string format expected by Angel One: "YYYY-MM-DD HH:mm"
    */
+  /**
+   * Serialize a historical SmartAPI call so AT MOST one is in-flight at a
+   * time AND a minimum gap is enforced between consecutive calls (across
+   * all callers). Prevents Angel One's 3 req/sec hard cap from silently
+   * dropping bursts (e.g. scoring's 8-10 calls in succession).
+   */
+  private serializeHistoricalCall<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.historicalChain.then(async () => {
+      const elapsed = Date.now() - this.lastHistoricalCallAt;
+      const wait = Math.max(0, HISTORICAL_MIN_GAP_MS - elapsed);
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+      this.lastHistoricalCallAt = Date.now();
+      return fn();
+    });
+    // Don't propagate errors into the chain — one failed call must not
+    // permanently block subsequent ones.
+    this.historicalChain = next.catch(() => undefined);
+    return next;
+  }
+
   private formatDateTime(date: Date): string {
     const y = date.getFullYear();
     const m = String(date.getMonth() + 1).padStart(2, '0');

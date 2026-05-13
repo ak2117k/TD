@@ -51,6 +51,13 @@ export class ChartinkScoringService {
   async score(input: ScoringInput): Promise<ScoringResult> {
     const checks: ScoreCheckResult[] = [];
 
+    // Reset the per-scoring-run candle cache. Each (token, exchange, tf) tuple
+    // is fetched at most once per score() call — typical scoring run makes
+    // 8-10 fetches with 3-4 duplicates (e.g. stock 15m used by Sector-RS,
+    // Price-vs-EMA, and SuperTrend). Cache cuts to ~5-6 unique fetches.
+    // Safe because Bull's chartink-process worker runs serially (concurrency=1).
+    this.candleCache.clear();
+
     // Run checks sequentially to respect the 350ms broker rate-limit pacer.
     // Total worst case: 10 * 350ms = ~3.5s per setup. Acceptable for now.
     checks.push(await this.checkSectorAligned(input));
@@ -349,7 +356,32 @@ export class ChartinkScoringService {
     return classifyTrendFull(closes);
   }
 
+  /**
+   * Per-scoring-run candle cache. Keyed by (token, exchange, tf). Stores
+   * the in-flight Promise + the lookback size we fetched at — so a second
+   * caller asking for a smaller lookback can serve from the same fetch.
+   * Cleared at the start of each score() call.
+   */
+  private candleCache = new Map<string, { lookback: number; promise: Promise<Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>> }>();
+
   private async fetchCandles(token: string, exchange: string, tf: string, lookback: number): Promise<Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>> {
+    const key = `${token}:${exchange}:${tf}`;
+    const cached = this.candleCache.get(key);
+    if (cached && cached.lookback >= lookback) {
+      // Cached fetch was at least as large — slice the tail to the requested size.
+      const candles = await cached.promise;
+      return candles.slice(-lookback);
+    }
+    // Either no cache or cached lookback is smaller. Fetch fresh, sized to the
+    // larger of the two. The next caller for either size serves from cache.
+    const targetLookback = Math.max(lookback, cached?.lookback ?? 0);
+    const promise = this.fetchCandlesUncached(token, exchange, tf, targetLookback);
+    this.candleCache.set(key, { lookback: targetLookback, promise });
+    const candles = await promise;
+    return candles.slice(-lookback);
+  }
+
+  private async fetchCandlesUncached(token: string, exchange: string, tf: string, lookback: number): Promise<Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>> {
     const lookbackMs = this.lookbackMsForTf(tf, lookback);
     const to = new Date();
     const from = new Date(to.getTime() - lookbackMs);
