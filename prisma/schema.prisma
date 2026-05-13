@@ -499,3 +499,94 @@ model ChartinkAlertSetup {
   @@index([token])
   @@map("chartink_alert_setups")
 }
+
+// ============================================
+// Watch Monitor (Chartink Stage 2)
+// ============================================
+
+enum WatchStatus {
+  WATCHING
+  TRADED
+  TARGET_HIT
+  STOPPED
+  EXITED
+  DISMISSED
+}
+
+enum WatchEventType {
+  INITIAL
+  PRICE_CHANGE
+  SCORE_CHANGE
+  TARGET_HIT
+  SL_HIT_SCORE
+  SL_HIT_PRICE
+  TRADE_OPENED
+  TRADE_CLOSED
+  DISMISSED
+}
+
+model WatchEntry {
+  id                    String   @id @default(cuid())
+  alertId               String?
+  setupId               String?  @unique
+  symbol                String
+  token                 String
+  exchange              String
+  side                  String
+  initialPrice          Float
+  initialScore          Int
+  initialBreakdown      Json
+  initialAt             DateTime @default(now())
+  profitTarget          Float
+  profitTargetSource    String
+  stopLossScore         Int      @default(60)
+  status                WatchStatus @default(WATCHING)
+  currentPrice          Float?
+  currentScore          Int?
+  maxFavorable          Float?
+  maxAdverse            Float?
+  lastTickAt            DateTime?
+  lastRescoreAt         DateTime?
+  lastEventPrice        Float?
+  optionsToken          String?
+  optionsType           String?
+  optionsExpiry         DateTime?
+  optionsStrike         Float?
+  optionsLotSize        Int?
+  optionsSelectionScore Float?
+  paperTradeId          String?
+  liveTradeId           String?
+  executedAt            DateTime?
+  executedPrice         Float?
+  closedAt              DateTime?
+  closedReason          String?
+  notes                 String?
+  dismissedAt           DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  events                WatchEvent[]
+
+  @@index([status])
+  @@index([token])
+  @@index([symbol])
+  @@index([createdAt])
+  @@map("watch_entries")
+}
+
+model WatchEvent {
+  id            String         @id @default(cuid())
+  watchEntryId  String
+  watchEntry    WatchEntry     @relation(fields: [watchEntryId], references: [id], onDelete: Cascade)
+  eventType     WatchEventType
+  price         Float?
+  score         Int?
+  breakdown     Json?
+  priceDelta    Float?
+  scoreDelta    Int?
+  notes         String?
+  createdAt     DateTime       @default(now())
+
+  @@index([watchEntryId, createdAt])
+  @@index([eventType])
+  @@map("watch_events")
+}
