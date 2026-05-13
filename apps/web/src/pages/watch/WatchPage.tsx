@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useWatchEntries } from '../../hooks/useWatchEntries';
 import { WatchTable } from './WatchTable';
+import { WatchDetailPanel } from './WatchDetailPanel';
 import type { WatchStatus } from '../../types/watch.types';
 
 const FILTERS: Array<{ label: string; value: WatchStatus | undefined }> = [
@@ -40,7 +41,16 @@ export function WatchPage() {
       {loading && <div className="text-gray-500">Loading…</div>}
       {error && <div className="text-red-600">Error: {error}</div>}
       {!loading && !error && (
-        <WatchTable entries={entries} onSelect={setSelectedId} selectedId={selectedId} />
+        <div className="grid grid-cols-3 gap-4">
+          <div className="col-span-2">
+            <WatchTable entries={entries} onSelect={setSelectedId} selectedId={selectedId} />
+          </div>
+          <div className="col-span-1">
+            {selectedId
+              ? <WatchDetailPanel entryId={selectedId} />
+              : <div className="p-6 text-gray-400 text-sm">Select a row to see details.</div>}
+          </div>
+        </div>
       )}
     </div>
   );
