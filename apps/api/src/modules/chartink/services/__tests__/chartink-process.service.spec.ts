@@ -121,90 +121,93 @@ describe('ChartinkProcessService', () => {
     });
   });
 
-  // ─── Step 3: Sector hard gate ──────────────────────────────────────────────
+  // ─── Step 3: Direction gate (sector with stock-trend fallback) ────────────
 
-  describe('Sector hard gate', () => {
+  describe('Direction gate (sector with stock-trend fallback)', () => {
     beforeEach(() => {
       mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', exchange: 'NSE' });
-      // sectorInstrument lookup
       mdRepo.getInstrumentByToken.mockResolvedValue({ id: 'sec-1', token: '99926019', exchange: 'NSE', symbol: 'NIFTY ENERGY' });
     });
 
-    it('persists sector-misaligned when no sector mapping exists', async () => {
-      nseSector.getSectorIndexForSymbol.mockReturnValue(null);
+    // Helper: build flat candles that make classifyTrend return INDETERMINATE.
+    const flatCandles = Array.from({ length: 50 }, () => ({
+      close: 100, timestamp: new Date(), open: 100, high: 100, low: 100, volume: 1,
+    }));
+    // Helper: build short candles (under 26 bars) — insufficient for classifyTrend.
+    const shortCandles = Array.from({ length: 10 }, (_, i) => ({
+      close: 100 + i, timestamp: new Date(), open: 100 + i, high: 100 + i, low: 100 + i, volume: 1,
+    }));
 
+    it('falls back to stock trend (UP→BUY) when no sector mapping exists', async () => {
+      nseSector.getSectorIndexForSymbol.mockReturnValue(null);
+      // Default UP_CANDLES → stock trend UP → side=BUY → scoring → setup
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 100 });
 
-      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
-        kind: 'sector-misaligned',
-        rejectReason: 'no sector mapping for RELIANCE',
-      }));
-      expect(scoring.score).not.toHaveBeenCalled();
+      expect(scoring.score).toHaveBeenCalledWith(expect.objectContaining({ side: 'BUY' }));
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({ kind: 'setup' }));
     });
 
-    it('persists sector-misaligned when sector index token not in DB', async () => {
+    it('falls back to stock trend when sector index token not in DB', async () => {
       nseSector.getSectorIndexForSymbol.mockReturnValue('99926019');
       mdRepo.getInstrumentByToken.mockResolvedValue(null);
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 100 });
 
+      expect(scoring.score).toHaveBeenCalledWith(expect.objectContaining({ side: 'BUY' }));
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({ kind: 'setup' }));
+    });
+
+    it('falls back to stock trend when sector candles insufficient', async () => {
+      // Sector returns short candles. Stock fetch (second call) returns UP_CANDLES.
+      angelOne.getHistoricalData
+        .mockResolvedValueOnce(shortCandles)  // sector
+        .mockResolvedValueOnce(UP_CANDLES);    // stock fallback
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 100 });
+
+      expect(scoring.score).toHaveBeenCalledWith(expect.objectContaining({ side: 'BUY' }));
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({ kind: 'setup' }));
+    });
+
+    it('falls back to stock trend when sector trend is INDETERMINATE', async () => {
+      const downCandles = makeTrendingCloses('DOWN', 50).map((close) => ({
+        close, timestamp: new Date(), open: close, high: close, low: close, volume: 1,
+      }));
+      angelOne.getHistoricalData
+        .mockResolvedValueOnce(flatCandles)   // sector → INDETERMINATE
+        .mockResolvedValueOnce(downCandles);  // stock fallback → DOWN → side SELL
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 100 });
+
+      expect(scoring.score).toHaveBeenCalledWith(expect.objectContaining({ side: 'SELL' }));
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({ kind: 'setup' }));
+    });
+
+    it('persists no-direction when sector AND stock trend both unclear', async () => {
+      // Both calls return flat candles → both INDETERMINATE.
+      angelOne.getHistoricalData.mockResolvedValue(flatCandles);
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 100 });
 
       expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
-        kind: 'sector-misaligned',
-        rejectReason: 'sector index token 99926019 not in DB',
+        kind: 'no-direction',
+        rejectReason: expect.stringContaining('stock trend also unclear'),
       }));
       expect(scoring.score).not.toHaveBeenCalled();
     });
 
-    it('persists sector-misaligned when sector candle fetch fails', async () => {
-      angelOne.getHistoricalData.mockRejectedValue(new Error('broker timeout'));
-
+    it('persists no-direction when sector fetch fails AND stock candles insufficient', async () => {
+      angelOne.getHistoricalData
+        .mockRejectedValueOnce(new Error('broker timeout'))  // sector
+        .mockResolvedValueOnce(shortCandles);                 // stock fallback also insufficient
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 100 });
 
       expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
-        kind: 'sector-misaligned',
+        kind: 'no-direction',
         rejectReason: expect.stringContaining('sector candle fetch failed: broker timeout'),
       }));
       expect(scoring.score).not.toHaveBeenCalled();
     });
 
-    it('persists sector-misaligned when too few candles returned', async () => {
-      // Only 10 bars — not enough for classifyTrend (needs >= 26)
-      const shortCandles = Array.from({ length: 10 }, (_, i) => ({
-        close: 100 + i, timestamp: new Date(), open: 100 + i, high: 100 + i, low: 100 + i, volume: 1,
-      }));
-      angelOne.getHistoricalData.mockResolvedValue(shortCandles);
-
-      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 100 });
-
-      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
-        kind: 'sector-misaligned',
-        rejectReason: expect.stringContaining('insufficient candles'),
-      }));
-      expect(scoring.score).not.toHaveBeenCalled();
-    });
-
-    it('persists sector-misaligned when sector trend is INDETERMINATE', async () => {
-      // Flat candles — EMA stays flat, price hovers at EMA → INDETERMINATE
-      const flatCandles = Array.from({ length: 50 }, () => ({
-        close: 100, timestamp: new Date(), open: 100, high: 100, low: 100, volume: 1,
-      }));
-      angelOne.getHistoricalData.mockResolvedValue(flatCandles);
-
-      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 100 });
-
-      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
-        kind: 'sector-misaligned',
-        rejectReason: expect.stringContaining('trend INDETERMINATE'),
-      }));
-      expect(scoring.score).not.toHaveBeenCalled();
-    });
-
-    it('derives side=BUY when sector trend is UP', async () => {
-      // UP_CANDLES is already the default for angelOne.getHistoricalData
-      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [] });
-
+    it('derives side=BUY when sector trend is UP (happy path)', async () => {
+      // Default UP_CANDLES on sector fetch → side=BUY directly, no stock fallback.
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
-
       expect(scoring.score).toHaveBeenCalledWith(expect.objectContaining({ side: 'BUY' }));
     });
 
@@ -213,10 +216,7 @@ describe('ChartinkProcessService', () => {
         close, timestamp: new Date(), open: close, high: close, low: close, volume: 1,
       }));
       angelOne.getHistoricalData.mockResolvedValue(downCandles);
-      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [] });
-
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
-
       expect(scoring.score).toHaveBeenCalledWith(expect.objectContaining({ side: 'SELL' }));
     });
   });

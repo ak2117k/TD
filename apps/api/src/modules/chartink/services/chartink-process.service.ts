@@ -88,84 +88,80 @@ export class ChartinkProcessService {
       return;
     }
 
-    // === 3. SECTOR HARD GATE ===
+    // === 3. DIRECTION GATE (sector trend, with stock-trend fallback) ===
+    // We prefer to derive side from the stock's sector index trend. If the
+    // sector lookup or its data is unavailable for ANY reason, we fall back
+    // to the stock's own 15m trend. Only when BOTH sources are unclear do we
+    // skip with 'no-direction'.
+    //
     // NseSectorIndexService returns the sector index token directly (e.g. '99926009').
-    // Strip any series suffixes before lookup since Chartink symbols may arrive bare.
+    // Strip any series suffixes since Chartink symbols may arrive bare.
     const symbolBare = hit.symbol.replace(/-EQ$|-BE$|-BL$|-IV$/, '');
+
+    let side: 'BUY' | 'SELL' | null = null;
+    let directionSource: 'sector' | 'stock' = 'sector';
+    let sectorReason: string | null = null;
+
     const sectorToken = this.nseSector.getSectorIndexForSymbol(symbolBare);
     if (!sectorToken) {
+      sectorReason = `no sector mapping for ${symbolBare}`;
+    } else {
+      const sectorInstrument = await this.mdRepo.getInstrumentByToken(sectorToken);
+      if (!sectorInstrument) {
+        sectorReason = `sector index token ${sectorToken} not in DB`;
+      } else {
+        try {
+          const sectorCloses = await this.fetchRecentCloses(
+            sectorToken,
+            sectorInstrument.exchange ?? 'NSE',
+          );
+          if (sectorCloses.length < 26) {
+            sectorReason = `sector ${sectorToken} insufficient candles (${sectorCloses.length})`;
+          } else {
+            const sectorTrend = classifyTrend(sectorCloses);
+            if (sectorTrend === 'UP') side = 'BUY';
+            else if (sectorTrend === 'DOWN') side = 'SELL';
+            else sectorReason = `sector ${sectorToken} trend ${sectorTrend ?? 'null'}`;
+          }
+        } catch (err) {
+          sectorReason = `sector candle fetch failed: ${err instanceof Error ? err.message : err}`;
+        }
+      }
+    }
+
+    // Fall back to the stock's own 15m trend when the sector gate didn't yield a side.
+    if (!side) {
+      directionSource = 'stock';
+      try {
+        const stockCloses = await this.fetchRecentCloses(instrument.token, 'NSE');
+        if (stockCloses.length >= 26) {
+          const stockTrend = classifyTrend(stockCloses);
+          if (stockTrend === 'UP') side = 'BUY';
+          else if (stockTrend === 'DOWN') side = 'SELL';
+        }
+      } catch {
+        // Swallow — the null check below records the combined failure.
+      }
+    }
+
+    if (!side) {
       await this.repo.createAlertSetup({
         alertId,
         symbol: hit.symbol,
         token: instrument.token,
         hitPrice: hit.hitPrice,
-        kind: 'sector-misaligned',
+        kind: 'no-direction',
         setupId: null,
-        rejectReason: `no sector mapping for ${symbolBare}`,
+        rejectReason: `sector: ${sectorReason ?? 'unknown'}; stock trend also unclear`,
       });
       return;
     }
 
-    // Verify the sector index instrument exists in the local DB
-    const sectorInstrument = await this.mdRepo.getInstrumentByToken(sectorToken);
-    if (!sectorInstrument) {
-      await this.repo.createAlertSetup({
-        alertId,
-        symbol: hit.symbol,
-        token: instrument.token,
-        hitPrice: hit.hitPrice,
-        kind: 'sector-misaligned',
-        setupId: null,
-        rejectReason: `sector index token ${sectorToken} not in DB`,
-      });
-      return;
+    if (directionSource === 'stock') {
+      this.logger.debug(
+        `${hit.symbol} side=${side} via stock-trend fallback (sector: ${sectorReason})`,
+      );
     }
-
-    // Fetch the sector's 15m candles (same pattern as ChartinkScoringService.fetch15mCandles)
-    let sectorCloses: number[];
-    try {
-      sectorCloses = await this.fetchSectorCloses(sectorToken, sectorInstrument.exchange ?? 'NSE');
-    } catch (err) {
-      await this.repo.createAlertSetup({
-        alertId,
-        symbol: hit.symbol,
-        token: instrument.token,
-        hitPrice: hit.hitPrice,
-        kind: 'sector-misaligned',
-        setupId: null,
-        rejectReason: `sector candle fetch failed: ${err instanceof Error ? err.message : err}`,
-      });
-      return;
-    }
-
-    if (sectorCloses.length < 26) {
-      // classifyTrend needs >= 26 bars (20 for EMA + 5 lookback + buffer)
-      await this.repo.createAlertSetup({
-        alertId,
-        symbol: hit.symbol,
-        token: instrument.token,
-        hitPrice: hit.hitPrice,
-        kind: 'sector-misaligned',
-        setupId: null,
-        rejectReason: `sector token ${sectorToken} insufficient candles (${sectorCloses.length})`,
-      });
-      return;
-    }
-
-    const sectorTrend = classifyTrend(sectorCloses);
-    if (sectorTrend === null || sectorTrend === 'INDETERMINATE') {
-      await this.repo.createAlertSetup({
-        alertId,
-        symbol: hit.symbol,
-        token: instrument.token,
-        hitPrice: hit.hitPrice,
-        kind: 'sector-misaligned',
-        setupId: null,
-        rejectReason: `sector token ${sectorToken} trend ${sectorTrend ?? 'INDETERMINATE'}`,
-      });
-      return;
-    }
-    const side: 'BUY' | 'SELL' = sectorTrend === 'UP' ? 'BUY' : 'SELL';
 
     // === 4. SCORING ===
     let scoringResult: Awaited<ReturnType<typeof this.scoring.score>>;
@@ -245,11 +241,11 @@ export class ChartinkProcessService {
   }
 
   /**
-   * Fetch the last 50 closes of 15m candles for a sector index token.
+   * Fetch the last 50 closes of 15m candles for any token (sector index OR stock).
    * Mirrors ChartinkScoringService.fetch15mCandles — uses getHistoricalData
    * which auto-chunks and rate-paces the Angel One historical API.
    */
-  private async fetchSectorCloses(token: string, exchange: string): Promise<number[]> {
+  private async fetchRecentCloses(token: string, exchange: string): Promise<number[]> {
     const to = new Date();
     // 7 days back gives enough bars even accounting for weekends + holidays
     const from = new Date(to.getTime() - 7 * 24 * 60 * 60 * 1000);
