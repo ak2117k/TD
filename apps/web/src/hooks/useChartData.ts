@@ -207,10 +207,28 @@ export function useChartData(): UseChartDataReturn {
       if (meaningful.length > 0) {
         const last = meaningful[meaningful.length - 1];
         setCurrentPrice(last.close);
-        if (meaningful.length > 1) {
-          const prev = meaningful[0];
-          setPriceChange(last.close - prev.open);
-          setPriceChangePercent(((last.close - prev.open) / prev.open) * 100);
+        // Fetch the live quote to get the CORRECT daily change baseline
+        // (previous-trading-day close). The previous logic used the FIRST
+        // candle in the chart's multi-day window — which on a 7d view of
+        // NIFTY meant "comparing today to a week ago", showing -2.77% even
+        // when today's actual move was +0.14%.
+        try {
+          const quoteResp = await api.get(
+            `/market-data/instruments/${selectedSymbol.token}/quote`,
+            { params: { exchange: selectedSymbol.exchange } },
+          );
+          const q = quoteResp.data?.quote;
+          if (q && typeof q.change === 'number' && typeof q.changePercent === 'number') {
+            setPriceChange(q.change);
+            setPriceChangePercent(q.changePercent);
+            if (typeof q.ltp === 'number' && q.ltp > 0) {
+              setCurrentPrice(q.ltp);
+            }
+          }
+        } catch {
+          // Quote fetch failed — leave price/change unset rather than show
+          // a wrong "across multi-day chart range" value. WS tick will
+          // populate them once live ticks resume.
         }
       }
     } catch (err) {
