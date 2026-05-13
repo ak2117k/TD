@@ -74,7 +74,12 @@ export class MtfAlignmentService {
     const upCount = values.filter((d) => d === 'UP').length;
     const downCount = values.filter((d) => d === 'DOWN').length;
     const opinionatedCount = upCount + downCount;
-    const secondaryAligned = opinionatedCount >= 2 && (upCount === 0 || downCount === 0);
+    // TIER B accepts >= 1 opinionated TF with no opposing direction.
+    // (Was >= 2 previously — too strict; combined with the bug that returned
+    // NEUTRAL on equal-close consecutive bars, it rejected genuinely uptrending
+    // breakouts from consolidation. NEUTRAL now only means "data unavailable",
+    // so a single UP with no DOWN is real signal, not absence of signal.)
+    const secondaryAligned = opinionatedCount >= 1 && (upCount === 0 || downCount === 0);
 
     const aligned = primaryAligned || secondaryAligned;
     const agreedDirection: 'UP' | 'DOWN' | null = !aligned
@@ -126,11 +131,20 @@ export class MtfAlignmentService {
     }
     if (endIdx < 1) return 'NEUTRAL';
 
+    // Compare current close to the most recent DIFFERENT close. Real stocks
+    // always move at least one tick over any window; equal-close consecutive
+    // bars are tick-size coincidences, not "neutral" — walk back until we
+    // find a different close and use that as the reference. NEUTRAL only
+    // means "data missing" now, not "no opinion".
     const cur = candles[endIdx].close;
-    const prev = candles[endIdx - 1].close;
-    if (cur > prev) return 'UP';
-    if (cur < prev) return 'DOWN';
-    return 'NEUTRAL';
+    let refIdx = endIdx - 1;
+    while (refIdx >= 0 && candles[refIdx].close === cur) refIdx--;
+    if (refIdx < 0) {
+      // Every bar in the window had identical close — vanishingly rare for any
+      // real instrument across a multi-bar window. Treat as data anomaly.
+      return 'NEUTRAL';
+    }
+    return cur > candles[refIdx].close ? 'UP' : 'DOWN';
   }
 
   /**
