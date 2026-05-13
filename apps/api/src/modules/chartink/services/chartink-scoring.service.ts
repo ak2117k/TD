@@ -401,15 +401,31 @@ export class ChartinkScoringService {
   }
 
   private lookbackMsForTf(tf: string, count: number): number {
-    const perBar: Record<string, number> = {
-      '1m': 60_000,
-      '5m': 5 * 60_000,
-      '15m': 15 * 60_000,
-      '1h': 60 * 60_000,
-      '1d': 24 * 60 * 60_000,
+    // Every NSE-listed stock has months/years of history; the only reason we
+    // ever get < N bars back is weekends + holidays + the occasional rate-
+    // limit hiccup eating into our window. The OLD "bars × duration × 3"
+    // formula was too tight — for 50 × 15m it asked for just 37.5 hours,
+    // which fails over a long weekend or a holiday week.
+    //
+    // Switch to calendar-day generosity per timeframe. The chunker + per-
+    // scoring-run cache make wider fetches cheap (1 chunk per trading day,
+    // paced 350ms apart, results cached across all checks in one scoring
+    // run). The trade is ~1-3s extra per scoring call for reliability —
+    // worth it for "no compromise on data" semantics.
+    //
+    // Sizing rules:
+    //   - 1 trading day ≈ 25 × 15m bars, 75 × 5m, 375 × 1m, 7 × 1h
+    //   - Pad with +3 calendar days for weekend/holiday cushion
+    //   - Floors guarantee minimums even when count is tiny
+    const calendarDays: Record<string, number> = {
+      '1m':  Math.max(2, Math.ceil(count / 375) * 2 + 1),
+      '5m':  Math.max(2, Math.ceil(count / 75) * 2 + 1),
+      '15m': Math.max(5, Math.ceil(count / 25) * 2 + 3),
+      '1h':  Math.max(7, Math.ceil(count / 7) * 2 + 3),
+      '1d':  Math.max(60, count * 2 + 30),
     };
-    // Wide buffer (3x) since holidays and gaps eat into the window
-    return (perBar[tf] ?? 15 * 60_000) * count * 3;
+    const days = calendarDays[tf] ?? 7;
+    return days * 24 * 60 * 60 * 1000;
   }
 
   private sleep(ms: number): Promise<void> {
