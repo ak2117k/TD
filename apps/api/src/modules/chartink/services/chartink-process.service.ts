@@ -102,7 +102,7 @@ export class ChartinkProcessService {
     let directionSource: 'sector' | 'stock' = 'sector';
     let sectorReason: string | null = null;
 
-    const sectorToken = this.nseSector.getSectorIndexForSymbol(symbolBare);
+    const sectorToken = await this.nseSector.getSectorIndexForSymbol(symbolBare);
     if (!sectorToken) {
       sectorReason = `no sector mapping for ${symbolBare}`;
     } else {

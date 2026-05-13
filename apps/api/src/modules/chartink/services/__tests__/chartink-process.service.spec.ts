@@ -49,7 +49,7 @@ describe('ChartinkProcessService', () => {
     };
     // Default: 50 UP-trending candles so classifyTrend returns 'UP'
     angelOne = { getHistoricalData: jest.fn().mockResolvedValue(UP_CANDLES) };
-    nseSector = { getSectorIndexForSymbol: jest.fn().mockReturnValue('99926019') };
+    nseSector = { getSectorIndexForSymbol: jest.fn().mockResolvedValue('99926019') };
     watchSvc = { createFromAlert: jest.fn().mockResolvedValue({ id: 'w1' }) };
 
     const moduleRef = await Test.createTestingModule({
@@ -139,7 +139,7 @@ describe('ChartinkProcessService', () => {
     }));
 
     it('falls back to stock trend (UP→BUY) when no sector mapping exists', async () => {
-      nseSector.getSectorIndexForSymbol.mockReturnValue(null);
+      nseSector.getSectorIndexForSymbol.mockResolvedValue(null);
       // Default UP_CANDLES → stock trend UP → side=BUY → scoring → setup
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 100 });
 
@@ -148,7 +148,7 @@ describe('ChartinkProcessService', () => {
     });
 
     it('falls back to stock trend when sector index token not in DB', async () => {
-      nseSector.getSectorIndexForSymbol.mockReturnValue('99926019');
+      nseSector.getSectorIndexForSymbol.mockResolvedValue('99926019');
       mdRepo.getInstrumentByToken.mockResolvedValue(null);
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 100 });
 

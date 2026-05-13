@@ -209,6 +209,46 @@ export class YahooFinanceService {
   }
 
   /**
+   * Fetch Yahoo Finance's assetProfile + summaryProfile modules for an NSE stock.
+   * Returns sector + industry classification. Used by NseSectorIndexService as
+   * a Tier-3 fallback for stocks NSE doesn't publish in any sector index.
+   *
+   * No auth required. Light rate limits — caller MUST cache aggressively
+   * (sector/industry don't change intraday).
+   *
+   * Returns null if Yahoo doesn't have the symbol or the API call fails.
+   */
+  async getAssetProfile(symbol: string): Promise<{ sector: string | null; industry: string | null } | null> {
+    const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}.NS?modules=assetProfile,summaryProfile`;
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          Accept: 'application/json',
+        },
+      });
+      if (!response.ok) {
+        this.logger.warn(`Yahoo getAssetProfile(${symbol}) returned ${response.status}`);
+        return null;
+      }
+      const data = (await response.json()) as any;
+      const result = data?.quoteSummary?.result?.[0];
+      if (!result) return null;
+      const profile = result.assetProfile ?? result.summaryProfile;
+      if (!profile) return null;
+      return {
+        sector: profile.sector ?? null,
+        industry: profile.industry ?? null,
+      };
+    } catch (err) {
+      this.logger.warn(
+        `Yahoo getAssetProfile(${symbol}) failed: ${err instanceof Error ? err.message : err}`,
+      );
+      return null;
+    }
+  }
+
+  /**
    * Fetch India VIX spot price from Yahoo Finance (^INDIAVIX).
    *
    * Used by MarketContextService to stamp the volatility regime onto every

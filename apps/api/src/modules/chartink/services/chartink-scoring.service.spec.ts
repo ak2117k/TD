@@ -18,7 +18,7 @@ describe('ChartinkScoringService', () => {
           TCS: '99926013',
           HDFCBANK: '99926009',
         };
-        return map[sym.toUpperCase()] ?? null;
+        return Promise.resolve(map[sym.toUpperCase()] ?? null);
       }),
     };
     const module: TestingModule = await Test.createTestingModule({

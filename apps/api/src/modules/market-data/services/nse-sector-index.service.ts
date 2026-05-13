@@ -3,6 +3,7 @@ import { HttpService } from '@nestjs/axios';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { firstValueFrom } from 'rxjs';
 import { SECTOR_INDICES } from '@td/shared/constants';
+import { YahooFinanceService } from './yahoo-finance.service';
 
 /**
  * Maps sector-index name (lower-case, no spaces) to NSE archives CSV slug.
@@ -49,13 +50,45 @@ const STATIC_FALLBACK: Record<string, string> = {
   HINDUNILVR: '99926015', ITC: '99926015', NESTLEIND: '99926015', BRITANNIA: '99926015',
 };
 
+/**
+ * Yahoo Finance's broad sector classification → NIFTY sector index token.
+ * Used as Tier-3 fallback for stocks outside NSE's 15 published sector indices.
+ * Yahoo uses ~11 standard sectors (Financial Services, Technology, ...);
+ * map each to the closest NIFTY sectoral index we already track.
+ */
+const YAHOO_SECTOR_TO_NIFTY: Record<string, string> = {
+  'Financial Services': '99926011',  // NIFTY FIN SERV
+  'Technology': '99926013',           // NIFTY IT
+  'Consumer Defensive': '99926015',   // NIFTY FMCG
+  'Consumer Cyclical': '99926039',    // NIFTY CONSUMER DURABLES
+  'Healthcare': '99926017',           // NIFTY PHARMA
+  'Energy': '99926019',               // NIFTY ENERGY
+  'Basic Materials': '99926023',      // NIFTY METAL
+  'Industrials': '99926029',          // NIFTY INFRA
+  'Real Estate': '99926027',          // NIFTY REALTY
+  'Communication Services': '99926031', // NIFTY MEDIA
+  'Utilities': '99926019',            // NIFTY ENERGY (closest — Power/Utilities sit under Energy index here)
+};
+
+const YAHOO_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
 @Injectable()
 export class NseSectorIndexService implements OnModuleInit {
   private readonly logger = new Logger(NseSectorIndexService.name);
   private symbolToSector: Map<string, string> = new Map();
   private lastRefreshAt: Date | null = null;
 
-  constructor(private readonly http: HttpService) {}
+  /**
+   * Per-symbol Yahoo lookup cache. Stores the resolved NIFTY sector token
+   * (or null if Yahoo didn't help) with a 24h TTL. Sector/industry classifications
+   * are stable on a daily timescale; no point re-hitting Yahoo intraday.
+   */
+  private yahooCache = new Map<string, { sectorToken: string | null; cachedAt: number }>();
+
+  constructor(
+    private readonly http: HttpService,
+    private readonly yahoo: YahooFinanceService,
+  ) {}
 
   async onModuleInit() {
     // Don't block startup — fetch async, fall back to static if it takes time.
@@ -108,12 +141,40 @@ export class NseSectorIndexService implements OnModuleInit {
    * Look up sector index token for a stock symbol. Returns null if not found.
    * Bare-symbol lookup (case-insensitive). Strips series suffixes like -EQ/-BE
    * before matching, since Chartink sends bare names.
+   *
+   * Tier 1: NSE-refreshed sector index constituent map (~200-400 stocks).
+   * Tier 2: static hardcoded fallback for offline boot (~40 large caps).
+   * Tier 3: Yahoo Finance asset profile (handles small/mid caps, cached 24h).
    */
-  getSectorIndexForSymbol(symbol: string): string | null {
+  async getSectorIndexForSymbol(symbol: string): Promise<string | null> {
     if (!symbol) return null;
     const bare = symbol.toUpperCase().replace(/-(EQ|BE|BL|IV|RL)$/, '');
-    // Try dynamic map first, then static fallback
-    return this.symbolToSector.get(bare) ?? STATIC_FALLBACK[bare] ?? null;
+    // Tier 1: NSE-refreshed sector index constituent map
+    const tier1 = this.symbolToSector.get(bare);
+    if (tier1) return tier1;
+    // Tier 2: static hardcoded fallback (for offline boot)
+    const tier2 = STATIC_FALLBACK[bare];
+    if (tier2) return tier2;
+    // Tier 3: Yahoo Finance asset profile (handles small/mid caps)
+    return this.resolveFromYahoo(bare);
+  }
+
+  private async resolveFromYahoo(bare: string): Promise<string | null> {
+    const cached = this.yahooCache.get(bare);
+    if (cached && Date.now() - cached.cachedAt < YAHOO_CACHE_TTL_MS) {
+      return cached.sectorToken;
+    }
+    const profile = await this.yahoo.getAssetProfile(bare);
+    const sectorToken = profile?.sector
+      ? YAHOO_SECTOR_TO_NIFTY[profile.sector] ?? null
+      : null;
+    this.yahooCache.set(bare, { sectorToken, cachedAt: Date.now() });
+    if (sectorToken) {
+      this.logger.log(
+        `Yahoo fallback: ${bare} → sector "${profile?.sector}" → token ${sectorToken}`,
+      );
+    }
+    return sectorToken;
   }
 
   /** For ops/admin endpoints. */

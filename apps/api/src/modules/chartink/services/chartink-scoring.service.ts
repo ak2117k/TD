@@ -97,7 +97,7 @@ export class ChartinkScoringService {
   private async checkSectorAligned(input: ScoringInput): Promise<ScoreCheckResult> {
     const name = 'Sector aligned';
     const pointsPossible = 10;
-    const sectorToken = this.nseSectors.getSectorIndexForSymbol(input.symbol);
+    const sectorToken = await this.nseSectors.getSectorIndexForSymbol(input.symbol);
     if (!sectorToken) {
       return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'no sector mapping' } };
     }
@@ -137,7 +137,7 @@ export class ChartinkScoringService {
   private async checkRelativeStrength(input: ScoringInput): Promise<ScoreCheckResult> {
     const name = 'Relative strength';
     const pointsPossible = 10;
-    const sectorToken = this.nseSectors.getSectorIndexForSymbol(input.symbol);
+    const sectorToken = await this.nseSectors.getSectorIndexForSymbol(input.symbol);
     if (!sectorToken) {
       return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'no sector mapping' } };
     }
