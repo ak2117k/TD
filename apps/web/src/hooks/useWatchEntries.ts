@@ -27,14 +27,22 @@ export function useWatchEntries(status?: WatchStatus) {
 
   useEffect(() => {
     const socket: Socket = io(`${API_BASE}/watch`, { transports: ['websocket'] });
-    const handler = () => { refetch(); };
-    socket.on('watch:tick', handler);
-    socket.on('watch:event', handler);
-    socket.on('watch:created', handler);
+    let tickDebounce: ReturnType<typeof setTimeout> | null = null;
+    const debouncedRefetch = () => {
+      if (tickDebounce) clearTimeout(tickDebounce);
+      tickDebounce = setTimeout(() => { refetch(); }, 1000);
+    };
+    const onTick = () => { debouncedRefetch(); };
+    const onEvent = () => { refetch(); };
+    const onCreated = () => { refetch(); };
+    socket.on('watch:tick', onTick);
+    socket.on('watch:event', onEvent);
+    socket.on('watch:created', onCreated);
     return () => {
-      socket.off('watch:tick', handler);
-      socket.off('watch:event', handler);
-      socket.off('watch:created', handler);
+      socket.off('watch:tick', onTick);
+      socket.off('watch:event', onEvent);
+      socket.off('watch:created', onCreated);
+      if (tickDebounce) clearTimeout(tickDebounce);
       socket.disconnect();
     };
   }, [refetch]);

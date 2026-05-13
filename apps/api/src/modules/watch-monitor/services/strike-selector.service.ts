@@ -73,12 +73,32 @@ export class StrikeSelectorService {
 
     if (!selected) return null;
 
+    // TODO(stage-3): resolve options token from chain.
+    // OptionsChainEntry / OptionData do not carry per-leg tokens — the broker
+    // token lives only on the raw OptionContract objects inside the master-
+    // backed cache of OptionsChainService.  Until the shared type is extended
+    // to propagate token through the chain, both fields stay null here.
+    let optionsToken: string | null = null;
+    let optionsLotSize: number | null = null;
+    try {
+      const chainResp = await this.chain.getOptionsChainWithSpot(symbol, expiry);
+      const strikeEntry = chainResp.chain.find((e: any) => e.strikePrice === selected.strikePrice);
+      if (strikeEntry) {
+        const leg = legSide === 'CE' ? strikeEntry.ceData : strikeEntry.peData;
+        // OptionData does not yet carry .token or .lotSize — left as null.
+        optionsToken = (leg as any)?.token ?? null;
+        optionsLotSize = (strikeEntry as any).lotSize ?? (leg as any)?.lotSize ?? null;
+      }
+    } catch (err) {
+      this.logger.warn(`pick(${symbol}): could not resolve token/lotSize: ${err instanceof Error ? err.message : err}`);
+    }
+
     return {
-      optionsToken: null,
+      optionsToken,
       optionsType: selected.side,
       optionsStrike: selected.strikePrice,
       optionsExpiry: new Date(selected.expiry),
-      optionsLotSize: null,
+      optionsLotSize,
       optionsSelectionScore: selected.score,
     };
   }

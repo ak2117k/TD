@@ -6,11 +6,11 @@ import { OptionsChainService } from '../../options-chain/services/options-chain.
 describe('StrikeSelectorService', () => {
   let svc: StrikeSelectorService;
   let inner: { selectBestStrike: jest.Mock };
-  let chain: { getExpiries: jest.Mock };
+  let chain: { getExpiries: jest.Mock; getOptionsChainWithSpot: jest.Mock };
 
   beforeEach(async () => {
     inner = { selectBestStrike: jest.fn() };
-    chain = { getExpiries: jest.fn() };
+    chain = { getExpiries: jest.fn(), getOptionsChainWithSpot: jest.fn().mockResolvedValue({ chain: [], spotPrice: 4000 }) };
     const mod = await Test.createTestingModule({
       providers: [
         StrikeSelectorService,

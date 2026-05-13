@@ -5,6 +5,7 @@ import { TargetCalculatorService } from './target-calculator.service';
 import { StrikeSelectorService } from './strike-selector.service';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
+import { WatchGateway } from '../gateways/watch.gateway';
 
 describe('WatchService.createFromAlert', () => {
   let svc: WatchService;
@@ -36,6 +37,7 @@ describe('WatchService.createFromAlert', () => {
         { provide: StrikeSelectorService, useValue: strike },
         { provide: MarketFeedService, useValue: feed },
         { provide: LevelBookService, useValue: levelBook },
+        { provide: WatchGateway, useValue: { emitTick: jest.fn(), emitEvent: jest.fn(), emitCreated: jest.fn() } },
       ],
     }).compile();
     svc = mod.get(WatchService);
@@ -88,14 +90,18 @@ describe('WatchService.onTick', () => {
   let svc: WatchService;
   let repo: any;
   let feed: any;
+  let gateway: any;
 
   beforeEach(async () => {
     repo = {
-      findById: jest.fn(),
+      findActiveByToken: jest.fn(),
+      // findById is used by unsubscribeEntry — provide a default resolved value
+      findById: jest.fn().mockResolvedValue({ id: 'w1', token: '11536', optionsToken: null }),
       createEvent: jest.fn().mockResolvedValue({ id: 'e1' }),
       update: jest.fn().mockResolvedValue({}),
     };
     feed = { subscribeForWatch: jest.fn(), unsubscribeForWatch: jest.fn() };
+    gateway = { emitTick: jest.fn(), emitEvent: jest.fn(), emitCreated: jest.fn() };
     const mod = await Test.createTestingModule({
       providers: [
         WatchService,
@@ -104,17 +110,18 @@ describe('WatchService.onTick', () => {
         { provide: StrikeSelectorService, useValue: { pick: jest.fn() } },
         { provide: MarketFeedService, useValue: feed },
         { provide: LevelBookService, useValue: { getLevels: jest.fn() } },
+        { provide: WatchGateway, useValue: gateway },
       ],
     }).compile();
     svc = mod.get(WatchService);
   });
 
   it('writes PRICE_CHANGE when |Δ| ≥ 0.25%', async () => {
-    repo.findById.mockResolvedValue({
+    repo.findActiveByToken.mockResolvedValue([{
       id: 'w1', token: '11536', side: 'BUY', status: 'WATCHING',
       initialPrice: 4000, lastEventPrice: 4000, profitTarget: 4150,
       maxFavorable: 4000, maxAdverse: 4000,
-    });
+    }]);
     await svc.onTick('11536', 4010, new Date('2026-05-13T10:00:00Z'));
     expect(repo.createEvent).toHaveBeenCalledWith(expect.objectContaining({
       eventType: 'PRICE_CHANGE', price: 4010,
@@ -122,21 +129,21 @@ describe('WatchService.onTick', () => {
   });
 
   it('does NOT write PRICE_CHANGE when |Δ| < 0.25%', async () => {
-    repo.findById.mockResolvedValue({
+    repo.findActiveByToken.mockResolvedValue([{
       id: 'w1', token: '11536', side: 'BUY', status: 'WATCHING',
       initialPrice: 4000, lastEventPrice: 4000, profitTarget: 4150,
       maxFavorable: 4000, maxAdverse: 4000,
-    });
+    }]);
     await svc.onTick('11536', 4005, new Date('2026-05-13T10:00:00Z'));
     expect(repo.createEvent).not.toHaveBeenCalled();
   });
 
   it('transitions to TARGET_HIT when BUY price ≥ profitTarget', async () => {
-    repo.findById.mockResolvedValue({
+    repo.findActiveByToken.mockResolvedValue([{
       id: 'w1', token: '11536', side: 'BUY', status: 'WATCHING',
       initialPrice: 4000, lastEventPrice: 4000, profitTarget: 4150,
       maxFavorable: 4000, maxAdverse: 4000, optionsToken: null,
-    });
+    }]);
     await svc.onTick('11536', 4160, new Date('2026-05-13T10:00:00Z'));
     expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
       status: 'TARGET_HIT',
@@ -148,11 +155,11 @@ describe('WatchService.onTick', () => {
   });
 
   it('transitions to TARGET_HIT when SELL price ≤ profitTarget', async () => {
-    repo.findById.mockResolvedValue({
+    repo.findActiveByToken.mockResolvedValue([{
       id: 'w1', token: '11536', side: 'SELL', status: 'WATCHING',
       initialPrice: 4000, lastEventPrice: 4000, profitTarget: 3850,
       maxFavorable: 4000, maxAdverse: 4000, optionsToken: null,
-    });
+    }]);
     await svc.onTick('11536', 3840, new Date('2026-05-13T10:00:00Z'));
     expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
       status: 'TARGET_HIT',
@@ -160,12 +167,12 @@ describe('WatchService.onTick', () => {
   });
 
   it('drops stale ticks older than lastTickAt', async () => {
-    repo.findById.mockResolvedValue({
+    repo.findActiveByToken.mockResolvedValue([{
       id: 'w1', token: '11536', side: 'BUY', status: 'WATCHING',
       initialPrice: 4000, lastEventPrice: 4000, profitTarget: 4150,
       lastTickAt: new Date('2026-05-13T10:00:05Z'),
       maxFavorable: 4000, maxAdverse: 4000,
-    });
+    }]);
     await svc.onTick('11536', 4010, new Date('2026-05-13T10:00:00Z'));
     expect(repo.update).not.toHaveBeenCalled();
     expect(repo.createEvent).not.toHaveBeenCalled();
@@ -194,6 +201,7 @@ describe('WatchService.transitionStopped', () => {
         { provide: StrikeSelectorService, useValue: { pick: jest.fn() } },
         { provide: MarketFeedService, useValue: feed },
         { provide: LevelBookService, useValue: { getLevels: jest.fn() } },
+        { provide: WatchGateway, useValue: { emitTick: jest.fn(), emitEvent: jest.fn(), emitCreated: jest.fn() } },
       ],
     }).compile();
     svc = mod.get(WatchService);

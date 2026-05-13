@@ -1,10 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Prisma, WatchEntry, WatchEventType } from '@prisma/client';
+import { Prisma, WatchEntry, WatchEventType, WatchStatus } from '@prisma/client';
 import { WatchRepository } from '../repositories/watch.repository';
 import { TargetCalculatorService, LevelBookSnapshot } from './target-calculator.service';
 import { StrikeSelectorService } from './strike-selector.service';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
+import { WatchGateway } from '../gateways/watch.gateway';
 
 export const WATCH_CAP = 50;
 
@@ -37,6 +38,7 @@ export class WatchService {
     private readonly strike: StrikeSelectorService,
     private readonly feed: MarketFeedService,
     private readonly levelBook: LevelBookService,
+    private readonly gateway: WatchGateway,
   ) {}
 
   async createFromAlert(input: CreateFromAlertInput): Promise<WatchEntry> {
@@ -166,22 +168,7 @@ export class WatchService {
   }
 
   private async findActiveByToken(token: string) {
-    // In production we'd cache token→entryIds in memory. For Stage 2 we query
-    // via Prisma directly through the repo's underlying prisma. To keep the
-    // test ergonomics simple (mocked repo.findById returns single entry by id),
-    // tests will mock findById to return a single entry; production must use
-    // the real repo + prisma. Implemented below with a defensive fallback.
-    const repoAny = this.repo as any;
-    if (repoAny.prisma) {
-      return repoAny.prisma.watchEntry.findMany({
-        where: {
-          status: { in: ['WATCHING', 'TRADED'] },
-          OR: [{ token }, { optionsToken: token }],
-        },
-      });
-    }
-    const e = await this.repo.findById(token);
-    return e ? [e] : [];
+    return this.repo.findActiveByToken(token);
   }
 
   private async applyTick(entry: any, ltp: number, timestamp: Date): Promise<void> {
@@ -200,6 +187,8 @@ export class WatchService {
       maxFavorable,
       maxAdverse,
     });
+
+    this.gateway.emitTick(entry.id, { price: ltp, currentScore: entry.currentScore ?? null });
 
     const isTargetHit = side === 'BUY'
       ? ltp >= entry.profitTarget
@@ -231,7 +220,7 @@ export class WatchService {
       price,
     });
     await this.repo.update(entryId, {
-      status: 'TARGET_HIT' as any,
+      status: WatchStatus.TARGET_HIT,
       closedAt: new Date(),
       closedReason: 'target-hit',
     });
@@ -250,7 +239,7 @@ export class WatchService {
       notes: `cause:${cause}`,
     });
     await this.repo.update(entryId, {
-      status: 'STOPPED' as any,
+      status: WatchStatus.STOPPED,
       closedAt: new Date(),
       closedReason: `sl-${cause}`,
     });
@@ -263,7 +252,7 @@ export class WatchService {
       eventType: WatchEventType.DISMISSED,
     });
     await this.repo.update(entryId, {
-      status: 'DISMISSED' as any,
+      status: WatchStatus.DISMISSED,
       dismissedAt: new Date(),
     });
     await this.unsubscribeEntry(entryId);

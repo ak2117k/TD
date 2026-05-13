@@ -117,6 +117,7 @@ export class ChartinkProcessService {
             token: instrument.token,
             symbol: hit.symbol,
             exchange: 'NSE',
+            // TODO(stage-1-refactor): replace with locked.side once Stage 1 ships
             side: (locked.entry > locked.stoploss ? 'BUY' : 'SELL') as SetupSide,
             entryPrice: locked.entry,
             // LockedSetup may carry a levelBookSnapshot at runtime (set by the
@@ -162,6 +163,7 @@ export class ChartinkProcessService {
             symbol: hit.symbol,
             token: instrument.token,
             exchange: 'NSE',
+            // TODO(stage-1-refactor): replace with locked.side once Stage 1 ships
             side: (locked.entry > locked.stoploss ? 'BUY' : 'SELL'),
             initialPrice: locked.entry,
             initialScore: scoring.score,

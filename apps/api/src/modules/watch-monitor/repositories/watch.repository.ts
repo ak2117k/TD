@@ -112,6 +112,15 @@ export class WatchRepository {
     });
   }
 
+  async findActiveByToken(token: string): Promise<WatchEntry[]> {
+    return this.prisma.watchEntry.findMany({
+      where: {
+        status: { in: [WatchStatus.WATCHING, WatchStatus.TRADED] },
+        OR: [{ token }, { optionsToken: token }],
+      },
+    });
+  }
+
   async countActive(): Promise<number> {
     return this.prisma.watchEntry.count({
       where: { status: { in: [WatchStatus.WATCHING, WatchStatus.TRADED] } },
