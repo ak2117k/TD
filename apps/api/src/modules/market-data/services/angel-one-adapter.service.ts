@@ -67,12 +67,18 @@ const TIMEFRAME_MAP: Record<string, string> = {
  * don't have to know these limits.
  */
 const TIMEFRAME_MAX_RANGE_DAYS: Record<string, number> = {
-  ONE_MINUTE: 25,        // docs say 30 but cliff edges silently truncate; staying below
-  THREE_MINUTE: 50,
-  FIVE_MINUTE: 6,        // docs imply 7 — confirmed empirically that exactly-7d returns 0
-  TEN_MINUTE: 90,
-  FIFTEEN_MINUTE: 180,
-  THIRTY_MINUTE: 180,
+  // Empirically: for STOCK tokens (not indices), Angel One silently returns
+  // empty data when the range crosses a trading-session boundary for any
+  // sub-hour interval. The documented per-interval caps (e.g. 180d for 15m)
+  // hold only for index tokens. Cap all sub-hour intervals to 1 day so the
+  // chunking wrapper stitches per-day windows. Hour+ intervals appear
+  // unaffected and keep their wider caps.
+  ONE_MINUTE: 1,
+  THREE_MINUTE: 1,
+  FIVE_MINUTE: 1,
+  TEN_MINUTE: 1,
+  FIFTEEN_MINUTE: 1,
+  THIRTY_MINUTE: 1,
   ONE_HOUR: 365,
   ONE_DAY: 1800,
 };
