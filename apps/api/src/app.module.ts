@@ -19,6 +19,7 @@ import { InsightsModule } from './modules/insights/insights.module';
 import { BrokerModule } from './modules/broker/broker.module';
 import { ChartinkModule } from './modules/chartink/chartink.module';
 import { FundamentalsModule } from './modules/fundamentals/fundamentals.module';
+import { WatchMonitorModule } from './modules/watch-monitor/watch-monitor.module';
 
 @Module({
   imports: [
@@ -88,6 +89,9 @@ import { FundamentalsModule } from './modules/fundamentals/fundamentals.module';
 
     // Fundamentals — Yahoo Finance-sourced stock fundamentals (24h cache)
     FundamentalsModule,
+
+    // Watch Monitor — Stage 2 trade watch lifecycle, scoring, options selection
+    WatchMonitorModule,
   ],
   providers: [],
 })
