@@ -152,6 +152,11 @@ export class WatchService {
 
   private static readonly MATERIAL_CHANGE_PCT = 0.0025;
 
+  /**
+   * Called by WatchMonitorWorker on each market tick for a watched token.
+   * Drops out-of-order ticks, updates MFE/MAE watermarks, checks target
+   * and material price-change thresholds, and triggers state transitions.
+   */
   async onTick(token: string, ltp: number, timestamp: Date): Promise<void> {
     const entries = await this.findActiveByToken(token);
     for (const entry of entries) {
