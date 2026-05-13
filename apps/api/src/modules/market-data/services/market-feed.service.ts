@@ -79,6 +79,15 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
   private readonly viewingTokens = new Map<string, string>();
   private readonly MAX_VIEWING_TOKENS = 10;
 
+  /**
+   * Watch monitor subscriptions (Stage 2 Chartink lifecycle).
+   * Keyed by token → set of watchEntryIds that care about that token.
+   * Reverse map for fast unsubscribe by entry id.
+   */
+  private readonly watchTokens = new Map<string, Set<string>>();
+  private readonly watchEntryTokens = new Map<string, Set<string>>();
+  private watchTickHandler: ((token: string, ltp: number, ts: Date) => void | Promise<void>) | null = null;
+
   /** Whether the feed is actively running. */
   private feedActive = false;
 
@@ -610,13 +619,16 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
       const quote = this.tickToQuote(tick);
       this.quoteCache.set(tick.token, quote);
 
-      // 3. Publish to Redis for cross-service distribution
+      // 3. Dispatch to watch monitor tick handler (Stage 2 watch lifecycle)
+      this.dispatchWatchTick(tick.token, tick.ltp, tick.timestamp);
+
+      // 4. Publish to Redis for cross-service distribution
       this.publishToRedis(tick);
 
-      // 4. Pass to candle aggregator
+      // 5. Pass to candle aggregator
       this.candleAggregator.processTick(tick);
 
-      // 5. Emit live tick to frontend via WebSocket gateway
+      // 6. Emit live tick to frontend via WebSocket gateway
       this.gateway.emitTick(quote);
     } catch (error) {
       this.logger.error(
@@ -1236,5 +1248,109 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
       activeSubscriptions: this.primaryTokens.size + this.scanTokens.size,
       timestamp: new Date(),
     });
+  }
+
+  // ------------------------------------------------------------------
+  //  Watch monitor subscription management (Stage 2)
+  // ------------------------------------------------------------------
+
+  /**
+   * Subscribe a watch entry to a token for live ticks. Idempotent.
+   */
+  subscribeForWatch(token: string, watchEntryId: string): void {
+    let set = this.watchTokens.get(token);
+    if (!set) {
+      set = new Set();
+      this.watchTokens.set(token, set);
+      if (
+        !this.primaryTokens.has(token) &&
+        !this.scanTokens.has(token) &&
+        !this.viewingTokens.has(token)
+      ) {
+        try {
+          this.brokerAdapter?.subscribeToFeed?.([token], () => {
+            // Ticks are dispatched via the shared feedCallback; this no-op
+            // callback just satisfies the adapter contract for new tokens.
+          });
+        } catch (err) {
+          this.logger.warn(
+            `subscribeForWatch broker subscribe failed for ${token}: ${err instanceof Error ? err.message : err}`,
+          );
+        }
+      }
+    }
+    set.add(watchEntryId);
+
+    let reverse = this.watchEntryTokens.get(watchEntryId);
+    if (!reverse) {
+      reverse = new Set();
+      this.watchEntryTokens.set(watchEntryId, reverse);
+    }
+    reverse.add(token);
+  }
+
+  unsubscribeForWatch(token: string, watchEntryId: string): void {
+    const set = this.watchTokens.get(token);
+    if (set) {
+      set.delete(watchEntryId);
+      if (set.size === 0) {
+        this.watchTokens.delete(token);
+        if (
+          !this.primaryTokens.has(token) &&
+          !this.scanTokens.has(token) &&
+          !this.viewingTokens.has(token)
+        ) {
+          try {
+            const adapter = this.brokerAdapter as unknown as {
+              unsubscribeFromFeed?: (tokens: string[]) => void;
+            } | null;
+            adapter?.unsubscribeFromFeed?.([token]);
+          } catch (err) {
+            this.logger.warn(
+              `unsubscribeForWatch broker unsubscribe failed for ${token}: ${err instanceof Error ? err.message : err}`,
+            );
+          }
+        }
+      }
+    }
+    const reverse = this.watchEntryTokens.get(watchEntryId);
+    if (reverse) {
+      reverse.delete(token);
+      if (reverse.size === 0) this.watchEntryTokens.delete(watchEntryId);
+    }
+  }
+
+  /**
+   * Register the per-tick handler for watch monitor entries. Called once
+   * during module init by WatchMonitorModule.
+   */
+  registerWatchTickHandler(
+    handler: (token: string, ltp: number, ts: Date) => void | Promise<void>,
+  ): void {
+    this.watchTickHandler = handler;
+  }
+
+  /**
+   * Internal: invoked by the existing tick processing loop. Fans out the
+   * tick to the watch handler if any watch entries are subscribed.
+   */
+  protected dispatchWatchTick(token: string, ltp: number, ts: Date): void {
+    if (!this.watchTickHandler) return;
+    const subs = this.watchTokens.get(token);
+    if (!subs || subs.size === 0) return;
+    try {
+      const r = this.watchTickHandler(token, ltp, ts);
+      if (r instanceof Promise) {
+        r.catch((err) => {
+          this.logger.warn(
+            `watchTickHandler threw for ${token}: ${err instanceof Error ? err.message : err}`,
+          );
+        });
+      }
+    } catch (err) {
+      this.logger.warn(
+        `watchTickHandler sync-threw for ${token}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
   }
 }
