@@ -337,11 +337,8 @@ export class ChartinkScoringService {
 
   /**
    * Robust trend check: returns 'UP' / 'DOWN' / 'INDETERMINATE'.
-   *   - UP requires: close > EMA20 AND EMA20[now] > EMA20[5 bars ago]
-   *   - DOWN requires: close < EMA20 AND EMA20[now] < EMA20[5 bars ago]
-   *   - Anything else → INDETERMINATE (line wandering or price hovering at EMA)
-   *
-   * Returns the EMA values too for diagnostic display.
+   * Delegates to the exported free function so callers outside this class
+   * (e.g. ChartinkProcessService sector gate) can share the same logic.
    */
   private classifyTrend(closes: number[]): {
     direction: 'UP' | 'DOWN' | 'INDETERMINATE';
@@ -349,18 +346,7 @@ export class ChartinkScoringService {
     emaNow: number | null;
     emaThen: number | null;
   } | null {
-    if (closes.length < 26) return null; // need 20 for EMA + 5 lookback + buffer
-    const emaNow = ema(closes, 20);
-    const emaThen = ema(closes.slice(0, -5), 20);
-    if (emaNow === null || emaThen === null) return null;
-    const closeLast = closes[closes.length - 1];
-    if (closeLast > emaNow && emaNow > emaThen) {
-      return { direction: 'UP', closeLast, emaNow, emaThen };
-    }
-    if (closeLast < emaNow && emaNow < emaThen) {
-      return { direction: 'DOWN', closeLast, emaNow, emaThen };
-    }
-    return { direction: 'INDETERMINATE', closeLast, emaNow, emaThen };
+    return classifyTrendFull(closes);
   }
 
   private async fetchCandles(token: string, exchange: string, tf: string, lookback: number): Promise<Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>> {
@@ -401,4 +387,37 @@ export class ChartinkScoringService {
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Exported free function: robust EMA-based trend classifier.
+ *   - UP   requires: close > EMA20 AND EMA20[now] > EMA20[5 bars ago]
+ *   - DOWN requires: close < EMA20 AND EMA20[now] < EMA20[5 bars ago]
+ *   - INDETERMINATE: anything else (wandering EMA or price at EMA)
+ * Returns null when there are insufficient candles (< 26 bars).
+ * Used by ChartinkProcessService's sector hard gate as well as internally.
+ */
+export function classifyTrend(closes: number[]): 'UP' | 'DOWN' | 'INDETERMINATE' | null {
+  const full = classifyTrendFull(closes);
+  return full ? full.direction : null;
+}
+
+function classifyTrendFull(closes: number[]): {
+  direction: 'UP' | 'DOWN' | 'INDETERMINATE';
+  closeLast: number;
+  emaNow: number | null;
+  emaThen: number | null;
+} | null {
+  if (closes.length < 26) return null; // need 20 for EMA + 5 lookback + buffer
+  const emaNow = ema(closes, 20);
+  const emaThen = ema(closes.slice(0, -5), 20);
+  if (emaNow === null || emaThen === null) return null;
+  const closeLast = closes[closes.length - 1];
+  if (closeLast > emaNow && emaNow > emaThen) {
+    return { direction: 'UP', closeLast, emaNow, emaThen };
+  }
+  if (closeLast < emaNow && emaNow < emaThen) {
+    return { direction: 'DOWN', closeLast, emaNow, emaThen };
+  }
+  return { direction: 'INDETERMINATE', closeLast, emaNow, emaThen };
 }

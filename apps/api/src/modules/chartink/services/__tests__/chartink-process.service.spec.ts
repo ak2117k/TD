@@ -2,27 +2,39 @@ import { Test } from '@nestjs/testing';
 import { ChartinkProcessService } from '../chartink-process.service';
 import { ChartinkRepository } from '../../repositories/chartink.repository';
 import { MarketDataRepository } from '../../../market-data/repositories/market-data.repository';
-import { SignalGeneratorService } from '../../../signal-generator/services/signal-generator.service';
-import { SetupTrackerService } from '../../../signal-generator/services/setup-tracker.service';
 import { MtfAlignmentService } from '../../../signal-generator/services/mtf-alignment.service';
 import { ChartinkScoringService } from '../chartink-scoring.service';
-import { WatchService } from '../../../watch-monitor/services/watch.service';
+import { AngelOneAdapterService } from '../../../market-data/services/angel-one-adapter.service';
+import { NseSectorIndexService } from '../../../market-data/services/nse-sector-index.service';
+import { WatchService, WatchCapExceededError } from '../../../watch-monitor/services/watch.service';
+
+/** Generate a minimal 50-bar closes array trending UP (each bar slightly higher). */
+function makeTrendingCloses(direction: 'UP' | 'DOWN' | 'FLAT', n = 50): number[] {
+  const closes: number[] = [];
+  const step = direction === 'UP' ? 1 : direction === 'DOWN' ? -1 : 0;
+  for (let i = 0; i < n; i++) closes.push(100 + i * step);
+  return closes;
+}
 
 describe('ChartinkProcessService', () => {
   let service: ChartinkProcessService;
   let repo: { createAlertSetup: jest.Mock };
-  let mdRepo: { getInstrumentBySymbol: jest.Mock };
-  let signalSvc: { analyze: jest.Mock };
-  let tracker: { getActive: jest.Mock };
+  let mdRepo: { getInstrumentBySymbol: jest.Mock; getInstrumentByToken: jest.Mock };
   let mtf: { check: jest.Mock };
   let scoring: { score: jest.Mock; scoreToLotCount: jest.Mock };
+  let angelOne: { getHistoricalData: jest.Mock };
+  let nseSector: { getSectorIndexForSymbol: jest.Mock };
   let watchSvc: { createFromAlert: jest.Mock };
+
+  // Default happy-path candles — 50 bars trending UP, enough for classifyTrend
+  const UP_CANDLES = makeTrendingCloses('UP', 50).map((close) => ({ close, timestamp: new Date(), open: close, high: close, low: close, volume: 1000 }));
 
   beforeEach(async () => {
     repo = { createAlertSetup: jest.fn().mockResolvedValue({ id: 'setup-row-1' }) };
-    mdRepo = { getInstrumentBySymbol: jest.fn() };
-    signalSvc = { analyze: jest.fn() };
-    tracker = { getActive: jest.fn() };
+    mdRepo = {
+      getInstrumentBySymbol: jest.fn(),
+      getInstrumentByToken: jest.fn(),
+    };
     mtf = {
       check: jest.fn().mockResolvedValue({
         aligned: true,
@@ -35,6 +47,9 @@ describe('ChartinkProcessService', () => {
       score: jest.fn().mockResolvedValue({ score: 70, lotCount: 2, checks: [] }),
       scoreToLotCount: jest.fn(),
     };
+    // Default: 50 UP-trending candles so classifyTrend returns 'UP'
+    angelOne = { getHistoricalData: jest.fn().mockResolvedValue(UP_CANDLES) };
+    nseSector = { getSectorIndexForSymbol: jest.fn().mockReturnValue('99926019') };
     watchSvc = { createFromAlert: jest.fn().mockResolvedValue({ id: 'w1' }) };
 
     const moduleRef = await Test.createTestingModule({
@@ -42,10 +57,10 @@ describe('ChartinkProcessService', () => {
         ChartinkProcessService,
         { provide: ChartinkRepository, useValue: repo },
         { provide: MarketDataRepository, useValue: mdRepo },
-        { provide: SignalGeneratorService, useValue: signalSvc },
-        { provide: SetupTrackerService, useValue: tracker },
         { provide: MtfAlignmentService, useValue: mtf },
         { provide: ChartinkScoringService, useValue: scoring },
+        { provide: AngelOneAdapterService, useValue: angelOne },
+        { provide: NseSectorIndexService, useValue: nseSector },
         { provide: WatchService, useValue: watchSvc },
       ],
     }).compile();
@@ -53,9 +68,13 @@ describe('ChartinkProcessService', () => {
     service = moduleRef.get(ChartinkProcessService);
   });
 
+  // ─── Step 1: Symbol resolution ─────────────────────────────────────────────
+
   it('persists kind=unresolved when symbol not in DB', async () => {
     mdRepo.getInstrumentBySymbol.mockResolvedValue(null);
+
     await service.processOne('alert-1', { symbol: 'UNKNOWN', hitPrice: 100 });
+
     expect(repo.createAlertSetup).toHaveBeenCalledWith({
       alertId: 'alert-1',
       symbol: 'UNKNOWN',
@@ -65,76 +84,30 @@ describe('ChartinkProcessService', () => {
       setupId: null,
       rejectReason: 'symbol not in local DB (tried bare, -EQ, -BE, -BL, -IV)',
     });
-    expect(signalSvc.analyze).not.toHaveBeenCalled();
+    expect(mtf.check).not.toHaveBeenCalled();
   });
 
-  it('persists kind=setup when analyze returns a setup', async () => {
-    mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'i1', token: '2885' });
-    signalSvc.analyze.mockResolvedValue({ kind: 'setup', symbol: 'RELIANCE' });
-    tracker.getActive.mockReturnValue({ id: 'setup-xyz', entry: 1470, stoploss: 1460 });
-
-    await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 1467.4 });
-
-    expect(signalSvc.analyze).toHaveBeenCalledWith('2885', 'NSE', 'RELIANCE', '15m');
-    expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
-      alertId: 'alert-1',
-      symbol: 'RELIANCE',
-      token: '2885',
-      hitPrice: 1467.4,
-      kind: 'setup',
-      setupId: 'setup-xyz',
-      rejectReason: null,
-    }));
+  it('does NOT call MTF when symbol fails to resolve', async () => {
+    mdRepo.getInstrumentBySymbol.mockResolvedValue(null);
+    await service.processOne('alert-1', { symbol: 'UNKNOWN', hitPrice: 100 });
+    expect(mtf.check).not.toHaveBeenCalled();
+    expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({ kind: 'unresolved' }));
   });
 
-  it('persists kind=no-setup when analyze rejects', async () => {
-    mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'i1', token: '2885' });
-    signalSvc.analyze.mockResolvedValue({ kind: 'no-setup', reason: 'reject:rr {"rr":1.2}' });
-
-    await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 1467.4 });
-
-    expect(repo.createAlertSetup).toHaveBeenCalledWith({
-      alertId: 'alert-1',
-      symbol: 'RELIANCE',
-      token: '2885',
-      hitPrice: 1467.4,
-      kind: 'no-setup',
-      setupId: null,
-      rejectReason: 'reject:rr {"rr":1.2}',
-    });
-  });
-
-  it('persists kind=error when analyze throws', async () => {
-    mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'i1', token: '2885' });
-    signalSvc.analyze.mockRejectedValue(new Error('broker timeout'));
-
-    await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 1467.4 });
-
-    expect(repo.createAlertSetup).toHaveBeenCalledWith({
-      alertId: 'alert-1',
-      symbol: 'RELIANCE',
-      token: '2885',
-      hitPrice: 1467.4,
-      kind: 'error',
-      setupId: null,
-      rejectReason: 'broker timeout',
-    });
-  });
+  // ─── Step 2: MTF gate ──────────────────────────────────────────────────────
 
   describe('MTF gate', () => {
-    it('persists mtf-misaligned and SKIPS analyze when TFs disagree', async () => {
-      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', symbol: 'RELIANCE' });
+    it('persists mtf-misaligned and stops when TFs disagree', async () => {
+      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', exchange: 'NSE' });
       mtf.check.mockResolvedValue({
         aligned: false,
         agreedDirection: null,
         directions: { '1d': 'UP', '1h': 'UP', '15m': 'DOWN', '5m': 'UP' },
         summary: '1d=UP 1h=UP 15m=DOWN 5m=UP',
       });
-      signalSvc.analyze.mockResolvedValue({ kind: 'setup' });
 
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
 
-      expect(signalSvc.analyze).not.toHaveBeenCalled();
       expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
         alertId: 'alert-1',
         symbol: 'RELIANCE',
@@ -143,95 +116,248 @@ describe('ChartinkProcessService', () => {
         kind: 'mtf-misaligned',
         rejectReason: expect.stringContaining('1d=UP 1h=UP 15m=DOWN 5m=UP'),
       }));
-    });
-
-    it('proceeds to analyze when MTF reports aligned UP', async () => {
-      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', symbol: 'RELIANCE' });
-      mtf.check.mockResolvedValue({
-        aligned: true,
-        agreedDirection: 'UP',
-        directions: { '1d': 'UP', '1h': 'UP', '15m': 'UP', '5m': 'UP' },
-        summary: '1d=UP 1h=UP 15m=UP 5m=UP',
-      });
-      signalSvc.analyze.mockResolvedValue({ kind: 'no-setup', reason: 'reject:outside-window' });
-      tracker.getActive.mockReturnValue(null);
-
-      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
-
-      expect(signalSvc.analyze).toHaveBeenCalledTimes(1);
-      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
-        kind: 'no-setup',
-      }));
-    });
-
-    it('proceeds to analyze when MTF reports aligned DOWN', async () => {
-      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', symbol: 'RELIANCE' });
-      mtf.check.mockResolvedValue({
-        aligned: true,
-        agreedDirection: 'DOWN',
-        directions: { '1d': 'DOWN', '1h': 'DOWN', '15m': 'DOWN', '5m': 'DOWN' },
-        summary: '1d=DOWN 1h=DOWN 15m=DOWN 5m=DOWN',
-      });
-      signalSvc.analyze.mockResolvedValue({ kind: 'setup' });
-      tracker.getActive.mockReturnValue({ id: 'setup-99' });
-
-      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
-
-      expect(signalSvc.analyze).toHaveBeenCalledTimes(1);
-      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
-        kind: 'setup',
-        setupId: 'setup-99',
-      }));
-    });
-
-    it('does NOT call MTF when symbol fails to resolve', async () => {
-      mdRepo.getInstrumentBySymbol.mockResolvedValue(null);
-
-      await service.processOne('alert-1', { symbol: 'UNKNOWN', hitPrice: 100 });
-
-      expect(mtf.check).not.toHaveBeenCalled();
-      expect(signalSvc.analyze).not.toHaveBeenCalled();
-      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
-        kind: 'unresolved',
-      }));
+      // Must not proceed to sector gate
+      expect(nseSector.getSectorIndexForSymbol).not.toHaveBeenCalled();
     });
   });
 
-  it('persists score and lotCount when analyze returns a setup', async () => {
-    mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', symbol: 'RELIANCE' });
-    mtf.check.mockResolvedValue({
-      aligned: true,
-      agreedDirection: 'UP',
-      directions: { '1d': 'UP', '1h': 'UP', '15m': 'UP', '5m': 'UP' },
-      summary: '1d=UP 1h=UP 15m=UP 5m=UP',
-    });
-    signalSvc.analyze.mockResolvedValue({ kind: 'setup' });
-    tracker.getActive.mockReturnValue({
-      id: 'setup-1',
-      entry: 2890,
-      stoploss: 2850,
-      levelBookSnapshot: { pdh: 2920, pdl: 2850, orh: 2900, orl: 2860, vwap: 2880 },
-    });
-    scoring.score.mockResolvedValue({
-      score: 73,
-      lotCount: 2,
-      checks: [{ name: 'Sector aligned', points: 20, pointsPossible: 20, passed: true }],
+  // ─── Step 3: Sector hard gate ──────────────────────────────────────────────
+
+  describe('Sector hard gate', () => {
+    beforeEach(() => {
+      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', exchange: 'NSE' });
+      // sectorInstrument lookup
+      mdRepo.getInstrumentByToken.mockResolvedValue({ id: 'sec-1', token: '99926019', exchange: 'NSE', symbol: 'NIFTY ENERGY' });
     });
 
-    await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+    it('persists sector-misaligned when no sector mapping exists', async () => {
+      nseSector.getSectorIndexForSymbol.mockReturnValue(null);
 
-    expect(scoring.score).toHaveBeenCalledWith(expect.objectContaining({
-      token: '2885',
-      symbol: 'RELIANCE',
-      exchange: 'NSE',
-      side: 'BUY',
-      entryPrice: 2890,
-    }));
-    expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
-      kind: 'setup',
-      score: 73,
-      lotCount: 2,
-      scoreBreakdown: expect.any(Array),
-    }));
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 100 });
+
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'sector-misaligned',
+        rejectReason: 'no sector mapping for RELIANCE',
+      }));
+      expect(scoring.score).not.toHaveBeenCalled();
+    });
+
+    it('persists sector-misaligned when sector index token not in DB', async () => {
+      nseSector.getSectorIndexForSymbol.mockReturnValue('99926019');
+      mdRepo.getInstrumentByToken.mockResolvedValue(null);
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 100 });
+
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'sector-misaligned',
+        rejectReason: 'sector index token 99926019 not in DB',
+      }));
+      expect(scoring.score).not.toHaveBeenCalled();
+    });
+
+    it('persists sector-misaligned when sector candle fetch fails', async () => {
+      angelOne.getHistoricalData.mockRejectedValue(new Error('broker timeout'));
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 100 });
+
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'sector-misaligned',
+        rejectReason: expect.stringContaining('sector candle fetch failed: broker timeout'),
+      }));
+      expect(scoring.score).not.toHaveBeenCalled();
+    });
+
+    it('persists sector-misaligned when too few candles returned', async () => {
+      // Only 10 bars — not enough for classifyTrend (needs >= 26)
+      const shortCandles = Array.from({ length: 10 }, (_, i) => ({
+        close: 100 + i, timestamp: new Date(), open: 100 + i, high: 100 + i, low: 100 + i, volume: 1,
+      }));
+      angelOne.getHistoricalData.mockResolvedValue(shortCandles);
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 100 });
+
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'sector-misaligned',
+        rejectReason: expect.stringContaining('insufficient candles'),
+      }));
+      expect(scoring.score).not.toHaveBeenCalled();
+    });
+
+    it('persists sector-misaligned when sector trend is INDETERMINATE', async () => {
+      // Flat candles — EMA stays flat, price hovers at EMA → INDETERMINATE
+      const flatCandles = Array.from({ length: 50 }, () => ({
+        close: 100, timestamp: new Date(), open: 100, high: 100, low: 100, volume: 1,
+      }));
+      angelOne.getHistoricalData.mockResolvedValue(flatCandles);
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 100 });
+
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'sector-misaligned',
+        rejectReason: expect.stringContaining('trend INDETERMINATE'),
+      }));
+      expect(scoring.score).not.toHaveBeenCalled();
+    });
+
+    it('derives side=BUY when sector trend is UP', async () => {
+      // UP_CANDLES is already the default for angelOne.getHistoricalData
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [] });
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      expect(scoring.score).toHaveBeenCalledWith(expect.objectContaining({ side: 'BUY' }));
+    });
+
+    it('derives side=SELL when sector trend is DOWN', async () => {
+      const downCandles = makeTrendingCloses('DOWN', 50).map((close) => ({
+        close, timestamp: new Date(), open: close, high: close, low: close, volume: 1,
+      }));
+      angelOne.getHistoricalData.mockResolvedValue(downCandles);
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [] });
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      expect(scoring.score).toHaveBeenCalledWith(expect.objectContaining({ side: 'SELL' }));
+    });
+  });
+
+  // ─── Steps 4+5: Scoring + persistence ─────────────────────────────────────
+
+  describe('Scoring and persistence', () => {
+    beforeEach(() => {
+      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', exchange: 'NSE' });
+      mdRepo.getInstrumentByToken.mockResolvedValue({ id: 'sec-1', token: '99926019', exchange: 'NSE', symbol: 'NIFTY ENERGY' });
+      // UP candles → sector trend UP → side BUY
+      angelOne.getHistoricalData.mockResolvedValue(UP_CANDLES);
+    });
+
+    it('persists kind=setup and calls watch.createFromAlert when score >= 50', async () => {
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [{ name: 'Sector aligned', points: 10, pointsPossible: 10, passed: true }] });
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
+        alertId: 'alert-1',
+        symbol: 'RELIANCE',
+        token: '2885',
+        hitPrice: 2885,
+        kind: 'setup',
+        setupId: null,
+        rejectReason: null,
+        score: 70,
+        lotCount: 2,
+        scoreBreakdown: expect.any(Array),
+      }));
+      expect(watchSvc.createFromAlert).toHaveBeenCalledWith(expect.objectContaining({
+        alertId: 'alert-1',
+        setupId: 'setup-row-1',
+        symbol: 'RELIANCE',
+        token: '2885',
+        exchange: 'NSE',
+        side: 'BUY',
+        initialPrice: 2885,
+        initialScore: 70,
+      }));
+    });
+
+    it('persists kind=scored-low and does NOT call watch.createFromAlert when score < 50', async () => {
+      scoring.score.mockResolvedValue({ score: 40, lotCount: 0, checks: [] });
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'scored-low',
+        rejectReason: 'score 40 below 50',
+        score: 40,
+        lotCount: 0,
+      }));
+      expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
+    });
+
+    it('persists kind=error when scoring.score throws', async () => {
+      scoring.score.mockRejectedValue(new Error('indicator crash'));
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'error',
+        rejectReason: 'indicator crash',
+      }));
+      expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
+    });
+
+    it('still persists kind=setup even when watch.createFromAlert throws WatchCapExceededError', async () => {
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [] });
+      watchSvc.createFromAlert.mockRejectedValue(new WatchCapExceededError(50));
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      // setup must be persisted before the watch call
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({ kind: 'setup' }));
+      // No second createAlertSetup call (watch error must not re-persist)
+      expect(repo.createAlertSetup).toHaveBeenCalledTimes(1);
+    });
+
+    it('still persists kind=setup even when watch.createFromAlert throws unexpected error', async () => {
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [] });
+      watchSvc.createFromAlert.mockRejectedValue(new Error('db connection lost'));
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({ kind: 'setup' }));
+      expect(repo.createAlertSetup).toHaveBeenCalledTimes(1);
+    });
+
+    it('scores with correct token, symbol, exchange, entryPrice from hit', async () => {
+      scoring.score.mockResolvedValue({ score: 60, lotCount: 1, checks: [] });
+
+      await service.processOne('alert-99', { symbol: 'TCS', hitPrice: 3500 });
+
+      expect(scoring.score).toHaveBeenCalledWith({
+        token: '2885',
+        symbol: 'TCS',
+        exchange: 'NSE',
+        side: 'BUY',
+        entryPrice: 3500,
+        setupContext: null,
+      });
+    });
+  });
+
+  // ─── Stage 2 integration: watch.createFromAlert wiring ────────────────────
+
+  describe('Stage 2 wiring (watch monitor)', () => {
+    beforeEach(() => {
+      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', exchange: 'NSE' });
+      mdRepo.getInstrumentByToken.mockResolvedValue({ id: 'sec-1', token: '99926019', exchange: 'NSE' });
+      angelOne.getHistoricalData.mockResolvedValue(UP_CANDLES);
+    });
+
+    it('calls createFromAlert with setupId returned by repo.createAlertSetup', async () => {
+      repo.createAlertSetup.mockResolvedValue({ id: 'my-setup-id-42' });
+      scoring.score.mockResolvedValue({ score: 75, lotCount: 2, checks: [] });
+
+      await service.processOne('alert-A', { symbol: 'INFY', hitPrice: 1800 });
+
+      expect(watchSvc.createFromAlert).toHaveBeenCalledWith(expect.objectContaining({
+        setupId: 'my-setup-id-42',
+      }));
+    });
+
+    it('does NOT call createFromAlert when score is exactly 49', async () => {
+      scoring.score.mockResolvedValue({ score: 49, lotCount: 0, checks: [] });
+
+      await service.processOne('alert-A', { symbol: 'INFY', hitPrice: 1800 });
+
+      expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
+    });
+
+    it('calls createFromAlert when score is exactly 50', async () => {
+      scoring.score.mockResolvedValue({ score: 50, lotCount: 1, checks: [] });
+
+      await service.processOne('alert-A', { symbol: 'INFY', hitPrice: 1800 });
+
+      expect(watchSvc.createFromAlert).toHaveBeenCalled();
+    });
   });
 });
