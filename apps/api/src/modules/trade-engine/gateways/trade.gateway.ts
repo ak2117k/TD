@@ -12,10 +12,12 @@ import { Trade } from '@prisma/client';
 import { DailyRiskStatus } from '../dto/trade.dto';
 import { Position } from '@td/shared/types';
 
+const CORS_ORIGIN = process.env.WEB_ORIGIN ?? 'http://localhost:4000';
+
 @WebSocketGateway({
   namespace: `${WS_NAMESPACE}/trades`,
   cors: {
-    origin: 'http://localhost:3000',
+    origin: CORS_ORIGIN,
     credentials: true,
   },
 })

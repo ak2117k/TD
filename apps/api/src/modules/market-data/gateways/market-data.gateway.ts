@@ -37,10 +37,12 @@ export interface ConnectionStatusPayload {
  */
 const TICK_FLUSH_INTERVAL_MS = 100;
 
+const CORS_ORIGIN = process.env.WEB_ORIGIN ?? 'http://localhost:4000';
+
 @WebSocketGateway({
   namespace: WS_NAMESPACE,
   cors: {
-    origin: 'http://localhost:3000',
+    origin: CORS_ORIGIN,
     credentials: true,
   },
   transports: ['polling', 'websocket'],

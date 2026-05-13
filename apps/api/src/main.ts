@@ -39,8 +39,13 @@ async function bootstrap(): Promise<void> {
   const port = configService.get<number>('app.port', 3001);
 
   // CORS
+  // Web app runs on :4000 (not :3000 — that's the stale port from CLAUDE.md).
+  // Accept both 127.0.0.1 and localhost forms since browsers treat them as
+  // distinct origins. Honor WEB_ORIGIN env override for non-dev environments.
   app.enableCors({
-    origin: 'http://localhost:3000',
+    origin: process.env.WEB_ORIGIN
+      ? process.env.WEB_ORIGIN.split(',').map((s) => s.trim())
+      : ['http://localhost:4000', 'http://127.0.0.1:4000'],
     credentials: true,
   });
 

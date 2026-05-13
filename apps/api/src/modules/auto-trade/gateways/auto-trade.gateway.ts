@@ -9,10 +9,12 @@ import { Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { WS_NAMESPACE } from '@td/shared/constants';
 
+const CORS_ORIGIN = process.env.WEB_ORIGIN ?? 'http://localhost:4000';
+
 @WebSocketGateway({
   namespace: `${WS_NAMESPACE}/auto-trade`,
   cors: {
-    origin: 'http://localhost:3000',
+    origin: CORS_ORIGIN,
     credentials: true,
   },
 })
