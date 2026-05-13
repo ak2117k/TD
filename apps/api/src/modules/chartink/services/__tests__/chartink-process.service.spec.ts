@@ -6,6 +6,7 @@ import { SignalGeneratorService } from '../../../signal-generator/services/signa
 import { SetupTrackerService } from '../../../signal-generator/services/setup-tracker.service';
 import { MtfAlignmentService } from '../../../signal-generator/services/mtf-alignment.service';
 import { ChartinkScoringService } from '../chartink-scoring.service';
+import { WatchService } from '../../../watch-monitor/services/watch.service';
 
 describe('ChartinkProcessService', () => {
   let service: ChartinkProcessService;
@@ -15,9 +16,10 @@ describe('ChartinkProcessService', () => {
   let tracker: { getActive: jest.Mock };
   let mtf: { check: jest.Mock };
   let scoring: { score: jest.Mock; scoreToLotCount: jest.Mock };
+  let watchSvc: { createFromAlert: jest.Mock };
 
   beforeEach(async () => {
-    repo = { createAlertSetup: jest.fn().mockResolvedValue(undefined) };
+    repo = { createAlertSetup: jest.fn().mockResolvedValue({ id: 'setup-row-1' }) };
     mdRepo = { getInstrumentBySymbol: jest.fn() };
     signalSvc = { analyze: jest.fn() };
     tracker = { getActive: jest.fn() };
@@ -33,6 +35,7 @@ describe('ChartinkProcessService', () => {
       score: jest.fn().mockResolvedValue({ score: 70, lotCount: 2, checks: [] }),
       scoreToLotCount: jest.fn(),
     };
+    watchSvc = { createFromAlert: jest.fn().mockResolvedValue({ id: 'w1' }) };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -43,6 +46,7 @@ describe('ChartinkProcessService', () => {
         { provide: SetupTrackerService, useValue: tracker },
         { provide: MtfAlignmentService, useValue: mtf },
         { provide: ChartinkScoringService, useValue: scoring },
+        { provide: WatchService, useValue: watchSvc },
       ],
     }).compile();
 

@@ -3,6 +3,7 @@ import { BullModule } from '@nestjs/bull';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { MarketDataModule } from '../market-data/market-data.module';
 import { SignalGeneratorModule } from '../signal-generator/signal-generator.module';
+import { WatchMonitorModule } from '../watch-monitor/watch-monitor.module';
 import { ChartinkRepository } from './repositories/chartink.repository';
 import { ChartinkIngestService } from './services/chartink-ingest.service';
 import { ChartinkProcessService } from './services/chartink-process.service';
@@ -20,6 +21,7 @@ import { ChartinkController } from './controllers/chartink.controller';
     PrismaModule,
     MarketDataModule,
     SignalGeneratorModule,
+    WatchMonitorModule,
     BullModule.registerQueue({ name: 'chartink-process' }),
   ],
   controllers: [ChartinkWebhookController, ChartinkController],

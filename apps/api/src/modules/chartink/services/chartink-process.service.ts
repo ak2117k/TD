@@ -5,6 +5,7 @@ import { SignalGeneratorService } from '../../signal-generator/services/signal-g
 import { SetupTrackerService } from '../../signal-generator/services/setup-tracker.service';
 import { MtfAlignmentService } from '../../signal-generator/services/mtf-alignment.service';
 import { ChartinkScoringService, type SetupSide } from './chartink-scoring.service';
+import { WatchService, WatchCapExceededError } from '../../watch-monitor/services/watch.service';
 
 interface Hit {
   symbol: string;
@@ -24,6 +25,7 @@ export class ChartinkProcessService {
     private readonly tracker: SetupTrackerService,
     private readonly mtf: MtfAlignmentService,
     private readonly scoring: ChartinkScoringService,
+    private readonly watch: WatchService,
   ) {}
 
   async processAlert(alertId: string, hits: Hit[]): Promise<void> {
@@ -137,7 +139,7 @@ export class ChartinkProcessService {
           );
         }
       }
-      await this.repo.createAlertSetup({
+      const persistedSetup = await this.repo.createAlertSetup({
         alertId,
         symbol: hit.symbol,
         token: instrument.token,
@@ -149,6 +151,32 @@ export class ChartinkProcessService {
         lotCount: scoring?.lotCount ?? null,
         scoreBreakdown: scoring?.checks ?? null,
       });
+
+      // Wire to watch monitor (Stage 2) — only when score passes the lot band
+      // gate (≥ 50). Failures here MUST NOT block setup persistence.
+      if (scoring && scoring.score >= 50 && locked) {
+        try {
+          await this.watch.createFromAlert({
+            alertId,
+            setupId: persistedSetup.id,
+            symbol: hit.symbol,
+            token: instrument.token,
+            exchange: 'NSE',
+            side: (locked.entry > locked.stoploss ? 'BUY' : 'SELL'),
+            initialPrice: locked.entry,
+            initialScore: scoring.score,
+            initialBreakdown: { checks: scoring.checks, lotCount: scoring.lotCount } as unknown as import('@prisma/client').Prisma.InputJsonValue,
+          });
+        } catch (err) {
+          if (err instanceof WatchCapExceededError) {
+            this.logger.warn(`watch cap exceeded — skipping ${hit.symbol}`);
+          } else {
+            this.logger.warn(
+              `watch.createFromAlert failed for ${hit.symbol}: ${err instanceof Error ? err.message : err}`,
+            );
+          }
+        }
+      }
     } else {
       await this.repo.createAlertSetup({
         alertId,

@@ -75,8 +75,8 @@ export class ChartinkRepository {
     });
   }
 
-  async createAlertSetup(input: CreateAlertSetupInput): Promise<void> {
-    await this.prisma.chartinkAlertSetup.create({
+  async createAlertSetup(input: CreateAlertSetupInput): Promise<{ id: string }> {
+    const row = await this.prisma.chartinkAlertSetup.create({
       data: {
         alertId: input.alertId,
         symbol: input.symbol,
@@ -92,7 +92,9 @@ export class ChartinkRepository {
             ? Prisma.JsonNull
             : (input.scoreBreakdown as Prisma.InputJsonValue),
       },
+      select: { id: true },
     });
+    return row;
   }
 
   async listScanners() {
