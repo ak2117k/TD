@@ -3,6 +3,9 @@ import { RiskGuardService } from './risk-guard.service';
 import { WatchRepository } from '../repositories/watch.repository';
 import { WatchService } from './watch.service';
 
+// MAX_INVESTMENT_PER_TRADE = 200_000
+// qty(price) = Math.max(1, Math.floor(200_000 / Math.max(price, 1)))
+
 describe('RiskGuardService', () => {
   let svc: RiskGuardService;
   let repo: { findTradedToday: jest.Mock };
@@ -22,35 +25,41 @@ describe('RiskGuardService', () => {
   });
 
   it('computes total daily P&L across TRADED entries (BUY side)', async () => {
+    // A=BUY: executedPrice=100 → qty=2000; pnl = +5 × 2000 = +10,000
+    // B=BUY: executedPrice=500 → qty=400;  pnl = -10 × 400  = -4,000
+    // total = +6,000
     repo.findTradedToday.mockResolvedValue([
-      { symbol: 'A', side: 'BUY', executedPrice: 100, currentPrice: 105 }, // +5 * 50 = +250
-      { symbol: 'B', side: 'BUY', executedPrice: 200, currentPrice: 190 }, // -10 * 50 = -500
+      { symbol: 'A', side: 'BUY', executedPrice: 100, currentPrice: 105 },
+      { symbol: 'B', side: 'BUY', executedPrice: 500, currentPrice: 490 },
     ]);
     const r = await svc.computeDailyPnL();
-    expect(r.pnl).toBe(-250);
+    expect(r.pnl).toBe(6_000);
     expect(r.breakdown).toHaveLength(2);
   });
 
   it('flips sign for SELL entries (profit when price drops)', async () => {
+    // A=SELL: executedPrice=100 → qty=2000; pnl = (95-100)*2000*(-1) = +10,000
     repo.findTradedToday.mockResolvedValue([
-      { symbol: 'A', side: 'SELL', executedPrice: 100, currentPrice: 95 }, // (95-100)*50*(-1) = +250
+      { symbol: 'A', side: 'SELL', executedPrice: 100, currentPrice: 95 },
     ]);
     const r = await svc.computeDailyPnL();
-    expect(r.pnl).toBe(250);
+    expect(r.pnl).toBe(10_000);
   });
 
   it('does NOT trip below loss limit', async () => {
+    // A=BUY: executedPrice=1000 → qty=200; pnl = -1 × 200 = -200 (well below 60k)
     repo.findTradedToday.mockResolvedValue([
-      { symbol: 'A', side: 'BUY', executedPrice: 1000, currentPrice: 999 }, // -50
+      { symbol: 'A', side: 'BUY', executedPrice: 1000, currentPrice: 999 },
     ]);
     expect(await svc.checkAndTrip()).toBe(false);
     expect(watch.squareOffAll).not.toHaveBeenCalled();
   });
 
   it('TRIPS when cumulative loss <= -₹60,000', async () => {
-    // 50 shares × ₹1200 drop = -₹60,000
+    // A=BUY: executedPrice=100 → qty=2000; pnl = (70-100)*2000 = -30*2000 = -60,000
+    // -60,000 <= -60,000 → breaker trips
     repo.findTradedToday.mockResolvedValue([
-      { symbol: 'A', side: 'BUY', executedPrice: 5000, currentPrice: 3800 },
+      { symbol: 'A', side: 'BUY', executedPrice: 100, currentPrice: 70 },
     ]);
     expect(await svc.checkAndTrip()).toBe(true);
     expect(watch.squareOffAll).toHaveBeenCalledWith('daily-loss-breaker');

@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { WatchRepository } from '../repositories/watch.repository';
-import { WatchService } from './watch.service';
+import { WatchService, MAX_INVESTMENT_PER_TRADE } from './watch.service';
 
 /**
  * Two non-negotiable risk rules for intraday trading:
@@ -20,10 +20,6 @@ export class RiskGuardService {
   // Compared against the SUM of all today's TRADED entries' (current - executed) × qty × sideMul.
   static readonly DAILY_LOSS_LIMIT_RUPEES = 60_000;
 
-  // Quantity assumption for equity intraday (matches /watch table P&L column).
-  // Real broker fills may differ; this is our P&L estimator for the breaker.
-  static readonly INTRADAY_QTY = 50;
-
   constructor(
     private readonly repo: WatchRepository,
     private readonly watch: WatchService,
@@ -33,6 +29,8 @@ export class RiskGuardService {
    * Sum (currentPrice − executedPrice) × qty × sideMul across all
    * TRADED entries with executedAt today (IST date). Positive = profit,
    * negative = loss.
+   * Dynamic qty: floor(MAX_INVESTMENT_PER_TRADE / executedPrice) — matches
+   * WatchController.execute's sizing so breaker tracks actual ₹ exposure.
    */
   async computeDailyPnL(): Promise<{ pnl: number; breakdown: Array<{ symbol: string; pnl: number }> }> {
     const tradedToday = await this.repo.findTradedToday();
@@ -42,7 +40,9 @@ export class RiskGuardService {
       const ref = (e as any).executedPrice ?? (e as any).initialPrice;
       const curr = (e as any).currentPrice ?? ref;
       const sideMul = (e as any).side === 'BUY' ? 1 : -1;
-      const pnl = (curr - ref) * RiskGuardService.INTRADAY_QTY * sideMul;
+      // Dynamic qty: MAX_INVESTMENT / executedPrice. Matches WatchController.execute.
+      const qty = Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(ref, 1)));
+      const pnl = (curr - ref) * qty * sideMul;
       total += pnl;
       breakdown.push({ symbol: (e as any).symbol, pnl });
     }

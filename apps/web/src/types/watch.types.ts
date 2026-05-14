@@ -19,7 +19,7 @@ export interface WatchEntry {
   initialBreakdown: unknown;
   initialAt: string;
   profitTarget: number;
-  profitTargetSource: 'indicator-sr' | 'fallback-10pct';
+  profitTargetSource: 'indicator-sr' | 'fallback-2pct';
   stopLossScore: number;
   status: WatchStatus;
   currentPrice: number | null;

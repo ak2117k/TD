@@ -6,13 +6,9 @@ interface Props {
   selectedId: string | null;
 }
 
-/**
- * Default intraday position size used to compute running profit in the
- * watch table. Backend's executeTrade currently uses lotCount × lotSize
- * (=1 for equities); this constant is the display assumption — the
- * actual quantity placed on Execute is a separate concern.
- */
-const INTRADAY_QTY = 50;
+/** Max ₹ deployed per trade — mirrors backend MAX_INVESTMENT_PER_TRADE.
+ *  Per-row quantity is floor(this / referencePrice) so P&L scales with stock price. */
+const MAX_INVESTMENT_PER_TRADE = 200_000;
 
 function pctChange(curr: number | null, init: number): string {
   if (curr == null) return '—';
@@ -24,6 +20,7 @@ interface ProfitView {
   abs: number;
   pct: number;
   ref: number;
+  qty: number;
   hasLivePrice: boolean;
 }
 
@@ -34,16 +31,20 @@ interface ProfitView {
  *   - WATCHING entries → initialPrice (potential / what-if P&L if entered now)
  *
  * Side flips the sign: SELL profits when price drops.
+ * Qty is dynamic: floor(MAX_INVESTMENT_PER_TRADE / ref) so ₹ deployed is
+ * consistent (~₹2L) regardless of per-share price.
  */
 function profitView(entry: WatchEntry): ProfitView {
   const ref = entry.executedPrice ?? entry.initialPrice;
   const curr = entry.currentPrice ?? ref;
   const sideMul = entry.side === 'BUY' ? 1 : -1;
   const diff = (curr - ref) * sideMul;
+  const qty = Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(ref, 1)));
   return {
-    abs: diff * INTRADAY_QTY,
+    abs: diff * qty,
     pct: ref > 0 ? (diff / ref) * 100 : 0,
     ref,
+    qty,
     hasLivePrice: entry.currentPrice != null,
   };
 }
@@ -91,9 +92,9 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
           <th className="py-2 px-3 text-right">Δ%</th>
           <th
             className="py-2 px-3 text-right"
-            title={`Running P&L assuming ${INTRADAY_QTY} shares intraday`}
+            title="Running P&L at ₹2L max investment per trade (qty varies by stock price)"
           >
-            P&amp;L ({INTRADAY_QTY}q)
+            P&amp;L
           </th>
           <th className="py-2 px-3 text-right">P&amp;L %</th>
           <th className="py-2 px-3 text-right">Target</th>
@@ -134,7 +135,10 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
               <td className="py-2 px-3 text-right text-[var(--color-text-secondary)]">
                 {pctChange(e.currentPrice, e.initialPrice)}
               </td>
-              <td className={`py-2 px-3 text-right font-medium tabular-nums ${profitColor(p.abs, p.hasLivePrice)}`}>
+              <td
+                className={`py-2 px-3 text-right font-medium tabular-nums ${profitColor(p.abs, p.hasLivePrice)}`}
+                title={`${p.qty} shares @ ₹${p.ref.toFixed(2)} = ₹${(p.qty * p.ref).toFixed(0)} invested`}
+              >
                 {p.hasLivePrice ? fmtRupees(p.abs) : '—'}
               </td>
               <td className={`py-2 px-3 text-right tabular-nums ${profitColor(p.abs, p.hasLivePrice)}`}>

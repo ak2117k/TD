@@ -2,11 +2,12 @@
  * Unit tests for WatchService partial-exit + trailing-stop logic.
  *
  * Coverage:
- *  1. BUY entry at +9.99% does NOT trigger partial exit
- *  2. BUY entry at +10.00% triggers partial exit; sets partialExitedAt,
- *     partialQty=25, remainingQty=25, trailingStopPrice = ltp × 0.98
- *  3. SELL entry at −10.00% (in their favor) triggers partial exit;
- *     trailingStopPrice = ltp × 1.02
+ *  1. BUY entry at +0.99% does NOT trigger partial exit
+ *  2. BUY entry at +1.00% triggers partial exit; sets partialExitedAt,
+ *     partialQty=100, remainingQty=100 (entry executedPrice=1000 → qty=200),
+ *     trailingStopPrice = ltp × 0.995
+ *  3. SELL entry at −1.00% (in their favor) triggers partial exit;
+ *     trailingStopPrice = ltp × 1.005
  *  4. After partial exit, BUY: price rises 5% more → trailingHighWater
  *     updates, stop ratchets up
  *  5. After partial exit, BUY: price drops back below stop → triggerTrailingStop
@@ -25,6 +26,8 @@ import { WatchGateway } from '../gateways/watch.gateway';
 import { TradeExecutionService } from '../../trade-engine/services/trade-execution.service';
 
 // ---- helpers ----------------------------------------------------------------
+// executedPrice=1000 → qty = floor(200_000 / 1000) = 200
+// partialQty = floor(200 * 0.5) = 100; remainingQty = 100
 
 function makeEntry(overrides: Partial<Record<string, any>> = {}): Record<string, any> {
   return {
@@ -107,13 +110,13 @@ describe('WatchService — partial-exit + trailing-stop', () => {
     svc = await buildService(repo, trade, feed, gateway);
   });
 
-  // 1. BUY entry at +9.99% does NOT trigger partial exit -------------------
-  it('BUY at +9.99% does NOT trigger partial exit', async () => {
+  // 1. BUY entry at +0.99% does NOT trigger partial exit --------------------
+  it('BUY at +0.99% does NOT trigger partial exit', async () => {
     const entry = makeEntry({ side: 'BUY', executedPrice: 1000 });
     repo.findActiveByToken.mockResolvedValue([entry]);
 
-    // ltp = 1000 * 1.0999 = 1099.9 → move = 9.99%, below 10% threshold
-    await svc.onTick('11536', 1099.9, new Date());
+    // ltp = 1000 * 1.0099 = 1009.9 → move = 0.99%, below 1% threshold
+    await svc.onTick('11536', 1009.9, new Date());
 
     const partialExitUpdate = (repo.update.mock.calls as any[]).find(
       (call: any[]) => call[1]?.partialExitedAt,
@@ -126,27 +129,28 @@ describe('WatchService — partial-exit + trailing-stop', () => {
     expect(partialExitEvent).toBeUndefined();
   });
 
-  // 2. BUY entry at +10.00% triggers partial exit --------------------------
-  it('BUY at exactly +10.00% triggers partial exit with correct fields', async () => {
+  // 2. BUY entry at +1.00% triggers partial exit ---------------------------
+  it('BUY at exactly +1.00% triggers partial exit with correct fields', async () => {
     // profitTarget is set above the test ltp so TARGET_HIT does not fire first
     const entry = makeEntry({ side: 'BUY', executedPrice: 1000, profitTarget: 1300 });
     repo.findActiveByToken.mockResolvedValue([entry]);
 
-    // ltp = 1100 → move = 10.00%, exactly at threshold
-    await svc.onTick('11536', 1100, new Date());
+    // ltp = 1010 → move = 1.00%, exactly at threshold
+    // qty = floor(200_000 / 1000) = 200; partialQty = floor(200*0.5) = 100; remaining = 100
+    await svc.onTick('11536', 1010, new Date());
 
-    // Should have called executeTrade (SELL, 25 shares) for partial close
+    // Should have called executeTrade (SELL, 100 shares) for partial close
     expect(trade.executeTrade).toHaveBeenCalledWith(
       expect.objectContaining({
         side: 'SELL',
-        quantity: 25,
+        quantity: 100,
         orderType: 'MARKET',
       }),
     );
 
     // Should have written a PARTIAL_EXIT event
     expect(repo.createEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ eventType: 'PARTIAL_EXIT', price: 1100 }),
+      expect.objectContaining({ eventType: 'PARTIAL_EXIT', price: 1010 }),
     );
 
     // Should have updated the entry with correct partial-exit fields
@@ -154,20 +158,20 @@ describe('WatchService — partial-exit + trailing-stop', () => {
       'w1',
       expect.objectContaining({
         partialExitedAt: expect.any(Date),
-        partialExitPrice: 1100,
-        partialQty: 25,
-        remainingQty: 25,
-        trailingHighWater: 1100,
-        trailingStopPrice: expect.closeTo(1100 * 0.98, 4),
+        partialExitPrice: 1010,
+        partialQty: 100,
+        remainingQty: 100,
+        trailingHighWater: 1010,
+        trailingStopPrice: expect.closeTo(1010 * 0.995, 4),
       }),
     );
   });
 
-  // 3. SELL entry at −10.00% triggers partial exit -------------------------
-  it('SELL at −10.00% triggers partial exit; trailingStopPrice = ltp × 1.02', async () => {
+  // 3. SELL entry at −1.00% triggers partial exit --------------------------
+  it('SELL at −1.00% triggers partial exit; trailingStopPrice = ltp × 1.005', async () => {
     // profitTarget for SELL is below ltp direction; set well below ltp so
-    // TARGET_HIT (ltp <= profitTarget) does not fire at ltp=900.
-    // SELL target hit fires when ltp <= profitTarget, so set profitTarget=700 (below 900).
+    // TARGET_HIT (ltp <= profitTarget) does not fire at ltp=990.
+    // SELL target hit fires when ltp <= profitTarget, so set profitTarget=700 (below 990).
     const entry = makeEntry({
       side: 'SELL',
       executedPrice: 1000,
@@ -177,59 +181,59 @@ describe('WatchService — partial-exit + trailing-stop', () => {
     });
     repo.findActiveByToken.mockResolvedValue([entry]);
 
-    // ltp = 900 → move = (1000-900)/1000 = 10%, exactly at threshold
-    await svc.onTick('11536', 900, new Date());
+    // ltp = 990 → move = (1000-990)/1000 = 1%, exactly at threshold
+    await svc.onTick('11536', 990, new Date());
 
-    // Partial close should be BUY (opposite of SELL)
+    // Partial close should be BUY (opposite of SELL), 100 shares
     expect(trade.executeTrade).toHaveBeenCalledWith(
       expect.objectContaining({
         side: 'BUY',
-        quantity: 25,
+        quantity: 100,
       }),
     );
 
-    // trailingStopPrice for SELL = ltp × 1.02
+    // trailingStopPrice for SELL = ltp × 1.005
     expect(repo.update).toHaveBeenCalledWith(
       'w1',
       expect.objectContaining({
-        partialQty: 25,
-        remainingQty: 25,
-        trailingHighWater: 900,
-        trailingStopPrice: expect.closeTo(900 * 1.02, 4),
+        partialQty: 100,
+        remainingQty: 100,
+        trailingHighWater: 990,
+        trailingStopPrice: expect.closeTo(990 * 1.005, 4),
       }),
     );
   });
 
   // 4. After partial exit, BUY: price rises → trailingHighWater ratchets up --
   it('After partial exit, BUY: new high ratchets trailingHighWater + stop', async () => {
-    // Entry already has partial exit at 1100, highWater=1100, stop=1078.
-    // profitTarget must be ABOVE the test ltp (1155) so TARGET_HIT does not fire.
+    // Entry already has partial exit at 1010, highWater=1010, stop=1010*0.995=1004.95
+    // profitTarget must be ABOVE the test ltp (1055) so TARGET_HIT does not fire.
     const entry = makeEntry({
       side: 'BUY',
       executedPrice: 1000,
       profitTarget: 1500,
       partialExitedAt: new Date(),
-      partialExitPrice: 1100,
-      partialQty: 25,
-      remainingQty: 25,
-      trailingHighWater: 1100,
-      trailingStopPrice: 1100 * 0.98, // 1078
+      partialExitPrice: 1010,
+      partialQty: 100,
+      remainingQty: 100,
+      trailingHighWater: 1010,
+      trailingStopPrice: 1010 * 0.995, // 1004.95
     });
     repo.findActiveByToken.mockResolvedValue([entry]);
 
-    // Price rises to 1155 (another +5% from partial exit price)
-    await svc.onTick('11536', 1155, new Date());
+    // Price rises to 1055 (another +4.5% from partial exit price)
+    await svc.onTick('11536', 1055, new Date());
 
-    // High-water should update to 1155, stop to 1155 × 0.98
+    // High-water should update to 1055, stop to 1055 × 0.995
     expect(repo.update).toHaveBeenCalledWith(
       'w1',
       expect.objectContaining({
-        trailingHighWater: 1155,
-        trailingStopPrice: expect.closeTo(1155 * 0.98, 4),
+        trailingHighWater: 1055,
+        trailingStopPrice: expect.closeTo(1055 * 0.995, 4),
       }),
     );
 
-    // Should NOT have triggered trailing stop (stop = 1131.9, price = 1155 > stop)
+    // Should NOT have triggered trailing stop (stop = 1049.725, price = 1055 > stop)
     const trailStopEvent = (repo.createEvent.mock.calls as any[]).find(
       (call: any[]) => call[0]?.eventType === 'TRAILING_STOP_HIT',
     );
@@ -238,33 +242,33 @@ describe('WatchService — partial-exit + trailing-stop', () => {
 
   // 5. After partial exit, BUY: price drops below stop → EXITED -------------
   it('After partial exit, BUY: price drops below trailing stop → EXITED', async () => {
-    // High-water = 1155, stop = 1155 × 0.98 = 1131.9.
-    // profitTarget must be ABOVE ltp (1130) so TARGET_HIT does not fire first.
-    const trailStop = 1155 * 0.98;
+    // High-water = 1155, stop = 1155 × 0.995 = 1149.225.
+    // profitTarget must be ABOVE ltp (1148) so TARGET_HIT does not fire first.
+    const trailStop = 1155 * 0.995;
     const entry = makeEntry({
       side: 'BUY',
       executedPrice: 1000,
       profitTarget: 1500,
       partialExitedAt: new Date(),
-      partialExitPrice: 1100,
-      partialQty: 25,
-      remainingQty: 25,
+      partialExitPrice: 1010,
+      partialQty: 100,
+      remainingQty: 100,
       trailingHighWater: 1155,
       trailingStopPrice: trailStop,
     });
     repo.findActiveByToken.mockResolvedValue([entry]);
 
-    // Price drops to 1130 — below stop (1131.9)
-    await svc.onTick('11536', 1130, new Date());
+    // Price drops to 1148 — below stop (1149.225)
+    await svc.onTick('11536', 1148, new Date());
 
-    // Should close remaining 25 shares via broker
+    // Should close remaining 100 shares via broker
     expect(trade.executeTrade).toHaveBeenCalledWith(
-      expect.objectContaining({ side: 'SELL', quantity: 25 }),
+      expect.objectContaining({ side: 'SELL', quantity: 100 }),
     );
 
     // TRAILING_STOP_HIT event
     expect(repo.createEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ eventType: 'TRAILING_STOP_HIT', price: 1130 }),
+      expect.objectContaining({ eventType: 'TRAILING_STOP_HIT', price: 1148 }),
     );
 
     // Status → EXITED, closedReason → 'trailing-stop'

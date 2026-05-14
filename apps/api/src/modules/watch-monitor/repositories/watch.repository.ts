@@ -13,7 +13,7 @@ export interface CreateEntryInput {
   initialScore: number;
   initialBreakdown: Prisma.InputJsonValue;
   profitTarget: number;
-  profitTargetSource: 'indicator-sr' | 'fallback-10pct';
+  profitTargetSource: 'indicator-sr' | 'fallback-2pct';
   stopLossScore: number;
   optionsToken?: string | null;
   optionsType?: 'CE' | 'PE' | null;

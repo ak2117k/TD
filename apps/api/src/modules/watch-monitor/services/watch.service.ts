@@ -10,14 +10,20 @@ import { TradeExecutionService } from '../../trade-engine/services/trade-executi
 
 export const WATCH_CAP = 50;
 
-/** Partial-exit trigger: when |price move from entry| in our direction >= this %. */
-const PARTIAL_EXIT_THRESHOLD_PCT = 0.10;
+/** Partial-exit trigger: when |price move from entry| in our direction >= this %.
+ *  Revised from 0.10 → 0.01 for realistic intraday scalping. */
+const PARTIAL_EXIT_THRESHOLD_PCT = 0.01;
 
-/** Trailing stop distance: stop tracks the most-favorable price minus/plus this %. */
-const TRAILING_STOP_PCT = 0.02;
+/** Trailing stop distance: stop tracks the most-favorable price minus/plus this %.
+ *  Revised from 0.02 → 0.005 — tighter trail prevents giving back the 1% gain. */
+const TRAILING_STOP_PCT = 0.005;
 
-/** Fraction of position to exit at the +10% threshold. */
+/** Fraction of position to exit at the partial-exit threshold. (Unchanged.) */
 const PARTIAL_EXIT_FRACTION = 0.5;
+
+/** Maximum ₹ deployed per trade. Determines share quantity:
+ *  qty = floor(MAX_INVESTMENT_PER_TRADE / referencePrice). */
+export const MAX_INVESTMENT_PER_TRADE = 200_000;
 
 export class WatchCapExceededError extends Error {
   constructor(activeCount: number) {
@@ -119,7 +125,7 @@ export class WatchService {
       breakdown: input.initialBreakdown,
       priceDelta: null,
       scoreDelta: null,
-      notes: targetResult.source === 'fallback-10pct' ? 'pt:fallback-10pct' : null,
+      notes: targetResult.source === 'fallback-2pct' ? 'pt:fallback-2pct' : null,
     });
 
     this.feed.subscribeForWatch(entry.token, entry.id);
@@ -416,11 +422,11 @@ export class WatchService {
 
   /**
    * Phase 1 check: TRADED entry hasn't done partial exit yet. If price has
-   * moved >= +10% in our favor (BUY: ltp >= entry × 1.10; SELL: ltp <= entry × 0.90),
+   * moved >= +1% in our favor (BUY: ltp >= entry × 1.01; SELL: ltp <= entry × 0.99),
    * trigger the partial exit:
    *   - Close PARTIAL_EXIT_FRACTION (50%) of the remaining position via broker
    *   - Set partialExitedAt, partialExitPrice, partialQty, remainingQty
-   *   - Initialize trailingHighWater = ltp, trailingStopPrice = ltp ± 2%
+   *   - Initialize trailingHighWater = ltp, trailingStopPrice = ltp ± 0.5%
    *   - Write PARTIAL_EXIT event
    */
   private async checkPartialExitTrigger(entry: any, ltp: number): Promise<void> {
@@ -434,13 +440,9 @@ export class WatchService {
     if (moveFavor < PARTIAL_EXIT_THRESHOLD_PCT) return;
 
     // Trigger! Compute split.
-    // Position size source: the trade that was placed (paperTradeId/liveTradeId)
-    // would tell us the exact quantity. For Stage 2 equity intraday we default
-    // to 50 shares per setup (matches WatchController.execute's INTRADAY_EQUITY_QTY).
-    // If a future tradeId is set with a different qty, read from the trade
-    // record. For now assume 50 unless an existing partialQty/remainingQty
-    // indicates otherwise.
-    const initialQty = 50; // INTRADAY_EQUITY_QTY — matches the execution default
+    // Dynamic qty: MAX_INVESTMENT_PER_TRADE / executedPrice.
+    // Matches WatchController.execute's computation so P&L is consistent.
+    const initialQty = Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(ref, 1)));
     const partialQty = Math.floor(initialQty * PARTIAL_EXIT_FRACTION);
     const remainingQty = initialQty - partialQty;
 
@@ -539,7 +541,11 @@ export class WatchService {
       `${entry.symbol}: trailing stop hit at ₹${ltp.toFixed(2)} (high-water=${entry.trailingHighWater}, stop=${stopPrice.toFixed(2)})`,
     );
 
-    const remainingQty = entry.remainingQty ?? Math.floor(50 * (1 - PARTIAL_EXIT_FRACTION));
+    // Use stored remainingQty from the partial-exit split; fall back to
+    // computing dynamically from the reference price if not yet set.
+    const ref = entry.executedPrice ?? entry.initialPrice;
+    const fullQty = Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(ref, 1)));
+    const remainingQty = entry.remainingQty ?? Math.floor(fullQty * (1 - PARTIAL_EXIT_FRACTION));
 
     // Close remaining half via broker.
     try {

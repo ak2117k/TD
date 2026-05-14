@@ -13,7 +13,7 @@ import {
 } from '@nestjs/common';
 import { WatchStatus } from '@prisma/client';
 import { WatchRepository } from '../repositories/watch.repository';
-import { WatchService } from '../services/watch.service';
+import { WatchService, MAX_INVESTMENT_PER_TRADE } from '../services/watch.service';
 import { RiskGuardService } from '../services/risk-guard.service';
 import { ExecuteWatchDto } from '../dto/execute-watch.dto';
 import { CloseWatchDto } from '../dto/close-watch.dto';
@@ -68,15 +68,17 @@ export class WatchController {
 
     // Quantity selection:
     //   - F&O options leg present → lotCount × lotSize (e.g., 1 × 175 = 175 NIFTY units)
-    //   - Equity intraday (no options leg) → 50 shares per setup, the
-    //     default intraday position size the /watch UI also displays as the
-    //     P&L basis. Callers can override with body.quantity.
+    //   - Equity intraday (no options leg) → floor(MAX_INVESTMENT_PER_TRADE / price).
+    //     A ₹100 stock → 2000 shares; a ₹7500 stock → 26 shares.
+    //     Math.max(1, ...) guards against pathological high-price edge cases.
+    //     Callers can always override with body.quantity.
     const optionsLotSize = (entry as any).optionsLotSize ?? null;
     const lotCount = (entry.initialBreakdown as any)?.lotCount ?? 1;
-    const INTRADAY_EQUITY_QTY = 50;
+    // Reference price for sizing: current live price preferred, else initial entry.
+    const referencePrice = (entry as any).currentPrice ?? entry.initialPrice;
     const computedQty = optionsLotSize
       ? lotCount * optionsLotSize
-      : INTRADAY_EQUITY_QTY;
+      : Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(referencePrice, 1)));
     const qty = body.quantity ?? computedQty;
 
     // ExecuteTradeDto requires: symbol, token, exchange, side, orderType,
