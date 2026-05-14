@@ -21,6 +21,7 @@ describe('WatchService.createFromAlert', () => {
   beforeEach(async () => {
     repo = {
       findActiveBySetupId: jest.fn().mockResolvedValue(null),
+      findActiveByToken: jest.fn().mockResolvedValue([]),
       countActive: jest.fn().mockResolvedValue(0),
       createEntry: jest.fn().mockResolvedValue({ id: 'w1', token: '11536' }),
       createEvent: jest.fn().mockResolvedValue({ id: 'e1' }),
@@ -64,6 +65,25 @@ describe('WatchService.createFromAlert', () => {
     const r = await svc.createFromAlert(baseInput);
     expect(r.id).toBe('existing');
     expect(repo.createEntry).not.toHaveBeenCalled();
+  });
+
+  it('returns existing entry when same stock is already being watched (token dedup)', async () => {
+    // Different Chartink setup (different setupId) but SAME stock token.
+    // Should return the existing entry instead of creating a duplicate.
+    repo.findActiveBySetupId.mockResolvedValue(null); // new setup
+    repo.findActiveByToken.mockResolvedValue([
+      { id: 'first-watch-of-tcs', token: '11536', status: 'WATCHING', symbol: 'TCS-EQ' },
+    ]);
+    const r = await svc.createFromAlert(baseInput);
+    expect(r.id).toBe('first-watch-of-tcs');
+    expect(repo.createEntry).not.toHaveBeenCalled();
+  });
+
+  it('proceeds to create when no active entry exists for token (both dedups miss)', async () => {
+    repo.findActiveBySetupId.mockResolvedValue(null);
+    repo.findActiveByToken.mockResolvedValue([]); // no active watch for this token
+    await svc.createFromAlert(baseInput);
+    expect(repo.createEntry).toHaveBeenCalled();
   });
 
   it('creates entry, INITIAL event, subscribes feed on happy path', async () => {

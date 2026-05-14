@@ -53,10 +53,27 @@ export class WatchService {
   ) {}
 
   async createFromAlert(input: CreateFromAlertInput): Promise<WatchEntry> {
-    const existing = await this.repo.findActiveBySetupId(input.setupId);
-    if (existing) {
-      this.logger.debug(`createFromAlert: returning existing entry ${existing.id} for setup ${input.setupId}`);
-      return existing;
+    // Tier 1 dedup: same Chartink setup (retries / Bull job replays).
+    const existingBySetup = await this.repo.findActiveBySetupId(input.setupId);
+    if (existingBySetup) {
+      this.logger.debug(
+        `createFromAlert: returning existing entry ${existingBySetup.id} for setup ${input.setupId}`,
+      );
+      return existingBySetup;
+    }
+
+    // Tier 2 dedup: same STOCK already has an active watch entry. Without
+    // this, a stock that fires across multiple Chartink scanners in the same
+    // session creates duplicate WatchEntry rows — wasteful, confusing on the
+    // /watch UI, and inflates the 50-slot cap counter. We keep the FIRST
+    // entry and reuse it; subsequent fires return the existing one.
+    const existingByToken = await this.repo.findActiveByToken(input.token);
+    if (existingByToken.length > 0) {
+      const reused = existingByToken[0];
+      this.logger.log(
+        `createFromAlert: ${input.symbol} already being watched (entry ${reused.id}, status=${reused.status}) — skipping duplicate from setup ${input.setupId}`,
+      );
+      return reused;
     }
 
     const active = await this.repo.countActive();
