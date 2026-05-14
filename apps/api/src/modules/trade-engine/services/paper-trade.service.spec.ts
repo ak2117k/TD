@@ -1,6 +1,12 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { PaperTradeService } from './paper-trade.service';
+import { TradeRepository } from '../repositories/trade.repository';
 import { OrderRequest } from '../../../common/interfaces/broker-adapter.interface';
+
+/** Stub repo for the service constructor — onModuleInit isn't called in these tests. */
+const mockTradeRepository = {
+  findAllPaperTrades: jest.fn().mockResolvedValue([]),
+};
 
 /**
  * Regression spec for the "paper trade entryPrice = 0/null" bug.
@@ -19,7 +25,10 @@ describe('PaperTradeService.simulateOrder — fillPrice exposure', () => {
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
-      providers: [PaperTradeService],
+      providers: [
+        PaperTradeService,
+        { provide: TradeRepository, useValue: mockTradeRepository },
+      ],
     }).compile();
     service = module.get(PaperTradeService);
   });

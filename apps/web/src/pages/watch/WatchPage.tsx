@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useWatchEntries } from '../../hooks/useWatchEntries';
 import { WatchTable } from './WatchTable';
 import { WatchDetailPanel } from './WatchDetailPanel';
+import { PaperAccountBadge } from '../../components/trading/PaperAccountBadge';
 import type { WatchStatus } from '../../types/watch.types';
 
 const FILTERS: Array<{ label: string; value: WatchStatus | undefined }> = [
@@ -20,9 +21,12 @@ export function WatchPage() {
 
   return (
     <div className="p-6 text-[var(--color-text-primary)]">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-4 gap-4">
         <h1 className="text-2xl font-semibold text-[var(--color-text-primary)]">Watch Monitor</h1>
-        <div className="text-sm text-[var(--color-text-muted)]">{activeCount} / 50 active slots</div>
+        <div className="flex items-center gap-4">
+          <PaperAccountBadge />
+          <div className="text-sm text-[var(--color-text-muted)]">{activeCount} / 50 active slots</div>
+        </div>
       </div>
 
       <div className="flex gap-2 mb-4">

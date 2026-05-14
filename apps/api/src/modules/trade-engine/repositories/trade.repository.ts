@@ -10,6 +10,18 @@ export class TradeRepository {
 
   constructor(private readonly prisma: PrismaService) {}
 
+  /**
+   * Return every paper trade ever persisted, ordered by createdAt ASC so a
+   * cash-flow replay produces the same final balance the in-memory service
+   * had before restart. Used by PaperTradeService.onModuleInit().
+   */
+  async findAllPaperTrades(): Promise<Trade[]> {
+    return this.prisma.trade.findMany({
+      where: { isPaperTrade: true },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
+
   async createTrade(data: {
     instrumentId: string;
     signalId?: string;

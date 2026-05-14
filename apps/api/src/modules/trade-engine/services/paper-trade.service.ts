@@ -1,17 +1,18 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import {
   OrderRequest,
   OrderResponse,
   TickData,
 } from '../../../common/interfaces/broker-adapter.interface';
+import { TradeRepository } from '../repositories/trade.repository';
 import { v4 as uuidv4 } from 'uuid';
 
 /** Simulated slippage range: 0.01% to 0.05%. */
 const MIN_SLIPPAGE_PCT = 0.0001;
 const MAX_SLIPPAGE_PCT = 0.0005;
 
-/** Default starting virtual capital (INR). */
-const DEFAULT_VIRTUAL_CAPITAL = 1_000_000;
+/** Default starting virtual capital (INR). ₹20,00,000 (20 lakhs). */
+const DEFAULT_VIRTUAL_CAPITAL = 2_000_000;
 
 interface PendingPaperOrder {
   id: string;
@@ -30,7 +31,7 @@ interface VirtualPosition {
 }
 
 @Injectable()
-export class PaperTradeService {
+export class PaperTradeService implements OnModuleInit {
   private readonly logger = new Logger(PaperTradeService.name);
 
   /** Pending limit/SL orders waiting for price triggers. */
@@ -50,6 +51,59 @@ export class PaperTradeService {
 
   /** LTP cache for simulating fills. */
   private readonly ltpCache = new Map<string, number>();
+
+  constructor(private readonly tradeRepository: TradeRepository) {}
+
+  /**
+   * On API startup, replay every persisted paper trade to recover the balance.
+   * The trades table is the source of truth — we never store balance separately,
+   * so in-memory state cannot drift from the trade history.
+   *
+   * Replay rules (mirror what fillAtPrice does on each fill):
+   *   - Closed BUY  : balance += pnl                                (= -entry×qty + exit×qty)
+   *   - Closed SELL : balance += pnl                                (= +entry×qty - exit×qty)
+   *   - Open   BUY  : balance -= entry × qty                        (only the opening fill ran)
+   *   - Open   SELL : balance += entry × qty                        (short credits cash on open)
+   */
+  async onModuleInit(): Promise<void> {
+    try {
+      const paperTrades = await this.tradeRepository.findAllPaperTrades();
+      let bal = DEFAULT_VIRTUAL_CAPITAL;
+      let realized = 0;
+      let openCount = 0;
+      let deployed = 0;
+      for (const t of paperTrades) {
+        const isClosed = t.status === 'CLOSED' && t.exitPrice != null && t.pnl != null;
+        if (isClosed) {
+          bal += t.pnl ?? 0;
+          realized += t.pnl ?? 0;
+        } else if (t.entryPrice != null && (t.status === 'OPEN' || t.status === 'PENDING')) {
+          const orderValue = t.entryPrice * t.quantity;
+          if (t.side === 'BUY') {
+            bal -= orderValue;
+            deployed += orderValue;
+          } else {
+            bal += orderValue;
+            deployed += orderValue;
+          }
+          openCount++;
+        }
+      }
+      this.virtualBalance = bal;
+      this.logger.log(
+        `[Paper] Balance recovered from ${paperTrades.length} trades: ` +
+          `start=₹${DEFAULT_VIRTUAL_CAPITAL.toLocaleString('en-IN')} → ` +
+          `current=₹${bal.toLocaleString('en-IN')} ` +
+          `(realized=₹${realized.toFixed(0)}, open=${openCount}, deployed=₹${deployed.toFixed(0)})`,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `[Paper] Balance recovery failed — keeping default ₹${DEFAULT_VIRTUAL_CAPITAL.toLocaleString('en-IN')}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+    }
+  }
 
   /**
    * Simulate order execution.
@@ -140,6 +194,37 @@ export class PaperTradeService {
 
   getVirtualPositions(): VirtualPosition[] {
     return Array.from(this.virtualPositions.values());
+  }
+
+  /**
+   * Account summary for the UI badge: starting capital, current cash balance,
+   * deployed capital tied up in open positions, and unrealized P&L from live
+   * ticks. `equity = balance + deployed + unrealizedPnl` is the total mark-to-
+   * market account value.
+   */
+  getAccount(): {
+    startingCapital: number;
+    balance: number;
+    deployedCapital: number;
+    unrealizedPnl: number;
+    equity: number;
+    openPositions: number;
+  } {
+    const positions = Array.from(this.virtualPositions.values());
+    let deployed = 0;
+    let unrealized = 0;
+    for (const p of positions) {
+      deployed += p.averagePrice * p.quantity;
+      unrealized += p.pnl;
+    }
+    return {
+      startingCapital: DEFAULT_VIRTUAL_CAPITAL,
+      balance: this.virtualBalance,
+      deployedCapital: deployed,
+      unrealizedPnl: unrealized,
+      equity: this.virtualBalance + deployed + unrealized,
+      openPositions: positions.length,
+    };
   }
 
   getPendingOrders(): PendingPaperOrder[] {

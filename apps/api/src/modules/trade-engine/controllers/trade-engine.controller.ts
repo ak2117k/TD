@@ -13,6 +13,7 @@ import {
 import { TradeExecutionService } from '../services/trade-execution.service';
 import { PositionManagerService } from '../services/position-manager.service';
 import { RiskManagerService } from '../services/risk-manager.service';
+import { PaperTradeService } from '../services/paper-trade.service';
 import { TradeRepository } from '../repositories/trade.repository';
 import {
   ExecuteTradeDto,
@@ -31,7 +32,18 @@ export class TradeEngineController {
     private readonly positionManagerService: PositionManagerService,
     private readonly riskManagerService: RiskManagerService,
     private readonly tradeRepository: TradeRepository,
+    private readonly paperTradeService: PaperTradeService,
   ) {}
+
+  /**
+   * GET /api/trades/paper-account — Virtual cash balance, deployed capital,
+   * unrealized P&L, and total equity for the paper-trading account. Polled
+   * by the UI badge.
+   */
+  @Get('paper-account')
+  async getPaperAccount() {
+    return this.paperTradeService.getAccount();
+  }
 
   /**
    * POST /api/trades/execute — Execute a new trade.
