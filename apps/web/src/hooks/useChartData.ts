@@ -86,23 +86,41 @@ function getTimeframeDurationMs(timeframe: string): number {
 }
 
 function getHistoryRangeDays(timeframe: string): number {
-  // Calendar-day lookback per timeframe. Tuned to match what discretionary
-  // traders actually want to see on each TF — too many bars (e.g. 250 bars
-  // on a 15m view) compress to sub-pixel widths and the chart looks empty;
-  // too few bars (e.g. 1 day on 1h) doesn't give context.
-  //
-  // Targets: ~60-150 bars per view at default zoom.
+  // Total calendar-day lookback we FETCH per timeframe. Wider than what we
+  // default-show — chart starts zoomed to the most-recent ~100 bars and the
+  // user can scroll left to see older history. This way:
+  //   - default view is uncluttered (not 250 bars squished into a corner)
+  //   - history is available without re-fetching when user scrolls
   const map: Record<string, number> = {
-    '1m': 1,    // ~375 bars during one trading day — already a lot for 1m
-    '5m': 2,    // ~150 bars over 2 trading days
-    '15m': 5,   // ~125 bars over 5 trading days
-    '30m': 10,  // ~130 bars
-    '1h': 30,   // ~210 bars
-    '4h': 90,   // ~135 bars
-    '1d': 365,  // ~250 daily bars in a year
+    '1m': 3,    // ~1100 bars total, default-shows last ~100
+    '5m': 10,   // ~750 bars total
+    '15m': 15,  // ~375 bars total (yesterday: 15 days = 250 bars rendered)
+    '30m': 30,  // ~390 bars
+    '1h': 60,   // ~390 bars
+    '4h': 120,  // ~180 bars
+    '1d': 365,
     '1w': 730,
   };
-  return map[timeframe] ?? 5;
+  return map[timeframe] ?? 15;
+}
+
+/**
+ * Default-visible bar count per timeframe. The chart fetches `getHistoryRangeDays`
+ * worth of data but initially zooms to show only the latest N bars below.
+ * User can scroll/zoom out to see older bars without another fetch.
+ */
+function getDefaultVisibleBars(timeframe: string): number {
+  const map: Record<string, number> = {
+    '1m': 100,
+    '5m': 80,
+    '15m': 100,  // ~3-4 trading days at default
+    '30m': 80,
+    '1h': 100,
+    '4h': 80,
+    '1d': 100,
+    '1w': 60,
+  };
+  return map[timeframe] ?? 100;
 }
 
 function candleToChart(c: Candle): ChartCandle {

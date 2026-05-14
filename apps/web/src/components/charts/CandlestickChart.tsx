@@ -269,14 +269,31 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
         candleSeriesRef.current.setData(candleData);
         volumeSeriesRef.current.setData(volumeData);
 
-        // Fit content on every dataset reset (initial load OR symbol/timeframe
-        // change). Deferred to next tick because calling fitContent()
-        // synchronously after setData() races the chart's internal state —
-        // it fits to the OLD range, leaving the new candles squished into
-        // the right edge with empty space to the left.
+        // Default-zoom to the LATEST ~100 bars on dataset reset (initial load
+        // OR symbol/timeframe change). The chart still HAS all fetched bars
+        // (often 250-400) — user can scroll/zoom left to see older history.
+        //
+        // Why not fitContent(): with 250+ bars and a typical 800px chart,
+        // fitContent compresses bars to <4px wide, making them invisible/
+        // squished. Showing the most-recent 100 keeps bars at usable width
+        // for default-view trading decisions.
+        //
+        // Deferred via rAF: calling setVisibleLogicalRange synchronously
+        // after setData races the chart's internal time-scale state.
         if (prevCandlesLenRef.current === 0) {
           requestAnimationFrame(() => {
-            chartRef.current?.timeScale().fitContent();
+            const ts = chartRef.current?.timeScale();
+            if (!ts) return;
+            const totalBars = candleData.length;
+            const defaultVisible = 100;
+            if (totalBars > defaultVisible) {
+              ts.setVisibleLogicalRange({
+                from: totalBars - defaultVisible,
+                to: totalBars + 2, // small right pad for live tick growth
+              });
+            } else {
+              ts.fitContent();
+            }
           });
         }
       }
