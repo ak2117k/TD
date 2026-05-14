@@ -3,6 +3,7 @@ import { X } from 'lucide-react';
 import toast from 'react-hot-toast';
 import clsx from 'clsx';
 import { useChartStore, type IndicatorState } from '@/stores/chart-store';
+import { computeSessionVWAP } from '@/utils/computeVWAP';
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts';
 
 interface IndicatorConfig {
@@ -17,7 +18,7 @@ const INDICATORS: IndicatorConfig[] = [
   { key: 'ema20', label: 'EMA 20', description: 'Exponential MA (20)', color: '#3b82f6', ready: true },
   { key: 'ema50', label: 'EMA 50', description: 'Exponential MA (50)', color: '#a855f7', ready: true },
   { key: 'ema200', label: 'EMA 200', description: 'Exponential MA (200)', color: '#f59e0b', ready: true },
-  { key: 'vwap', label: 'VWAP', description: 'Volume Weighted Avg Price', color: '#10b981', ready: true },
+  { key: 'vwap', label: 'VWAP', description: 'Session VWAP (resets 9:15 IST daily)', color: '#10b981', ready: true },
   { key: 'bollinger', label: 'Bollinger', description: 'Bollinger Bands (20, 2σ)', color: '#ec4899', ready: true },
   { key: 'rsi', label: 'RSI', description: 'Relative Strength Index (14)', color: '#06b6d4', ready: true },
   { key: 'volume', label: 'Volume', description: 'Volume histogram', color: '#64748b', ready: true },
@@ -53,22 +54,6 @@ function calculateEMA(closes: number[], period: number): (number | null)[] {
   }
 
   return ema;
-}
-
-// Cumulative VWAP across the loaded dataset.
-// Trader-grade VWAP would reset per session; full-period VWAP is the
-// pragmatic starting point and still useful for swing reference.
-function calculateVWAP(
-  candles: Array<{ high: number; low: number; close: number; volume: number }>,
-): (number | null)[] {
-  let cumPV = 0;
-  let cumV = 0;
-  return candles.map((c) => {
-    const typical = (c.high + c.low + c.close) / 3;
-    cumPV += typical * c.volume;
-    cumV += c.volume;
-    return cumV > 0 ? cumPV / cumV : null;
-  });
 }
 
 // Wilder's RSI (period 14 by default).
@@ -154,7 +139,7 @@ export default function IndicatorPanel({ onClose, chart, candles }: IndicatorPan
     const closes = candles.map((c) => c.close);
     const bb = calculateBollinger(closes, 20, 2);
     const rsiValues = calculateRSI(closes, 14);
-    const vwapValues = calculateVWAP(candles);
+    const vwapValues = computeSessionVWAP(candles);
 
     type LineSpec = {
       mapKey: string;
