@@ -137,7 +137,93 @@ export class WatchService {
       `Watch created: ${entry.symbol} ${entry.side} score=${input.initialScore} target=${targetResult.target} (${targetResult.source})`,
     );
 
-    return entry;
+    // Auto-execute: criteria is already met (score≥50, sector gate passed,
+    // MTF aligned, dedup OK), so place the paper trade immediately and let
+    // the watch-monitor manage the lifecycle (partial exit, trailing stop,
+    // score-decay SL, EOD square-off).
+    //
+    // Failures (insufficient cash, market closed, daily loss breaker) are
+    // caught and logged — the entry remains WATCHING so the user can retry
+    // manually from the UI. We never roll back the WatchEntry, since the
+    // scoring decision and dedup state are valuable journal data even when
+    // the broker call fails.
+    try {
+      const traded = await this.executeEntry(entry.id, { mode: 'paper' });
+      this.logger.log(
+        `Auto-executed paper trade for ${entry.symbol} @ ₹${(traded as any).entryPrice ?? input.initialPrice}`,
+      );
+      // Re-fetch so the caller sees TRADED status (not the stale WATCHING).
+      const updated = await this.repo.findById(entry.id);
+      return updated ?? entry;
+    } catch (err) {
+      this.logger.warn(
+        `Auto-execute failed for ${entry.symbol} (entry stays WATCHING for manual retry): ${err instanceof Error ? err.message : err}`,
+      );
+      return entry;
+    }
+  }
+
+  /**
+   * Place the broker order for a WATCHING entry and transition it to TRADED.
+   * Called both manually (POST /api/watch/:id/execute) and automatically
+   * (right after createFromAlert succeeds in paper mode). All RiskManager
+   * checks run inside trade.executeTrade — insufficient cash, daily-loss
+   * breaker, market-hours gate, duplicate-position guard, kill switch.
+   *
+   * Quantity selection:
+   *   - F&O leg present → lotCount × optionsLotSize
+   *   - Equity intraday → floor(MAX_INVESTMENT_PER_TRADE / referencePrice)
+   * Caller can override with `quantityOverride`. Reference price prefers
+   * the live currentPrice over the initial fire price so we size against
+   * what we'll actually pay.
+   */
+  async executeEntry(
+    entryId: string,
+    options: { mode?: 'paper' | 'live'; quantityOverride?: number } = {},
+  ): Promise<any> {
+    const mode = options.mode ?? 'paper';
+    const entry = await this.repo.findById(entryId);
+    if (!entry) throw new Error(`WatchEntry ${entryId} not found`);
+    if (entry.status !== WatchStatus.WATCHING) {
+      throw new Error(`Cannot execute on entry in status ${entry.status}`);
+    }
+
+    const optionsLotSize = (entry as any).optionsLotSize ?? null;
+    const lotCount = (entry.initialBreakdown as any)?.lotCount ?? 1;
+    const referencePrice = (entry as any).currentPrice ?? entry.initialPrice;
+    const computedQty = optionsLotSize
+      ? lotCount * optionsLotSize
+      : Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(referencePrice, 1)));
+    const qty = options.quantityOverride ?? computedQty;
+
+    const trade = await this.trade.executeTrade({
+      symbol: (entry as any).optionsToken ? (entry as any).optionsToken : entry.symbol,
+      token: (entry as any).optionsToken ?? entry.symbol,
+      exchange: (entry as any).exchange ?? 'NSE',
+      side: entry.side as any,
+      quantity: qty,
+      orderType: 'MARKET' as any,
+      positionType: 'INTRADAY' as any,
+      // Pass referencePrice so the RiskManager's paper-cash check can
+      // estimate orderValue on MARKET orders (which otherwise have no
+      // price field).
+      price: referencePrice,
+      stoploss: (entry as any).stopLoss ?? undefined,
+      target: (entry as any).profitTarget ?? undefined,
+    } as any);
+
+    await this.repo.update(entryId, {
+      status: WatchStatus.TRADED,
+      executedAt: new Date(),
+      executedPrice:
+        (trade as any).entryPrice ??
+        (entry as any).currentPrice ??
+        (entry as any).initialPrice,
+      paperTradeId: mode === 'paper' ? (trade as any).id : null,
+      liveTradeId: mode === 'live' ? (trade as any).id : null,
+    });
+
+    return trade;
   }
 
   /**

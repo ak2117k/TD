@@ -108,6 +108,74 @@ describe('WatchService.createFromAlert', () => {
     expect(feed.subscribeForWatch).toHaveBeenCalledWith('11536', 'w1');
     expect(feed.subscribeForWatch).toHaveBeenCalledWith('OPT-TOKEN', 'w1');
   });
+
+  it('auto-executes the paper trade after creating the entry', async () => {
+    // Wire mocks to support the executeEntry path that runs at the tail of
+    // createFromAlert. The user wants Chartink alert → score → auto-buy
+    // without manual click.
+    repo.findById = jest.fn().mockResolvedValue({
+      id: 'w1',
+      token: '11536',
+      symbol: 'TCS-EQ',
+      side: 'BUY',
+      status: 'WATCHING',
+      initialPrice: 4000,
+      initialBreakdown: { lotCount: 1 },
+      optionsToken: null,
+      optionsLotSize: null,
+      profitTarget: 4150,
+    });
+    repo.update = jest.fn().mockResolvedValue({});
+    mockTrade.executeTrade = jest.fn().mockResolvedValue({
+      id: 'paper-trade-123',
+      entryPrice: 4001,
+    });
+
+    await svc.createFromAlert(baseInput);
+
+    expect(mockTrade.executeTrade).toHaveBeenCalledWith(
+      expect.objectContaining({
+        symbol: 'TCS-EQ',
+        side: 'BUY',
+        // floor(MAX_INVESTMENT_PER_TRADE / initialPrice) = floor(200,000 / 4000) = 50
+        // (MAX_INVESTMENT_PER_TRADE is ₹2L per trade; the ₹20L is the total account balance.)
+        quantity: 50,
+        orderType: 'MARKET',
+        positionType: 'INTRADAY',
+        price: 4000,
+      }),
+    );
+    expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
+      status: 'TRADED',
+      executedPrice: 4001,
+      paperTradeId: 'paper-trade-123',
+    }));
+  });
+
+  it('leaves entry in WATCHING when auto-execute fails (e.g. insufficient cash)', async () => {
+    // RiskManager raises an HttpException for cash shortfalls; the service
+    // logs and swallows so the entry survives for manual retry.
+    repo.findById = jest.fn().mockResolvedValue({
+      id: 'w1', token: '11536', symbol: 'TCS-EQ', side: 'BUY',
+      status: 'WATCHING', initialPrice: 4000, initialBreakdown: { lotCount: 1 },
+      optionsToken: null, optionsLotSize: null,
+    });
+    repo.update = jest.fn().mockResolvedValue({});
+    mockTrade.executeTrade = jest.fn().mockRejectedValue(
+      new Error('Insufficient paper cash: need ₹20,00,000, available ₹0'),
+    );
+
+    const result = await svc.createFromAlert(baseInput);
+
+    // The entry was created — that part doesn't roll back.
+    expect(repo.createEntry).toHaveBeenCalled();
+    // …but it was never marked TRADED.
+    expect(repo.update).not.toHaveBeenCalledWith('w1', expect.objectContaining({
+      status: 'TRADED',
+    }));
+    // Caller gets the original (WATCHING) entry back.
+    expect(result.id).toBe('w1');
+  });
 });
 
 describe('WatchService.onTick', () => {

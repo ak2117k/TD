@@ -13,11 +13,10 @@ import {
 } from '@nestjs/common';
 import { WatchStatus } from '@prisma/client';
 import { WatchRepository } from '../repositories/watch.repository';
-import { WatchService, MAX_INVESTMENT_PER_TRADE } from '../services/watch.service';
+import { WatchService } from '../services/watch.service';
 import { RiskGuardService } from '../services/risk-guard.service';
 import { ExecuteWatchDto } from '../dto/execute-watch.dto';
 import { CloseWatchDto } from '../dto/close-watch.dto';
-import { TradeExecutionService } from '../../trade-engine/services/trade-execution.service';
 
 @Controller('api/watch')
 export class WatchController {
@@ -26,7 +25,6 @@ export class WatchController {
   constructor(
     private readonly repo: WatchRepository,
     private readonly watch: WatchService,
-    private readonly trade: TradeExecutionService,
     private readonly riskGuard: RiskGuardService,
   ) {}
 
@@ -54,66 +52,22 @@ export class WatchController {
   @Post(':id/execute')
   @HttpCode(HttpStatus.OK)
   async execute(@Param('id') id: string, @Body() body: ExecuteWatchDto) {
-    const entry = await this.repo.findById(id);
-    if (!entry) throw new NotFoundException(`WatchEntry ${id} not found`);
-    if (entry.status !== WatchStatus.WATCHING) {
-      throw new BadRequestException(
-        `Cannot execute on entry in status ${entry.status}`,
-      );
-    }
-
     this.logger.log(
-      `Executing watch entry ${id} in mode=${body.mode} (paper/live governed by system settings)`,
+      `Manual execute on watch entry ${id} mode=${body.mode}`,
     );
-
-    // Quantity selection:
-    //   - F&O options leg present → lotCount × lotSize (e.g., 1 × 175 = 175 NIFTY units)
-    //   - Equity intraday (no options leg) → floor(MAX_INVESTMENT_PER_TRADE / price).
-    //     A ₹100 stock → 2000 shares; a ₹7500 stock → 26 shares.
-    //     Math.max(1, ...) guards against pathological high-price edge cases.
-    //     Callers can always override with body.quantity.
-    const optionsLotSize = (entry as any).optionsLotSize ?? null;
-    const lotCount = (entry.initialBreakdown as any)?.lotCount ?? 1;
-    // Reference price for sizing: current live price preferred, else initial entry.
-    const referencePrice = (entry as any).currentPrice ?? entry.initialPrice;
-    const computedQty = optionsLotSize
-      ? lotCount * optionsLotSize
-      : Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(referencePrice, 1)));
-    const qty = body.quantity ?? computedQty;
-
-    // ExecuteTradeDto requires: symbol, token, exchange, side, orderType,
-    // quantity, positionType. Optional: stoploss, target, price, triggerPrice.
-    // NOTE: 'mode' is NOT part of ExecuteTradeDto — the service reads isPaperTrade
-    // from the system settings. The mode field on ExecuteWatchDto is recorded
-    // in this log and can be used by the caller to change settings beforehand.
-    const trade = await this.trade.executeTrade({
-      symbol: (entry as any).optionsToken
-        ? (entry as any).optionsToken
-        : entry.symbol,
-      token: (entry as any).optionsToken ?? entry.symbol,
-      exchange: (entry as any).exchange ?? 'NSE',
-      side: entry.side as any,
-      quantity: qty,
-      orderType: 'MARKET' as any,
-      positionType: 'INTRADAY' as any,
-      stoploss: (entry as any).stopLoss ?? undefined,
-      target: (entry as any).profitTarget ?? undefined,
-    } as any);
-
-    await this.repo.update(id, {
-      status: WatchStatus.TRADED,
-      executedAt: new Date(),
-      executedPrice:
-        (trade as any).entryPrice ??
-        (entry as any).currentPrice ??
-        (entry as any).initialPrice,
-      paperTradeId:
-        body.mode === 'paper' ? (trade as any).id : null,
-      liveTradeId:
-        body.mode === 'live' ? (trade as any).id : null,
-    });
-
-    return { trade, entryId: id };
+    try {
+      const trade = await this.watch.executeEntry(id, {
+        mode: body.mode,
+        quantityOverride: body.quantity,
+      });
+      return { trade, entryId: id };
+    } catch (err) {
+      // Surface clean HTTP errors. The service throws plain Errors with
+      // human-readable messages; map them to 400/404 based on content.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('not found')) throw new NotFoundException(msg);
+      throw new BadRequestException(msg);
+    }
   }
 
   @Post(':id/dismiss')
