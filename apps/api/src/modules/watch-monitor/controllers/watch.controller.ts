@@ -64,9 +64,18 @@ export class WatchController {
       `Executing watch entry ${id} in mode=${body.mode} (paper/live governed by system settings)`,
     );
 
+    // Quantity selection:
+    //   - F&O options leg present → lotCount × lotSize (e.g., 1 × 175 = 175 NIFTY units)
+    //   - Equity intraday (no options leg) → 50 shares per setup, the
+    //     default intraday position size the /watch UI also displays as the
+    //     P&L basis. Callers can override with body.quantity.
+    const optionsLotSize = (entry as any).optionsLotSize ?? null;
     const lotCount = (entry.initialBreakdown as any)?.lotCount ?? 1;
-    const lotSize = (entry as any).optionsLotSize ?? 1;
-    const qty = body.quantity ?? lotCount * lotSize;
+    const INTRADAY_EQUITY_QTY = 50;
+    const computedQty = optionsLotSize
+      ? lotCount * optionsLotSize
+      : INTRADAY_EQUITY_QTY;
+    const qty = body.quantity ?? computedQty;
 
     // ExecuteTradeDto requires: symbol, token, exchange, side, orderType,
     // quantity, positionType. Optional: stoploss, target, price, triggerPrice.
