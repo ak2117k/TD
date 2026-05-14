@@ -21,19 +21,21 @@ function ts(s: string): string {
 }
 
 export function WatchEventLog({ events }: Props) {
-  if (events.length === 0) return <div className="text-sm text-gray-500">No events yet.</div>;
+  if (events.length === 0) {
+    return <div className="text-sm text-[var(--color-text-muted)]">No events yet.</div>;
+  }
   return (
     <div className="text-xs font-mono space-y-1">
       {events.map((e) => (
         <div key={e.id} className="flex gap-3 items-baseline">
-          <span className="text-gray-500 w-32 shrink-0">{ts(e.createdAt)}</span>
-          <span className="w-24 shrink-0 text-blue-700">{EVENT_LABEL[e.eventType] ?? e.eventType}</span>
-          <span className="grow">
+          <span className="text-[var(--color-text-muted)] w-32 shrink-0">{ts(e.createdAt)}</span>
+          <span className="w-24 shrink-0 text-blue-400">{EVENT_LABEL[e.eventType] ?? e.eventType}</span>
+          <span className="grow text-[var(--color-text-primary)]">
             {e.price != null && <>₹{e.price.toFixed(2)} </>}
             {e.score != null && <>score={e.score} </>}
             {e.priceDelta != null && <>Δ={e.priceDelta.toFixed(2)}% </>}
             {e.scoreDelta != null && <>(Δscore={e.scoreDelta > 0 ? '+' : ''}{e.scoreDelta}) </>}
-            {e.notes && <span className="text-gray-500">— {e.notes}</span>}
+            {e.notes && <span className="text-[var(--color-text-muted)]">— {e.notes}</span>}
           </span>
         </div>
       ))}

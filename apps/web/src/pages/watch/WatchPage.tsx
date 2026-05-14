@@ -19,10 +19,10 @@ export function WatchPage() {
   const activeCount = entries.filter(e => e.status === 'WATCHING' || e.status === 'TRADED').length;
 
   return (
-    <div className="p-6">
+    <div className="p-6 text-[var(--color-text-primary)]">
       <div className="flex items-center justify-between mb-4">
-        <h1 className="text-2xl font-semibold">Watch Monitor</h1>
-        <div className="text-sm text-gray-500">{activeCount} / 50 active slots</div>
+        <h1 className="text-2xl font-semibold text-[var(--color-text-primary)]">Watch Monitor</h1>
+        <div className="text-sm text-[var(--color-text-muted)]">{activeCount} / 50 active slots</div>
       </div>
 
       <div className="flex gap-2 mb-4">
@@ -30,25 +30,32 @@ export function WatchPage() {
           <button
             key={f.label}
             onClick={() => setFilter(f.value)}
-            className={`px-3 py-1 text-sm rounded ${filter === f.value
-              ? 'bg-blue-600 text-white' : 'bg-gray-100 hover:bg-gray-200'}`}
+            className={`px-3 py-1 text-sm rounded transition-colors ${
+              filter === f.value
+                ? 'bg-blue-600 text-white'
+                : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+            }`}
           >
             {f.label}
           </button>
         ))}
       </div>
 
-      {loading && <div className="text-gray-500">Loading…</div>}
-      {error && <div className="text-red-600">Error: {error}</div>}
+      {loading && <div className="text-[var(--color-text-muted)]">Loading…</div>}
+      {error && <div className="text-red-400">Error: {error}</div>}
       {!loading && !error && (
         <div className="grid grid-cols-3 gap-4">
           <div className="col-span-2">
             <WatchTable entries={entries} onSelect={setSelectedId} selectedId={selectedId} />
           </div>
           <div className="col-span-1">
-            {selectedId
-              ? <WatchDetailPanel entryId={selectedId} />
-              : <div className="p-6 text-gray-400 text-sm">Select a row to see details.</div>}
+            {selectedId ? (
+              <WatchDetailPanel entryId={selectedId} />
+            ) : (
+              <div className="p-6 text-[var(--color-text-muted)] text-sm">
+                Select a row to see details.
+              </div>
+            )}
           </div>
         </div>
       )}
