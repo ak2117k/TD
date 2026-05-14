@@ -95,3 +95,93 @@ describe('PaperTradeService.simulateOrder — fillPrice exposure', () => {
     expect(response.fillPrice).toBeUndefined();
   });
 });
+
+/**
+ * Position netting — partial-exit and trailing-stop SELL fills should reduce
+ * the existing BUY position rather than spawning a new opposite-side slot.
+ * Verifies the fix to Gap 1+3 from the watch-monitor partial-exit flow.
+ */
+describe('PaperTradeService.simulateOrder — position netting', () => {
+  let service: PaperTradeService;
+
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        PaperTradeService,
+        { provide: TradeRepository, useValue: mockTradeRepository },
+      ],
+    }).compile();
+    service = module.get(PaperTradeService);
+    service.resetVirtualPortfolio(2_000_000); // ₹20L fresh slate
+  });
+
+  const buildBuy = (qty: number, price: number): OrderRequest => ({
+    symbol: 'TCS-EQ',
+    token: '11536',
+    exchange: 'NSE',
+    side: 'BUY',
+    orderType: 'MARKET',
+    quantity: qty,
+    price,
+    positionType: 'INTRADAY',
+  });
+
+  const buildSell = (qty: number, price: number): OrderRequest => ({
+    ...buildBuy(qty, price),
+    side: 'SELL',
+  });
+
+  it('partial-exit SELL reduces the existing BUY qty instead of creating a new SELL slot', async () => {
+    await service.simulateOrder(buildBuy(2000, 100));
+    await service.simulateOrder(buildSell(1000, 101));
+
+    const positions = service.getVirtualPositions();
+    expect(positions).toHaveLength(1);
+    expect(positions[0].side).toBe('BUY');
+    expect(positions[0].quantity).toBe(1000);
+    // averagePrice on the remaining long is the original cost basis (100),
+    // not re-averaged by the partial close.
+    expect(positions[0].averagePrice).toBeCloseTo(100, 1);
+  });
+
+  it('full-close SELL nets the position to zero (deleted from map)', async () => {
+    await service.simulateOrder(buildBuy(2000, 100));
+    await service.simulateOrder(buildSell(1000, 101));
+    await service.simulateOrder(buildSell(1000, 100.5));
+
+    expect(service.getVirtualPositions()).toHaveLength(0);
+  });
+
+  it('over-close flips the position to the opposite side at the new fill price', async () => {
+    await service.simulateOrder(buildBuy(2000, 100));
+    await service.simulateOrder(buildSell(3000, 102));
+
+    const positions = service.getVirtualPositions();
+    expect(positions).toHaveLength(1);
+    expect(positions[0].side).toBe('SELL');
+    expect(positions[0].quantity).toBe(1000);
+    expect(positions[0].averagePrice).toBeCloseTo(102, 1);
+  });
+
+  it('account equity tracks correctly through the full partial-exit + trailing-stop flow', async () => {
+    // BUY 2000 @ 100 → cash -200,000, deployed 200,000
+    await service.simulateOrder(buildBuy(2000, 100));
+    // Partial exit at +1%: SELL 1000 @ 101 → cash +101,000 (realized +1,000)
+    await service.simulateOrder(buildSell(1000, 101));
+    // Trailing stop fires: SELL 1000 @ 100.5 → cash +100,500 (realized +500)
+    await service.simulateOrder(buildSell(1000, 100.5));
+
+    const acc = service.getAccount();
+    // Cash math (ignoring slippage): 2,000,000 - 200,000 + 101,000 + 100,500
+    //   = 2,001,500. Slippage adds ±0.05% per fill — total worst case ~₹300.
+    // The trade is profitable (closed +₹1,500 minus slippage costs), so we
+    // bracket the result: noticeably above start, well under +₹2k.
+    expect(acc.balance).toBeGreaterThan(2_000_500);
+    expect(acc.balance).toBeLessThan(2_002_000);
+    // Position fully closed → deployed=0, openPositions=0
+    expect(acc.deployedCapital).toBe(0);
+    expect(acc.openPositions).toBe(0);
+    // Equity matches cash since no open positions remain.
+    expect(acc.equity).toBe(acc.balance);
+  });
+});

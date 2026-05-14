@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { SettingsService } from '../../settings/services/settings.service';
 import { TradeRepository } from '../repositories/trade.repository';
+import { PaperTradeService } from './paper-trade.service';
 import {
   ExecuteTradeDto,
   RiskValidation,
@@ -41,6 +42,7 @@ export class RiskManagerService {
   constructor(
     private readonly settingsService: SettingsService,
     private readonly tradeRepository: TradeRepository,
+    private readonly paperTradeService: PaperTradeService,
   ) {}
 
   /**
@@ -79,6 +81,15 @@ export class RiskManagerService {
       settings.maxCapitalPerTrade,
     );
     if (!capitalCheck.allowed) return capitalCheck;
+
+    // 3b. Available paper cash check — paper BUY orders cannot exceed the
+    // virtual cash balance. SELL orders are not gated here: closing a long
+    // returns cash, and opening a short credits cash. This mirrors what a
+    // real brokerage margin engine would reject before the order leaves.
+    if (settings.paperTrading && request.side === 'BUY') {
+      const paperCashCheck = this.checkPaperCashSufficient(request);
+      if (!paperCashCheck.allowed) return paperCashCheck;
+    }
 
     // 4. Market hours check
     if (settings.tradingHoursOnly) {
@@ -207,6 +218,38 @@ export class RiskManagerService {
       return { allowed: false, reason };
     }
 
+    return { allowed: true };
+  }
+
+  /**
+   * Paper-only: reject BUY orders that exceed the available virtual cash.
+   * For MARKET orders, request.price is often undefined — we fall back to
+   * triggerPrice. If we still can't estimate (both undefined), we allow
+   * the order through and let the simulator fill it; the worst case is a
+   * temporary negative balance until next tick triggers PositionManager.
+   */
+  private checkPaperCashSufficient(
+    request: ExecuteTradeDto,
+  ): RiskValidation {
+    const estimatedPrice = request.price ?? request.triggerPrice ?? 0;
+    if (estimatedPrice <= 0) {
+      // Cannot estimate — let the simulator handle it. Logged so we notice
+      // if this is happening often and need a better price source.
+      this.logger.debug(
+        `Paper cash check skipped — no estimable price for ${request.symbol} ` +
+          `(price=${request.price}, triggerPrice=${request.triggerPrice})`,
+      );
+      return { allowed: true };
+    }
+    const orderValue = estimatedPrice * request.quantity;
+    const available = this.paperTradeService.getVirtualBalance();
+    if (orderValue > available) {
+      const reason =
+        `Insufficient paper cash: need ₹${orderValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}, ` +
+        `available ₹${available.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+      this.logger.warn(`Trade REJECTED — ${reason}`);
+      return { allowed: false, reason };
+    }
     return { allowed: true };
   }
 

@@ -296,19 +296,15 @@ export class PaperTradeService implements OnModuleInit {
       this.virtualBalance += orderValue;
     }
 
-    // Update virtual positions
-    const posKey = `${request.symbol}:${request.exchange}:${request.side}`;
+    // Update virtual positions with proper netting. Key is symbol:exchange
+    // (no side) so an opposite-side fill REDUCES or FLIPS the existing
+    // position rather than spawning a duplicate slot. This is how a real
+    // brokerage net position view works.
+    const posKey = `${request.symbol}:${request.exchange}`;
     const existing = this.virtualPositions.get(posKey);
 
-    if (existing) {
-      // Average into existing position
-      const totalQty = existing.quantity + request.quantity;
-      existing.averagePrice =
-        (existing.averagePrice * existing.quantity +
-          fillPrice * request.quantity) /
-        totalQty;
-      existing.quantity = totalQty;
-    } else {
+    if (!existing) {
+      // No position yet — open a new one.
       this.virtualPositions.set(posKey, {
         symbol: request.symbol,
         exchange: request.exchange,
@@ -318,6 +314,36 @@ export class PaperTradeService implements OnModuleInit {
         ltp: fillPrice,
         pnl: 0,
       });
+    } else if (existing.side === request.side) {
+      // Same side — average in (scale up).
+      const totalQty = existing.quantity + request.quantity;
+      existing.averagePrice =
+        (existing.averagePrice * existing.quantity +
+          fillPrice * request.quantity) /
+        totalQty;
+      existing.quantity = totalQty;
+    } else {
+      // Opposite side — net the position.
+      if (request.quantity < existing.quantity) {
+        // Partial close: reduce qty, keep avg (cost basis unchanged on remainder).
+        existing.quantity -= request.quantity;
+      } else if (request.quantity === existing.quantity) {
+        // Full close: position flat.
+        this.virtualPositions.delete(posKey);
+      } else {
+        // Over-close: flip side. Excess qty opens a new position on the
+        // opposite side at the new fill price.
+        const excess = request.quantity - existing.quantity;
+        this.virtualPositions.set(posKey, {
+          symbol: request.symbol,
+          exchange: request.exchange,
+          side: request.side as 'BUY' | 'SELL',
+          quantity: excess,
+          averagePrice: fillPrice,
+          ltp: fillPrice,
+          pnl: 0,
+        });
+      }
     }
 
     this.logger.log(
