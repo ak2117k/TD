@@ -641,6 +641,12 @@ export class AngelOneAdapterService implements BrokerAdapter {
         }),
       );
 
+      // Temporary diagnostic — log the raw shape so we can tell empty-array
+      // (data:[]) apart from auth/throttle errors (data:null, message:"...").
+      this.logger.log(
+        `Historical raw: token=${token} status=${response?.status} message=${response?.message ?? '-'} errorcode=${response?.errorcode ?? '-'} dataLen=${Array.isArray(response?.data) ? response.data.length : 'n/a'}`,
+      );
+
       if (!response?.data) {
         return [];
       }
