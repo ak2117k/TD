@@ -265,9 +265,15 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
         candleSeriesRef.current.setData(candleData);
         volumeSeriesRef.current.setData(volumeData);
 
-        // Fit content on first load only
+        // Fit content on every dataset reset (initial load OR symbol/timeframe
+        // change). Deferred to next tick because calling fitContent()
+        // synchronously after setData() races the chart's internal state —
+        // it fits to the OLD range, leaving the new candles squished into
+        // the right edge with empty space to the left.
         if (prevCandlesLenRef.current === 0) {
-          chartRef.current?.timeScale().fitContent();
+          requestAnimationFrame(() => {
+            chartRef.current?.timeScale().fitContent();
+          });
         }
       }
 
