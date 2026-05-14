@@ -127,7 +127,11 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
           timeVisible: true,
           secondsVisible: false,
           rightOffset: 5,
-          barSpacing: 8,
+          barSpacing: 6,
+          // Don't let the chart try to render bars so thin they vanish.
+          // fitContent() respects this floor — if all bars can't fit at >=
+          // minBarSpacing, the chart scrolls horizontally instead.
+          minBarSpacing: 2,
           // Translate the chart's compressed time back to the real market
           // time when labelling the bottom axis. If no map is provided
           // (e.g. very early during initial load), fall back to formatting

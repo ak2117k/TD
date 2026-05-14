@@ -86,17 +86,23 @@ function getTimeframeDurationMs(timeframe: string): number {
 }
 
 function getHistoryRangeDays(timeframe: string): number {
+  // Calendar-day lookback per timeframe. Tuned to match what discretionary
+  // traders actually want to see on each TF — too many bars (e.g. 250 bars
+  // on a 15m view) compress to sub-pixel widths and the chart looks empty;
+  // too few bars (e.g. 1 day on 1h) doesn't give context.
+  //
+  // Targets: ~60-150 bars per view at default zoom.
   const map: Record<string, number> = {
-    '1m': 2,
-    '5m': 5,
-    '15m': 15,
-    '30m': 30,
-    '1h': 60,
-    '4h': 120,
-    '1d': 365,
+    '1m': 1,    // ~375 bars during one trading day — already a lot for 1m
+    '5m': 2,    // ~150 bars over 2 trading days
+    '15m': 5,   // ~125 bars over 5 trading days
+    '30m': 10,  // ~130 bars
+    '1h': 30,   // ~210 bars
+    '4h': 90,   // ~135 bars
+    '1d': 365,  // ~250 daily bars in a year
     '1w': 730,
   };
-  return map[timeframe] ?? 15;
+  return map[timeframe] ?? 5;
 }
 
 function candleToChart(c: Candle): ChartCandle {
