@@ -50,7 +50,7 @@ export function PaperAccountBadge() {
   return (
     <div
       className="flex items-center gap-3 text-xs px-3 py-1.5 rounded bg-[var(--color-bg-tertiary)] border border-[var(--color-border-subtle)]"
-      title={`Starting: ${fmtINR(account.startingCapital)} · ${account.openPositions} open positions`}
+      title={`Starting: ${fmtINR(account.startingCapital)} · Tracking since ${new Date(account.epoch).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })} · ${account.openPositions} open positions`}
     >
       <span className="text-[var(--color-text-muted)]">PAPER</span>
       <div className="flex items-baseline gap-1">

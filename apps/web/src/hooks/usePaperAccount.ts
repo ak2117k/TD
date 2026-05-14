@@ -9,6 +9,8 @@ export interface PaperAccount {
   unrealizedPnl: number;
   equity: number;
   openPositions: number;
+  /** ISO timestamp — trades before this are ignored (legacy journal data). */
+  epoch: string;
 }
 
 export function usePaperAccount(pollMs = 5000) {

@@ -14,6 +14,24 @@ const MAX_SLIPPAGE_PCT = 0.0005;
 /** Default starting virtual capital (INR). ₹20,00,000 (20 lakhs). */
 const DEFAULT_VIRTUAL_CAPITAL = 2_000_000;
 
+/**
+ * Epoch — trades created BEFORE this timestamp do not affect the paper
+ * account balance. They remain in the `trades` table for journal/audit but
+ * are skipped during the startup cash-flow replay.
+ *
+ * Why: the trades table accumulated months of paper trades from older
+ * signal-generator runs, AI-advisor experiments, and backtests. Including
+ * them in the balance recompute baked ~₹1.2L of legacy losses into the
+ * starting position. Setting the epoch to NOW gives the user a clean
+ * ₹20L starting point to track current strategy findings without
+ * destroying historical journal data.
+ *
+ * Set to 2026-05-14 11:00 UTC (16:30 IST — just past market close on the
+ * day this feature was reset). To restart tracking from a new clean slate,
+ * bump this constant.
+ */
+const PAPER_ACCOUNT_EPOCH = new Date('2026-05-14T11:00:00Z');
+
 interface PendingPaperOrder {
   id: string;
   request: OrderRequest;
@@ -67,7 +85,9 @@ export class PaperTradeService implements OnModuleInit {
    */
   async onModuleInit(): Promise<void> {
     try {
-      const paperTrades = await this.tradeRepository.findAllPaperTrades();
+      const paperTrades = await this.tradeRepository.findPaperTradesSince(
+        PAPER_ACCOUNT_EPOCH,
+      );
       let bal = DEFAULT_VIRTUAL_CAPITAL;
       let realized = 0;
       let openCount = 0;
@@ -91,7 +111,8 @@ export class PaperTradeService implements OnModuleInit {
       }
       this.virtualBalance = bal;
       this.logger.log(
-        `[Paper] Balance recovered from ${paperTrades.length} trades: ` +
+        `[Paper] Balance recovered (epoch=${PAPER_ACCOUNT_EPOCH.toISOString()}) ` +
+          `from ${paperTrades.length} trades: ` +
           `start=₹${DEFAULT_VIRTUAL_CAPITAL.toLocaleString('en-IN')} → ` +
           `current=₹${bal.toLocaleString('en-IN')} ` +
           `(realized=₹${realized.toFixed(0)}, open=${openCount}, deployed=₹${deployed.toFixed(0)})`,
@@ -209,6 +230,7 @@ export class PaperTradeService implements OnModuleInit {
     unrealizedPnl: number;
     equity: number;
     openPositions: number;
+    epoch: string;
   } {
     const positions = Array.from(this.virtualPositions.values());
     let deployed = 0;
@@ -224,6 +246,7 @@ export class PaperTradeService implements OnModuleInit {
       unrealizedPnl: unrealized,
       equity: this.virtualBalance + deployed + unrealized,
       openPositions: positions.length,
+      epoch: PAPER_ACCOUNT_EPOCH.toISOString(),
     };
   }
 

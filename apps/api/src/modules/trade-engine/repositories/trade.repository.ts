@@ -11,13 +11,15 @@ export class TradeRepository {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Return every paper trade ever persisted, ordered by createdAt ASC so a
-   * cash-flow replay produces the same final balance the in-memory service
-   * had before restart. Used by PaperTradeService.onModuleInit().
+   * Return paper trades created on/after `since`, ordered by createdAt ASC
+   * so a cash-flow replay produces the same final balance the in-memory
+   * service had before restart. Used by PaperTradeService.onModuleInit()
+   * with the PAPER_ACCOUNT_EPOCH cutoff so legacy trades stay in the DB
+   * for journal/audit but don't pollute the current balance.
    */
-  async findAllPaperTrades(): Promise<Trade[]> {
+  async findPaperTradesSince(since: Date): Promise<Trade[]> {
     return this.prisma.trade.findMany({
-      where: { isPaperTrade: true },
+      where: { isPaperTrade: true, createdAt: { gte: since } },
       orderBy: { createdAt: 'asc' },
     });
   }

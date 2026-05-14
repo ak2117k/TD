@@ -5,7 +5,7 @@ import { OrderRequest } from '../../../common/interfaces/broker-adapter.interfac
 
 /** Stub repo for the service constructor — onModuleInit isn't called in these tests. */
 const mockTradeRepository = {
-  findAllPaperTrades: jest.fn().mockResolvedValue([]),
+  findPaperTradesSince: jest.fn().mockResolvedValue([]),
 };
 
 /**
