@@ -77,7 +77,13 @@ export function useFundamentals(symbol: string, exchange: string): UseFundamenta
     // generate noisy 400/404s in the network tab. Guarding here keeps
     // the request count clean and matches what the card renders.
     const equityExchange = exchange === 'NSE' || exchange === 'BSE';
-    if (!symbol || !exchange || !equityExchange) {
+    // Indices have no fundamentals (no P/E, no market cap — they're
+    // composite measures). NIFTY 50 / BANKNIFTY / SENSEX etc. always 404
+    // on /fundamentals. Skip the fetch to keep the network tab quiet.
+    const isIndex = /^(NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY|SENSEX|INDIAVIX)/i.test(
+      symbol.trim(),
+    );
+    if (!symbol || !exchange || !equityExchange || isIndex) {
       setData(null);
       setLoading(false);
       setError(null);
