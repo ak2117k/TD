@@ -12,6 +12,8 @@ const EVENT_LABEL: Record<string, string> = {
   TRADE_OPENED: 'TRADE OPENED',
   TRADE_CLOSED: 'TRADE CLOSED',
   DISMISSED: 'DISMISSED',
+  PARTIAL_EXIT: 'PARTIAL EXIT',
+  TRAILING_STOP_HIT: 'TRAILING STOP',
 };
 
 function ts(s: string): string {

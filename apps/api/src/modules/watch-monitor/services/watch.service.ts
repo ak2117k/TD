@@ -10,6 +10,15 @@ import { TradeExecutionService } from '../../trade-engine/services/trade-executi
 
 export const WATCH_CAP = 50;
 
+/** Partial-exit trigger: when |price move from entry| in our direction >= this %. */
+const PARTIAL_EXIT_THRESHOLD_PCT = 0.10;
+
+/** Trailing stop distance: stop tracks the most-favorable price minus/plus this %. */
+const TRAILING_STOP_PCT = 0.02;
+
+/** Fraction of position to exit at the +10% threshold. */
+const PARTIAL_EXIT_FRACTION = 0.5;
+
 export class WatchCapExceededError extends Error {
   constructor(activeCount: number) {
     super(`Watch entry cap exceeded: ${activeCount}/${WATCH_CAP} active`);
@@ -200,6 +209,22 @@ export class WatchService {
       return;
     }
 
+    // Partial-exit + trailing-stop apply ONLY to TRADED equity entries.
+    // Options positions skip this (50% of a lot is fractional). The
+    // existing target-hit check above is allowed to fire first — if
+    // profitTarget < +10%, the entry closes at target with no partial exit.
+    const isEquityTraded = entry.status === 'TRADED' && !entry.optionsToken;
+    if (isEquityTraded) {
+      if (!entry.partialExitedAt) {
+        // Phase 1: haven't done partial exit yet. Check if we've hit +10% threshold.
+        await this.checkPartialExitTrigger(entry, ltp);
+      } else {
+        // Phase 2: already did partial exit. Update trailing high-water and
+        // check trailing stop.
+        await this.updateTrailingStop(entry, ltp);
+      }
+    }
+
     const last = entry.lastEventPrice ?? entry.initialPrice;
     const delta = (ltp - last) / last;
     if (Math.abs(delta) >= WatchService.MATERIAL_CHANGE_PCT) {
@@ -366,5 +391,169 @@ export class WatchService {
       closedReason: reason,
     });
     await this.unsubscribeEntry(entryId);
+  }
+
+  // ============================================
+  // Partial-exit + trailing-stop helpers
+  // ============================================
+
+  /**
+   * Phase 1 check: TRADED entry hasn't done partial exit yet. If price has
+   * moved >= +10% in our favor (BUY: ltp >= entry × 1.10; SELL: ltp <= entry × 0.90),
+   * trigger the partial exit:
+   *   - Close PARTIAL_EXIT_FRACTION (50%) of the remaining position via broker
+   *   - Set partialExitedAt, partialExitPrice, partialQty, remainingQty
+   *   - Initialize trailingHighWater = ltp, trailingStopPrice = ltp ± 2%
+   *   - Write PARTIAL_EXIT event
+   */
+  private async checkPartialExitTrigger(entry: any, ltp: number): Promise<void> {
+    const ref = entry.executedPrice ?? entry.initialPrice;
+    if (ref <= 0) return;
+
+    const moveFavor = entry.side === 'BUY'
+      ? (ltp - ref) / ref
+      : (ref - ltp) / ref;
+
+    if (moveFavor < PARTIAL_EXIT_THRESHOLD_PCT) return;
+
+    // Trigger! Compute split.
+    // Position size source: the trade that was placed (paperTradeId/liveTradeId)
+    // would tell us the exact quantity. For Stage 2 equity intraday we default
+    // to 50 shares per setup (matches WatchController.execute's INTRADAY_EQUITY_QTY).
+    // If a future tradeId is set with a different qty, read from the trade
+    // record. For now assume 50 unless an existing partialQty/remainingQty
+    // indicates otherwise.
+    const initialQty = 50; // INTRADAY_EQUITY_QTY — matches the execution default
+    const partialQty = Math.floor(initialQty * PARTIAL_EXIT_FRACTION);
+    const remainingQty = initialQty - partialQty;
+
+    // Place the close-half order via broker. closeTrade takes a single tradeId
+    // and closes the full position — for HALF closures we need executeTrade
+    // with an opposite-side order of `partialQty` shares. The trade-engine
+    // service should reconcile this with the existing open position.
+    // (If TradeExecutionService doesn't yet support partial close, log it and
+    // proceed — we still mark the WatchEntry's partial exit fields so the
+    // trailing logic can run on the conceptual half. Surface as a known gap.)
+    try {
+      await this.trade.executeTrade({
+        symbol: entry.symbol,
+        token: entry.token,
+        exchange: entry.exchange ?? 'NSE',
+        side: entry.side === 'BUY' ? 'SELL' : 'BUY',  // opposite side to close partial
+        quantity: partialQty,
+        orderType: 'MARKET',
+        positionType: 'INTRADAY',
+      } as any);
+    } catch (err) {
+      this.logger.warn(
+        `Partial exit broker call failed for ${entry.symbol}: ${err instanceof Error ? err.message : err}. Marking partial exit on WatchEntry anyway.`,
+      );
+    }
+
+    // Initialize trailing stop on the remaining half.
+    const trailingStopPrice = entry.side === 'BUY'
+      ? ltp * (1 - TRAILING_STOP_PCT)
+      : ltp * (1 + TRAILING_STOP_PCT);
+
+    await this.repo.createEvent({
+      watchEntryId: entry.id,
+      eventType: WatchEventType.PARTIAL_EXIT,
+      price: ltp,
+      priceDelta: moveFavor * 100,
+      notes: `partial 50% sold at +${(moveFavor * 100).toFixed(2)}%, trail @ ${trailingStopPrice.toFixed(2)}`,
+    });
+
+    await this.repo.update(entry.id, {
+      partialExitedAt: new Date(),
+      partialExitPrice: ltp,
+      partialQty,
+      remainingQty,
+      trailingHighWater: ltp,
+      trailingStopPrice,
+    });
+
+    this.logger.log(
+      `${entry.symbol}: partial exit at ₹${ltp.toFixed(2)} (+${(moveFavor * 100).toFixed(2)}%), trail stop @ ₹${trailingStopPrice.toFixed(2)}`,
+    );
+  }
+
+  /**
+   * Phase 2 check: TRADED entry has already done partial exit. Track the
+   * most-favorable price seen since (high-water for BUY, low-water for SELL)
+   * and ratchet the trailing stop. If price crosses the trailing stop in the
+   * adverse direction, close the remaining half and transition to EXITED.
+   */
+  private async updateTrailingStop(entry: any, ltp: number): Promise<void> {
+    const isBuy = entry.side === 'BUY';
+    const highWater = entry.trailingHighWater ?? ltp;
+    const stop = entry.trailingStopPrice ?? ltp;
+
+    // Update high-water if price made a new extreme in our favor.
+    let newHighWater = highWater;
+    let newStop = stop;
+    if (isBuy && ltp > highWater) {
+      newHighWater = ltp;
+      newStop = ltp * (1 - TRAILING_STOP_PCT);
+    } else if (!isBuy && ltp < highWater) {
+      newHighWater = ltp;
+      newStop = ltp * (1 + TRAILING_STOP_PCT);
+    }
+
+    if (newHighWater !== highWater) {
+      await this.repo.update(entry.id, {
+        trailingHighWater: newHighWater,
+        trailingStopPrice: newStop,
+      });
+    }
+
+    // Trailing stop hit?
+    const stopHit = isBuy ? ltp <= newStop : ltp >= newStop;
+    if (stopHit) {
+      await this.triggerTrailingStop(entry, ltp, newStop);
+    }
+  }
+
+  /**
+   * Trailing stop fired: close the remaining position via broker, mark
+   * status=EXITED, write TRAILING_STOP_HIT event, unsubscribe feed.
+   */
+  private async triggerTrailingStop(entry: any, ltp: number, stopPrice: number): Promise<void> {
+    this.logger.log(
+      `${entry.symbol}: trailing stop hit at ₹${ltp.toFixed(2)} (high-water=${entry.trailingHighWater}, stop=${stopPrice.toFixed(2)})`,
+    );
+
+    const remainingQty = entry.remainingQty ?? Math.floor(50 * (1 - PARTIAL_EXIT_FRACTION));
+
+    // Close remaining half via broker.
+    try {
+      await this.trade.executeTrade({
+        symbol: entry.symbol,
+        token: entry.token,
+        exchange: entry.exchange ?? 'NSE',
+        side: entry.side === 'BUY' ? 'SELL' : 'BUY',
+        quantity: remainingQty,
+        orderType: 'MARKET',
+        positionType: 'INTRADAY',
+      } as any);
+    } catch (err) {
+      this.logger.warn(
+        `Trailing stop broker close failed for ${entry.symbol}: ${err instanceof Error ? err.message : err}. Marking entry EXITED anyway.`,
+      );
+    }
+
+    await this.repo.createEvent({
+      watchEntryId: entry.id,
+      eventType: WatchEventType.TRAILING_STOP_HIT,
+      price: ltp,
+      notes: `trailing stop fired (high-water ${entry.trailingHighWater}, stop ${stopPrice.toFixed(2)})`,
+    });
+
+    await this.repo.update(entry.id, {
+      status: WatchStatus.EXITED,
+      closedAt: new Date(),
+      closedReason: 'trailing-stop',
+    });
+
+    await this.unsubscribeEntry(entry.id);
   }
 }

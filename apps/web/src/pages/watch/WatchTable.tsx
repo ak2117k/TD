@@ -113,7 +113,14 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
                   : 'hover:bg-[var(--color-bg-tertiary)]/50'
               }`}
             >
-              <td className="py-2 px-3 font-mono text-[var(--color-text-primary)]">{e.symbol}</td>
+              <td className="py-2 px-3 font-mono text-[var(--color-text-primary)]">
+                {e.symbol}
+                {e.partialExitedAt && (
+                  <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">
+                    ½ exit · trail ₹{e.trailingStopPrice?.toFixed(2)}
+                  </span>
+                )}
+              </td>
               <td className="py-2 px-3 text-[var(--color-text-secondary)]">{e.side}</td>
               <td className="py-2 px-3 text-right text-[var(--color-text-primary)]">
                 {e.initialScore}

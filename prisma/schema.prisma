@@ -523,6 +523,8 @@ enum WatchEventType {
   TRADE_OPENED
   TRADE_CLOSED
   DISMISSED
+  PARTIAL_EXIT
+  TRAILING_STOP_HIT
 }
 
 model WatchEntry {
@@ -562,6 +564,15 @@ model WatchEntry {
   closedReason          String?
   notes                 String?
   dismissedAt           DateTime?
+  // Partial-exit + trailing-stop (post-execution profit management).
+  // When a TRADED entry's price moves +10% in our favor, half the position
+  // is sold and a trailing stop is placed on the remaining half.
+  partialExitedAt       DateTime?
+  partialExitPrice      Float?
+  partialQty            Int?       // shares we sold at partial exit (typically half)
+  remainingQty          Int?       // shares still open and trailing
+  trailingHighWater     Float?     // most favorable price seen since partial exit
+  trailingStopPrice     Float?     // current stop level (updates as high-water moves)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   events                WatchEvent[]
