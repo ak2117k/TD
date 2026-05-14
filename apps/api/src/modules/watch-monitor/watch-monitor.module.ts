@@ -15,6 +15,7 @@ import { WatchRescoreWorker, WATCH_RESCORE_QUEUE } from './workers/watch-rescore
 import { WatchController } from './controllers/watch.controller';
 import { WatchGateway } from './gateways/watch.gateway';
 import { MarketFeedService } from '../market-data/services/market-feed.service';
+import { RiskGuardService } from './services/risk-guard.service';
 
 @Global()
 @Module({
@@ -32,6 +33,7 @@ import { MarketFeedService } from '../market-data/services/market-feed.service';
     WatchRepository,
     WatchService,
     WatchMonitorService,
+    RiskGuardService,
     StrikeSelectorService,
     TargetCalculatorService,
     WatchRescoreWorker,

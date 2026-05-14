@@ -127,6 +127,39 @@ export class WatchRepository {
     });
   }
 
+  /**
+   * All TRADED entries that were executed today (IST date). Used by
+   * RiskGuardService to compute the running daily P&L.
+   */
+  async findTradedToday(): Promise<WatchEntry[]> {
+    // Compute today's IST midnight as a UTC instant.
+    const now = new Date();
+    const istOffsetMs = 5.5 * 60 * 60 * 1000;
+    const istNow = new Date(now.getTime() + istOffsetMs);
+    const istMidnight = new Date(
+      Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate()),
+    );
+    // The boundary in UTC is IST midnight - 5h30m
+    const utcStart = new Date(istMidnight.getTime() - istOffsetMs);
+    return this.prisma.watchEntry.findMany({
+      where: {
+        status: WatchStatus.TRADED,
+        executedAt: { gte: utcStart },
+      },
+    });
+  }
+
+  /**
+   * All entries that are currently WATCHING or TRADED. Used by square-off
+   * to find everything that needs to be closed.
+   */
+  async findAllActiveOrTraded(): Promise<WatchEntry[]> {
+    return this.prisma.watchEntry.findMany({
+      where: { status: { in: [WatchStatus.WATCHING, WatchStatus.TRADED] } },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
   async update(id: string, data: Prisma.WatchEntryUpdateInput): Promise<WatchEntry> {
     return this.prisma.watchEntry.update({ where: { id }, data });
   }

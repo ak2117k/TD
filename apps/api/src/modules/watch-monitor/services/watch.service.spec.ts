@@ -6,6 +6,9 @@ import { StrikeSelectorService } from './strike-selector.service';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
 import { WatchGateway } from '../gateways/watch.gateway';
+import { TradeExecutionService } from '../../trade-engine/services/trade-execution.service';
+
+const mockTrade = { closeTrade: jest.fn().mockResolvedValue({}) };
 
 describe('WatchService.createFromAlert', () => {
   let svc: WatchService;
@@ -38,6 +41,7 @@ describe('WatchService.createFromAlert', () => {
         { provide: MarketFeedService, useValue: feed },
         { provide: LevelBookService, useValue: levelBook },
         { provide: WatchGateway, useValue: { emitTick: jest.fn(), emitEvent: jest.fn(), emitCreated: jest.fn() } },
+        { provide: TradeExecutionService, useValue: mockTrade },
       ],
     }).compile();
     svc = mod.get(WatchService);
@@ -111,6 +115,7 @@ describe('WatchService.onTick', () => {
         { provide: MarketFeedService, useValue: feed },
         { provide: LevelBookService, useValue: { getLevels: jest.fn() } },
         { provide: WatchGateway, useValue: gateway },
+        { provide: TradeExecutionService, useValue: mockTrade },
       ],
     }).compile();
     svc = mod.get(WatchService);
@@ -202,6 +207,7 @@ describe('WatchService.transitionStopped', () => {
         { provide: MarketFeedService, useValue: feed },
         { provide: LevelBookService, useValue: { getLevels: jest.fn() } },
         { provide: WatchGateway, useValue: { emitTick: jest.fn(), emitEvent: jest.fn(), emitCreated: jest.fn() } },
+        { provide: TradeExecutionService, useValue: mockTrade },
       ],
     }).compile();
     svc = mod.get(WatchService);

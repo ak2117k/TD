@@ -14,6 +14,7 @@ import {
 import { WatchStatus } from '@prisma/client';
 import { WatchRepository } from '../repositories/watch.repository';
 import { WatchService } from '../services/watch.service';
+import { RiskGuardService } from '../services/risk-guard.service';
 import { ExecuteWatchDto } from '../dto/execute-watch.dto';
 import { CloseWatchDto } from '../dto/close-watch.dto';
 import { TradeExecutionService } from '../../trade-engine/services/trade-execution.service';
@@ -26,6 +27,7 @@ export class WatchController {
     private readonly repo: WatchRepository,
     private readonly watch: WatchService,
     private readonly trade: TradeExecutionService,
+    private readonly riskGuard: RiskGuardService,
   ) {}
 
   @Get()
@@ -137,5 +139,28 @@ export class WatchController {
       closedReason: body.reason,
     });
     return { ok: true };
+  }
+
+  /**
+   * Manual kill switch — squares off every active WATCHING and TRADED entry.
+   * Called by the UI's emergency kill-switch button.
+   * POST /api/watch/square-off-all
+   */
+  @Post('square-off-all')
+  @HttpCode(HttpStatus.OK)
+  async squareOffAll(@Body() body: { reason?: string }) {
+    const reason = (body?.reason ?? 'manual') as 'eod-square-off' | 'daily-loss-breaker' | 'manual';
+    const result = await this.watch.squareOffAll(reason);
+    return result;
+  }
+
+  /**
+   * Live daily P&L across all TRADED entries executed today (IST date).
+   * Used by the UI to display running P&L and the risk-guard breaker status.
+   * GET /api/watch/daily-pnl
+   */
+  @Get('daily-pnl')
+  async dailyPnL() {
+    return this.riskGuard.computeDailyPnL();
   }
 }

@@ -3,12 +3,14 @@ import { WatchMonitorService } from './watch-monitor.service';
 import { WatchService } from './watch.service';
 import { WatchRepository } from '../repositories/watch.repository';
 import { ChartinkScoringService } from '../../chartink/services/chartink-scoring.service';
+import { RiskGuardService } from './risk-guard.service';
 
 describe('WatchMonitorService', () => {
   let svc: WatchMonitorService;
   let repo: any;
   let scoring: any;
   let watch: any;
+  let riskGuard: any;
 
   beforeEach(async () => {
     repo = {
@@ -18,12 +20,14 @@ describe('WatchMonitorService', () => {
     };
     scoring = { score: jest.fn() };
     watch = { transitionStopped: jest.fn() };
+    riskGuard = { checkAndTrip: jest.fn().mockResolvedValue(false) };
     const mod = await Test.createTestingModule({
       providers: [
         WatchMonitorService,
         { provide: WatchRepository, useValue: repo },
         { provide: ChartinkScoringService, useValue: scoring },
         { provide: WatchService, useValue: watch },
+        { provide: RiskGuardService, useValue: riskGuard },
       ],
     }).compile();
     svc = mod.get(WatchMonitorService);

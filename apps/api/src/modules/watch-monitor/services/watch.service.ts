@@ -6,6 +6,7 @@ import { StrikeSelectorService } from './strike-selector.service';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
 import { WatchGateway } from '../gateways/watch.gateway';
+import { TradeExecutionService } from '../../trade-engine/services/trade-execution.service';
 
 export const WATCH_CAP = 50;
 
@@ -39,6 +40,7 @@ export class WatchService {
     private readonly feed: MarketFeedService,
     private readonly levelBook: LevelBookService,
     private readonly gateway: WatchGateway,
+    private readonly trade: TradeExecutionService,
   ) {}
 
   async createFromAlert(input: CreateFromAlertInput): Promise<WatchEntry> {
@@ -265,5 +267,104 @@ export class WatchService {
     if (entry.optionsToken) {
       this.feed.unsubscribeForWatch(entry.optionsToken, entryId);
     }
+  }
+
+  // ============================================
+  // Risk-guard: bulk square-off
+  // ============================================
+
+  /**
+   * Close every currently active (WATCHING or TRADED) watch entry. Used by
+   * RiskGuardService for EOD square-off and the daily loss circuit-breaker.
+   *
+   * - WATCHING entries → status=DISMISSED, write DISMISSED event
+   * - TRADED entries  → close the broker position via TradeExecutionService,
+   *                      mark status=EXITED, write TRADE_CLOSED event
+   *
+   * `reason` is recorded as closedReason on every entry so the audit log
+   * shows why everything got closed at once.
+   */
+  async squareOffAll(reason: 'eod-square-off' | 'daily-loss-breaker' | 'manual'): Promise<{
+    watchingClosed: number;
+    tradedClosed: number;
+    errors: number;
+  }> {
+    this.logger.warn(`squareOffAll called — reason=${reason}`);
+    const entries = await this.repo.findAllActiveOrTraded();
+    let watchingClosed = 0;
+    let tradedClosed = 0;
+    let errors = 0;
+
+    for (const entry of entries) {
+      try {
+        if (entry.status === WatchStatus.TRADED) {
+          await this.closeTraded(entry.id, reason);
+          tradedClosed++;
+        } else {
+          // WATCHING — no broker position to close, just mark DISMISSED
+          await this.repo.createEvent({
+            watchEntryId: entry.id,
+            eventType: WatchEventType.DISMISSED,
+            notes: `cause:${reason}`,
+          });
+          await this.repo.update(entry.id, {
+            status: WatchStatus.DISMISSED,
+            dismissedAt: new Date(),
+            closedReason: reason,
+          });
+          await this.unsubscribeEntry(entry.id);
+          watchingClosed++;
+        }
+      } catch (err) {
+        this.logger.warn(
+          `squareOffAll: failed to close ${entry.symbol} (${entry.id}): ${err instanceof Error ? err.message : err}`,
+        );
+        errors++;
+      }
+    }
+
+    this.logger.warn(
+      `squareOffAll complete — watching=${watchingClosed} traded=${tradedClosed} errors=${errors}`,
+    );
+    return { watchingClosed, tradedClosed, errors };
+  }
+
+  /**
+   * Close a single TRADED entry: call broker (paper or live) to close the
+   * position, mark status=EXITED, write TRADE_CLOSED event, unsubscribe feed.
+   */
+  async closeTraded(
+    entryId: string,
+    reason: string,
+  ): Promise<void> {
+    const entry = await this.repo.findById(entryId);
+    if (!entry) throw new Error(`Watch entry ${entryId} not found`);
+    if (entry.status !== WatchStatus.TRADED) {
+      throw new Error(`Cannot closeTraded on entry in status ${entry.status}`);
+    }
+
+    const tradeId = (entry as any).paperTradeId ?? (entry as any).liveTradeId;
+    if (tradeId) {
+      try {
+        await this.trade.closeTrade(tradeId, reason);
+      } catch (err) {
+        this.logger.warn(
+          `closeTraded: broker close failed for trade ${tradeId} (${entry.symbol}): ${err instanceof Error ? err.message : err}. Still marking entry EXITED.`,
+        );
+      }
+    }
+
+    await this.repo.createEvent({
+      watchEntryId: entryId,
+      eventType: WatchEventType.TRADE_CLOSED,
+      price: (entry as any).currentPrice ?? null,
+      notes: `cause:${reason}`,
+    });
+    await this.repo.update(entryId, {
+      status: WatchStatus.EXITED,
+      closedAt: new Date(),
+      closedReason: reason,
+    });
+    await this.unsubscribeEntry(entryId);
   }
 }

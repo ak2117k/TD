@@ -3,6 +3,7 @@ import { Prisma, WatchEntry, WatchEventType } from '@prisma/client';
 import { WatchRepository } from '../repositories/watch.repository';
 import { ChartinkScoringService } from '../../chartink/services/chartink-scoring.service';
 import { WatchService } from './watch.service';
+import { RiskGuardService } from './risk-guard.service';
 
 @Injectable()
 export class WatchMonitorService {
@@ -12,10 +13,21 @@ export class WatchMonitorService {
     private readonly repo: WatchRepository,
     private readonly scoring: ChartinkScoringService,
     private readonly watch: WatchService,
+    private readonly riskGuard: RiskGuardService,
   ) {}
 
   async tickAll(): Promise<void> {
     if (!this.isMarketHours()) return;
+
+    // Check the daily loss breaker BEFORE running rescore — if we've already
+    // hit -₹60k there's no point computing scores; just kill everything and
+    // exit early. checkAndTrip returns true if breaker tripped.
+    const breakerTripped = await this.riskGuard.checkAndTrip();
+    if (breakerTripped) {
+      this.logger.warn('Skipping rescore tick — daily loss breaker just tripped');
+      return;
+    }
+
     const entries = await this.repo.findAllActive();
     if (entries.length === 0) return;
     this.logger.debug(`rescore tick: ${entries.length} active entries`);
