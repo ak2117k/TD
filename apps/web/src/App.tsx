@@ -15,6 +15,7 @@ import JournalPage from '@/pages/journal/JournalPage';
 import AdvisorPage from '@/pages/advisor/AdvisorPage';
 import BacktestPage from '@/pages/backtest/BacktestPage';
 import StrategyBuilderPage from '@/pages/strategy-builder/StrategyBuilderPage';
+import { StrategyReviewPage } from '@/pages/strategy-review/StrategyReviewPage';
 import SettingsPage from '@/pages/settings/SettingsPage';
 import { WatchPage } from '@/pages/watch/WatchPage';
 
@@ -46,6 +47,7 @@ export default function App() {
         <Route path="advisor" element={<AdvisorPage />} />
         <Route path="backtest" element={<BacktestPage />} />
         <Route path="strategy-builder" element={<StrategyBuilderPage />} />
+        <Route path="strategy-review" element={<StrategyReviewPage />} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>
     </Routes>

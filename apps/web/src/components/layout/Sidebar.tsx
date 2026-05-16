@@ -16,6 +16,7 @@ import {
   Brain,
   FlaskConical,
   Code2,
+  ClipboardList,
   Settings,
   ChevronLeft,
   ChevronRight,
@@ -37,6 +38,7 @@ const navItems: NavItem[] = [
   { path: '/advisor', label: 'AI Advisor', icon: Brain },
   { path: '/backtest', label: 'Backtest', icon: FlaskConical },
   { path: '/strategy-builder', label: 'Strategy Builder', icon: Code2 },
+  { path: '/strategy-review', label: 'Strategy Review', icon: ClipboardList },
   { path: '/settings', label: 'Settings', icon: Settings },
 ];
 

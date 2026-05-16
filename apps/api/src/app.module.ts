@@ -20,6 +20,7 @@ import { BrokerModule } from './modules/broker/broker.module';
 import { ChartinkModule } from './modules/chartink/chartink.module';
 import { FundamentalsModule } from './modules/fundamentals/fundamentals.module';
 import { WatchMonitorModule } from './modules/watch-monitor/watch-monitor.module';
+import { StrategyReviewModule } from './modules/strategy-review/strategy-review.module';
 
 @Module({
   imports: [
@@ -92,6 +93,9 @@ import { WatchMonitorModule } from './modules/watch-monitor/watch-monitor.module
 
     // Watch Monitor — Stage 2 trade watch lifecycle, scoring, options selection
     WatchMonitorModule,
+
+    // Strategy Review — read-only analytics over stored trading history
+    StrategyReviewModule,
   ],
   providers: [],
 })
