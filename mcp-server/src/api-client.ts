@@ -3,7 +3,7 @@
  * Uses native fetch — no external dependencies needed.
  */
 
-const BASE_URL = process.env.TD_API_URL || "http://localhost:3001";
+const BASE_URL = process.env.TD_API_URL || "http://localhost:4001";
 
 export class ApiClient {
   private baseUrl: string;

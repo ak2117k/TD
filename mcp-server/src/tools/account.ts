@@ -83,7 +83,7 @@ export function registerAccountTools(server: McpServer): void {
         return {
           content: [{
             type: "text" as const,
-            text: `Error fetching trading data: ${(results[0] as PromiseRejectedResult).reason?.message ?? "Backend unreachable"}. Is the API server running on localhost:3001?`,
+            text: `Error fetching trading data: ${(results[0] as PromiseRejectedResult).reason?.message ?? "Backend unreachable"}. Is the API server running on localhost:4001?`,
           }],
         };
       }

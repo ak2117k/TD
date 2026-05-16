@@ -1,5 +1,5 @@
 // Simple health check — verifies backend connectivity
-const API_URL = process.env.TD_API_URL || 'http://localhost:3001';
+const API_URL = process.env.TD_API_URL || 'http://localhost:4001';
 
 async function check() {
   try {

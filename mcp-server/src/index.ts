@@ -8,7 +8,7 @@
  * manage portfolio, and get AI trading advice.
  *
  * Transport: stdio (for Claude Code integration)
- * Backend: NestJS API at http://localhost:3001
+ * Backend: NestJS API at http://localhost:4001
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
