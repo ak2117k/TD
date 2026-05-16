@@ -29,16 +29,19 @@ export class WatchController {
   ) {}
 
   @Get()
-  async list(@Query('status') status?: string, @Query('limit') limit?: string) {
-    const lim = limit
-      ? Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200)
-      : 50;
+  async list(
+    @Query('status') status?: string,
+    @Query('date') date?: string,
+  ) {
     if (status && !(status in WatchStatus)) {
       throw new BadRequestException(`Invalid status: ${status}`);
     }
-    return this.repo.list({
+    if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new BadRequestException(`Invalid date (expected YYYY-MM-DD): ${date}`);
+    }
+    return this.watch.list({
       status: status ? (status as WatchStatus) : undefined,
-      limit: lim,
+      date,
     });
   }
 
@@ -89,11 +92,10 @@ export class WatchController {
         `Cannot close entry in status ${entry.status}`,
       );
     }
-    await this.repo.update(id, {
-      status: WatchStatus.EXITED,
-      closedAt: new Date(),
-      closedReason: body.reason,
-    });
+    // Route through closeTraded so the linked paper/live trade is actually
+    // closed (cash returned, Trade row marked CLOSED) — not just a bare
+    // status flip on the watch entry.
+    await this.watch.closeTraded(id, body.reason);
     return { ok: true };
   }
 

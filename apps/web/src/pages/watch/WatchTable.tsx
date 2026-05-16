@@ -1,52 +1,18 @@
+import { Fragment } from 'react';
 import type { WatchEntry } from '../../types/watch.types';
+import { profitView, isClosed } from '../../utils/watchPnl';
+import { WatchDetailPanel } from './WatchDetailPanel';
 
 interface Props {
   entries: WatchEntry[];
-  onSelect: (id: string) => void;
+  onSelect: (id: string | null) => void;
   selectedId: string | null;
 }
-
-/** Max ₹ deployed per trade — mirrors backend MAX_INVESTMENT_PER_TRADE.
- *  Per-row quantity is floor(this / referencePrice) so P&L scales with stock price. */
-const MAX_INVESTMENT_PER_TRADE = 200_000;
 
 function pctChange(curr: number | null, init: number): string {
   if (curr == null) return '—';
   const d = ((curr - init) / init) * 100;
   return `${d >= 0 ? '+' : ''}${d.toFixed(2)}%`;
-}
-
-interface ProfitView {
-  abs: number;
-  pct: number;
-  ref: number;
-  qty: number;
-  hasLivePrice: boolean;
-}
-
-/**
- * Compute running profit using the entry's live currentPrice (updates as
- * WS ticks arrive) against the reference price:
- *   - TRADED entries → executedPrice (real P&L from the broker fill)
- *   - WATCHING entries → initialPrice (potential / what-if P&L if entered now)
- *
- * Side flips the sign: SELL profits when price drops.
- * Qty is dynamic: floor(MAX_INVESTMENT_PER_TRADE / ref) so ₹ deployed is
- * consistent (~₹2L) regardless of per-share price.
- */
-function profitView(entry: WatchEntry): ProfitView {
-  const ref = entry.executedPrice ?? entry.initialPrice;
-  const curr = entry.currentPrice ?? ref;
-  const sideMul = entry.side === 'BUY' ? 1 : -1;
-  const diff = (curr - ref) * sideMul;
-  const qty = Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(ref, 1)));
-  return {
-    abs: diff * qty,
-    pct: ref > 0 ? (diff / ref) * 100 : 0,
-    ref,
-    qty,
-    hasLivePrice: entry.currentPrice != null,
-  };
 }
 
 function statusColor(status: string): string {
@@ -73,6 +39,35 @@ function fmtRupees(n: number): string {
   return `${sign}₹${Math.abs(n) < 1 ? n.toFixed(2) : n.toFixed(0)}`;
 }
 
+/** Time-of-day in IST (HH:MM:SS). The day itself is implied by the date filter. */
+function fmtTime(iso: string | null): string {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleTimeString('en-IN', {
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false, timeZone: 'Asia/Kolkata',
+  });
+}
+
+/** The 10 scoring factors, in fixed column order (short header → full name). */
+const FACTOR_COLUMNS: ReadonlyArray<{ name: string; short: string }> = [
+  { name: 'Index aligned', short: 'Idx' },
+  { name: 'Sector aligned', short: 'Sect' },
+  { name: 'Relative strength', short: 'RS' },
+  { name: 'Price vs 20-EMA', short: 'EMA' },
+  { name: 'SuperTrend match', short: 'ST' },
+  { name: 'MACD on 1d', short: 'M1d' },
+  { name: 'MACD on 5m', short: 'M5m' },
+  { name: 'MACD on 1m', short: 'M1m' },
+  { name: 'S/R room', short: 'S/R' },
+  { name: 'Volume confirmation', short: 'Vol' },
+];
+
+/** The scoring checks captured on the entry at creation time (or []). */
+function entryChecks(entry: WatchEntry): Array<{ name: string; passed: boolean }> {
+  const bd = entry.initialBreakdown as { checks?: Array<{ name: string; passed: boolean }> } | null;
+  return Array.isArray(bd?.checks) ? bd!.checks : [];
+}
+
 export function WatchTable({ entries, onSelect, selectedId }: Props) {
   if (entries.length === 0) {
     return (
@@ -82,12 +77,19 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
     );
   }
   return (
-    <table className="w-full text-sm text-[var(--color-text-primary)]">
+    <div className="overflow-x-auto">
+    <table className="min-w-full text-sm text-[var(--color-text-primary)]">
       <thead className="text-xs text-[var(--color-text-muted)] border-b border-[var(--color-border-subtle)]">
         <tr>
           <th className="py-2 px-3 text-left">Symbol</th>
+          <th className="py-2 px-3 text-left">Scanner</th>
           <th className="py-2 px-3 text-left">Side</th>
-          <th className="py-2 px-3 text-right">Score</th>
+          <th
+            className="py-2 px-3 text-right"
+            title="Shares bought = floor(₹2,00,000 / reference price). Varies by stock price."
+          >
+            Qty
+          </th>
           <th className="py-2 px-3 text-right">Price</th>
           <th className="py-2 px-3 text-right">Δ%</th>
           <th
@@ -99,15 +101,24 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
           <th className="py-2 px-3 text-right">P&amp;L %</th>
           <th className="py-2 px-3 text-right">Target</th>
           <th className="py-2 px-3 text-left">Status</th>
+          <th className="py-2 px-3 text-right" title="Order fill time — or the alert time if never traded (IST)">Buy Time</th>
+          <th className="py-2 px-3 text-right" title="Position close / alert stop time (IST)">Sell Time</th>
+          <th className="py-2 px-3 text-right">Score</th>
+          {FACTOR_COLUMNS.map((f) => (
+            <th key={f.name} className="py-2 px-2 text-center font-medium" title={`${f.name} — aligned at entry`}>
+              {f.short}
+            </th>
+          ))}
         </tr>
       </thead>
       <tbody>
         {entries.map((e) => {
           const p = profitView(e);
+          const passedByName = new Map(entryChecks(e).map((c) => [c.name, c.passed]));
           return (
+            <Fragment key={e.id}>
             <tr
-              key={e.id}
-              onClick={() => onSelect(e.id)}
+              onClick={() => onSelect(e.id === selectedId ? null : e.id)}
               className={`border-b border-[var(--color-border-subtle)] cursor-pointer transition-colors ${
                 e.id === selectedId
                   ? 'bg-[var(--color-bg-tertiary)]'
@@ -122,12 +133,18 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
                   </span>
                 )}
               </td>
+              <td
+                className="py-2 px-3 text-left text-[var(--color-text-secondary)] max-w-[160px] truncate"
+                title={e.scannerName ?? undefined}
+              >
+                {e.scannerName ?? '—'}
+              </td>
               <td className="py-2 px-3 text-[var(--color-text-secondary)]">{e.side}</td>
-              <td className="py-2 px-3 text-right text-[var(--color-text-primary)]">
-                {e.initialScore}
-                {e.currentScore != null && e.currentScore !== e.initialScore ? (
-                  <> → <strong>{e.currentScore}</strong></>
-                ) : null}
+              <td
+                className="py-2 px-3 text-right tabular-nums text-[var(--color-text-primary)]"
+                title={`₹${(p.qty * p.ref).toLocaleString('en-IN', { maximumFractionDigits: 0 })} deployed @ ₹${p.ref.toFixed(2)}`}
+              >
+                {p.qty.toLocaleString('en-IN')}
               </td>
               <td className="py-2 px-3 text-right text-[var(--color-text-primary)]">
                 {e.currentPrice?.toFixed(2) ?? e.initialPrice.toFixed(2)}
@@ -135,25 +152,100 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
               <td className="py-2 px-3 text-right text-[var(--color-text-secondary)]">
                 {pctChange(e.currentPrice, e.initialPrice)}
               </td>
-              <td
-                className={`py-2 px-3 text-right font-medium tabular-nums ${profitColor(p.abs, p.hasLivePrice)}`}
-                title={`${p.qty} shares @ ₹${p.ref.toFixed(2)} = ₹${(p.qty * p.ref).toFixed(0)} invested`}
-              >
-                {p.hasLivePrice ? fmtRupees(p.abs) : '—'}
-              </td>
-              <td className={`py-2 px-3 text-right tabular-nums ${profitColor(p.abs, p.hasLivePrice)}`}>
-                {p.hasLivePrice
-                  ? `${p.pct >= 0 ? '+' : ''}${p.pct.toFixed(2)}%`
-                  : '—'}
-              </td>
+              {isClosed(e.status) ? (
+                e.realizedPnl != null ? (
+                  // Executed & closed → realized P&L from the linked trade.
+                  <>
+                    <td className={`py-2 px-3 text-right font-medium tabular-nums ${
+                      e.realizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'
+                    }`}>
+                      {fmtRupees(e.realizedPnl)}
+                    </td>
+                    <td className={`py-2 px-3 text-right tabular-nums ${
+                      e.realizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'
+                    }`}>
+                      {`${e.realizedPnl >= 0 ? '+' : ''}${(
+                        (e.realizedPnl / Math.max(p.ref * p.qty, 1)) * 100
+                      ).toFixed(2)}%`}
+                    </td>
+                  </>
+                ) : (
+                  // Never traded → "what-if" P&L (price-based, hypothetical).
+                  // Marked with ~ and a tooltip so it is not read as real money.
+                  <>
+                    <td
+                      className={`py-2 px-3 text-right tabular-nums ${profitColor(p.abs, p.hasLivePrice)}`}
+                      title="What-if P&L — this alert was never traded"
+                    >
+                      ~{fmtRupees(p.abs)}
+                    </td>
+                    <td
+                      className={`py-2 px-3 text-right tabular-nums ${profitColor(p.abs, p.hasLivePrice)}`}
+                      title="What-if — this alert was never traded"
+                    >
+                      ~{p.pct >= 0 ? '+' : ''}{p.pct.toFixed(2)}%
+                    </td>
+                  </>
+                )
+              ) : (
+                <>
+                  <td
+                    className={`py-2 px-3 text-right font-medium tabular-nums ${profitColor(p.abs, p.hasLivePrice)}`}
+                    title={`${p.qty} shares @ ₹${p.ref.toFixed(2)} = ₹${(p.qty * p.ref).toFixed(0)} invested`}
+                  >
+                    {p.hasLivePrice ? fmtRupees(p.abs) : '—'}
+                  </td>
+                  <td className={`py-2 px-3 text-right tabular-nums ${profitColor(p.abs, p.hasLivePrice)}`}>
+                    {p.hasLivePrice ? `${p.pct >= 0 ? '+' : ''}${p.pct.toFixed(2)}%` : '—'}
+                  </td>
+                </>
+              )}
               <td className="py-2 px-3 text-right text-[var(--color-text-secondary)]">
                 {e.profitTarget.toFixed(2)}
               </td>
               <td className={`py-2 px-3 font-medium ${statusColor(e.status)}`}>{e.status}</td>
+              <td className="py-2 px-3 text-right tabular-nums text-[var(--color-text-secondary)]">
+                {fmtTime(e.executedAt ?? e.initialAt)}
+              </td>
+              <td className="py-2 px-3 text-right tabular-nums text-[var(--color-text-secondary)]">
+                {fmtTime(e.closedAt)}
+              </td>
+              <td className="py-2 px-3 text-right text-[var(--color-text-primary)]">
+                {e.initialScore}
+                {e.currentScore != null && e.currentScore !== e.initialScore ? (
+                  <> → <strong>{e.currentScore}</strong></>
+                ) : null}
+              </td>
+              {FACTOR_COLUMNS.map((f) => {
+                const passed = passedByName.get(f.name);
+                return (
+                  <td key={f.name} className="py-2 px-2 text-center">
+                    {passed === true ? (
+                      <span className="text-emerald-400">✓</span>
+                    ) : passed === false ? (
+                      <span className="text-red-400/60">✗</span>
+                    ) : (
+                      <span className="text-[var(--color-text-muted)]">·</span>
+                    )}
+                  </td>
+                );
+              })}
             </tr>
+            {e.id === selectedId && (
+              <tr>
+                <td
+                  colSpan={23}
+                  className="p-2 bg-[var(--color-bg-tertiary)]/40 border-b border-[var(--color-border-subtle)]"
+                >
+                  <WatchDetailPanel entryId={e.id} onClose={() => onSelect(null)} />
+                </td>
+              </tr>
+            )}
+            </Fragment>
           );
         })}
       </tbody>
     </table>
+    </div>
   );
 }

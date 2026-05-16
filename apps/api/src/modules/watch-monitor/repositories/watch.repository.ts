@@ -34,6 +34,17 @@ export interface CreateEventInput {
   notes?: string | null;
 }
 
+/**
+ * Convert an IST calendar day (YYYY-MM-DD) to its UTC instant range.
+ * IST = UTC+5:30, so IST 00:00 is 18:30 UTC on the previous day.
+ */
+export function istDayRange(date: string): { start: Date; end: Date } {
+  return {
+    start: new Date(`${date}T00:00:00.000+05:30`),
+    end: new Date(`${date}T23:59:59.999+05:30`),
+  };
+}
+
 @Injectable()
 export class WatchRepository {
   constructor(private readonly prisma: PrismaService) {}
@@ -102,13 +113,21 @@ export class WatchRepository {
     });
   }
 
-  async list(opts: { status?: WatchStatus; limit?: number }): Promise<WatchEntry[]> {
+  async list(opts: {
+    status?: WatchStatus;
+    date?: string;
+    limit?: number;
+  }): Promise<WatchEntry[]> {
     const where: Prisma.WatchEntryWhereInput = {};
     if (opts.status) where.status = opts.status;
+    if (opts.date) {
+      const { start, end } = istDayRange(opts.date);
+      where.createdAt = { gte: start, lte: end };
+    }
     return this.prisma.watchEntry.findMany({
       where,
       orderBy: { createdAt: 'desc' },
-      take: opts.limit ?? 50,
+      take: opts.limit ?? (opts.date ? 200 : 50),
     });
   }
 
@@ -162,5 +181,31 @@ export class WatchRepository {
 
   async update(id: string, data: Prisma.WatchEntryUpdateInput): Promise<WatchEntry> {
     return this.prisma.watchEntry.update({ where: { id }, data });
+  }
+
+  /** Resolve alertId -> Chartink scanner name. Batched; deduped. */
+  async findScannerNames(alertIds: string[]): Promise<Map<string, string>> {
+    const ids = [...new Set(alertIds.filter((x): x is string => !!x))];
+    if (ids.length === 0) return new Map();
+    const alerts = await this.prisma.chartinkAlert.findMany({
+      where: { id: { in: ids } },
+      include: { scanner: true },
+    });
+    return new Map(alerts.map((a) => [a.id, a.scanner.scanName]));
+  }
+
+  /** Resolve tradeId -> realized pnl. Batched; null pnl is omitted. */
+  async findRealizedPnls(tradeIds: string[]): Promise<Map<string, number>> {
+    const ids = [...new Set(tradeIds.filter((x): x is string => !!x))];
+    if (ids.length === 0) return new Map();
+    const trades = await this.prisma.trade.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, pnl: true },
+    });
+    return new Map(
+      trades
+        .filter((t) => t.pnl != null)
+        .map((t) => [t.id, t.pnl as number]),
+    );
   }
 }

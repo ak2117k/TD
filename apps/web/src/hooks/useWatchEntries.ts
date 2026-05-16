@@ -5,7 +5,7 @@ import type { WatchEntry, WatchStatus } from '../types/watch.types';
 
 const API_BASE = (import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:4001');
 
-export function useWatchEntries(status?: WatchStatus) {
+export function useWatchEntries(status?: WatchStatus, date?: string) {
   const [entries, setEntries] = useState<WatchEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -14,14 +14,14 @@ export function useWatchEntries(status?: WatchStatus) {
     setLoading(true);
     setError(null);
     try {
-      const data = await watchApi.list(status);
+      const data = await watchApi.list(status, date);
       setEntries(data);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [status]);
+  }, [status, date]);
 
   useEffect(() => { refetch(); }, [refetch]);
 

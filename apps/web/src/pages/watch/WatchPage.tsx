@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { useWatchEntries } from '../../hooks/useWatchEntries';
 import { WatchTable } from './WatchTable';
-import { WatchDetailPanel } from './WatchDetailPanel';
 import { PaperAccountBadge } from '../../components/trading/PaperAccountBadge';
+import { sectionTotalPnl } from '../../utils/watchPnl';
 import type { WatchStatus } from '../../types/watch.types';
 
 const FILTERS: Array<{ label: string; value: WatchStatus | undefined }> = [
@@ -13,10 +13,16 @@ const FILTERS: Array<{ label: string; value: WatchStatus | undefined }> = [
   { label: 'Target Hit', value: 'TARGET_HIT' },
 ];
 
+/** Today's date as YYYY-MM-DD in IST (en-CA locale yields ISO format). */
+function todayIST(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+}
+
 export function WatchPage() {
   const [filter, setFilter] = useState<WatchStatus | undefined>(undefined);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const { entries, loading, error } = useWatchEntries(filter);
+  const [date, setDate] = useState<string>(todayIST());
+  const { entries, loading, error } = useWatchEntries(filter, date);
   const activeCount = entries.filter(e => e.status === 'WATCHING' || e.status === 'TRADED').length;
 
   return (
@@ -43,25 +49,35 @@ export function WatchPage() {
             {f.label}
           </button>
         ))}
+        <input
+          type="date"
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          className="ml-auto px-2 py-1 text-sm rounded bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]"
+        />
       </div>
 
       {loading && <div className="text-[var(--color-text-muted)]">Loading…</div>}
       {error && <div className="text-red-400">Error: {error}</div>}
       {!loading && !error && (
-        <div className="grid grid-cols-3 gap-4">
-          <div className="col-span-2">
-            <WatchTable entries={entries} onSelect={setSelectedId} selectedId={selectedId} />
-          </div>
-          <div className="col-span-1">
-            {selectedId ? (
-              <WatchDetailPanel entryId={selectedId} />
-            ) : (
-              <div className="p-6 text-[var(--color-text-muted)] text-sm">
-                Select a row to see details.
+        <>
+          {(() => {
+            const total = sectionTotalPnl(entries);
+            return (
+              <div className="mb-3 text-sm">
+                <span className="text-[var(--color-text-muted)]">
+                  {'Total P/L (incl. what-if): '}
+                </span>
+                <span className={`font-semibold tabular-nums ${
+                  total > 0 ? 'text-emerald-400' : total < 0 ? 'text-red-400' : 'text-[var(--color-text-secondary)]'
+                }`}>
+                  {total >= 0 ? '+' : ''}₹{Math.abs(total) < 1 ? total.toFixed(2) : total.toFixed(0)}
+                </span>
               </div>
-            )}
-          </div>
-        </div>
+            );
+          })()}
+          <WatchTable entries={entries} onSelect={setSelectedId} selectedId={selectedId} />
+        </>
       )}
     </div>
   );

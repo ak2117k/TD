@@ -11,10 +11,10 @@ async function asJson<T>(res: Response): Promise<T> {
 }
 
 export const watchApi = {
-  async list(status?: WatchStatus, limit = 50): Promise<WatchEntry[]> {
+  async list(status?: WatchStatus, date?: string): Promise<WatchEntry[]> {
     const params = new URLSearchParams();
     if (status) params.set('status', status);
-    params.set('limit', String(limit));
+    if (date) params.set('date', date);
     return asJson(await fetch(`${API_BASE}/api/watch?${params.toString()}`));
   },
 

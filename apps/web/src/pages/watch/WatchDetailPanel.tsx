@@ -3,9 +3,9 @@ import { watchApi } from '../../services/watch.service';
 import type { WatchEntryWithEvents } from '../../types/watch.types';
 import { WatchEventLog } from './WatchEventLog';
 
-interface Props { entryId: string }
+interface Props { entryId: string; onClose?: () => void }
 
-export function WatchDetailPanel({ entryId }: Props) {
+export function WatchDetailPanel({ entryId, onClose }: Props) {
   const [entry, setEntry] = useState<WatchEntryWithEvents | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -39,8 +39,17 @@ export function WatchDetailPanel({ entryId }: Props) {
 
   if (!entry) {
     return (
-      <div className="p-4 text-[var(--color-text-muted)]">
-        {error ? `Error: ${error}` : 'Loading…'}
+      <div className="p-4 flex items-start justify-between text-[var(--color-text-muted)]">
+        <span>{error ? `Error: ${error}` : 'Loading…'}</span>
+        {onClose && (
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] text-xl leading-none px-1"
+          >
+            ×
+          </button>
+        )}
       </div>
     );
   }
@@ -67,8 +76,19 @@ export function WatchDetailPanel({ entryId }: Props) {
             {entry.status}
           </span>
         </div>
-        <div className="text-xs text-[var(--color-text-muted)]">
-          {new Date(entry.initialAt).toLocaleString('en-IN')}
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-[var(--color-text-muted)]">
+            {new Date(entry.initialAt).toLocaleString('en-IN')}
+          </span>
+          {onClose && (
+            <button
+              onClick={onClose}
+              aria-label="Close"
+              className="text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] text-xl leading-none px-1"
+            >
+              ×
+            </button>
+          )}
         </div>
       </div>
 

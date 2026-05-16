@@ -47,6 +47,10 @@ export interface WatchEntry {
   remainingQty: number | null;
   trailingHighWater: number | null;
   trailingStopPrice: number | null;
+  /** Chartink scanner that triggered this entry (server-enriched). */
+  scannerName: string | null;
+  /** Realized P/L of the linked trade once closed (server-enriched). */
+  realizedPnl: number | null;
   createdAt: string;
   updatedAt: string;
 }

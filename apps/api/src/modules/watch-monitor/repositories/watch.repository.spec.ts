@@ -1,15 +1,17 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { WatchRepository } from './watch.repository';
+import { WatchRepository, istDayRange } from './watch.repository';
 
 describe('WatchRepository', () => {
   let repo: WatchRepository;
-  let prisma: { watchEntry: any; watchEvent: any };
+  let prisma: { watchEntry: any; watchEvent: any; chartinkAlert: any; trade: any };
 
   beforeEach(async () => {
     prisma = {
       watchEntry: { create: jest.fn(), findUnique: jest.fn(), findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), count: jest.fn() },
       watchEvent: { create: jest.fn(), findMany: jest.fn() },
+      chartinkAlert: { findMany: jest.fn() },
+      trade: { findMany: jest.fn() },
     };
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [WatchRepository, { provide: PrismaService, useValue: prisma }],
@@ -54,5 +56,47 @@ describe('WatchRepository', () => {
     await repo.createEvent({ watchEntryId: 'w1', eventType: 'PRICE_CHANGE', price: 100, breakdown: null });
     const args = prisma.watchEvent.create.mock.calls[0][0];
     expect(args.data.breakdown).toBeDefined();
+  });
+
+  it('istDayRange maps an IST calendar day to the correct UTC range', () => {
+    const { start, end } = istDayRange('2026-05-15');
+    // IST 00:00 = UTC 18:30 on the previous day
+    expect(start.toISOString()).toBe('2026-05-14T18:30:00.000Z');
+    expect(end.toISOString()).toBe('2026-05-15T18:29:59.999Z');
+  });
+
+  it('list applies a createdAt range when date is given', async () => {
+    prisma.watchEntry.findMany.mockResolvedValue([]);
+    await repo.list({ date: '2026-05-15' });
+    const args = prisma.watchEntry.findMany.mock.calls[0][0];
+    expect(args.where.createdAt.gte.toISOString()).toBe('2026-05-14T18:30:00.000Z');
+    expect(args.where.createdAt.lte.toISOString()).toBe('2026-05-15T18:29:59.999Z');
+    expect(args.take).toBe(200);
+  });
+
+  it('findScannerNames maps alertId -> scanner.scanName', async () => {
+    prisma.chartinkAlert.findMany.mockResolvedValue([
+      { id: 'a1', scanner: { scanName: 'Anand Superbullish scanner May26' } },
+    ]);
+    const map = await repo.findScannerNames(['a1', 'a1']);
+    expect(map.get('a1')).toBe('Anand Superbullish scanner May26');
+    // deduped to one id
+    expect(prisma.chartinkAlert.findMany.mock.calls[0][0].where.id.in).toEqual(['a1']);
+  });
+
+  it('findScannerNames returns an empty map for no ids (no query)', async () => {
+    const map = await repo.findScannerNames([]);
+    expect(map.size).toBe(0);
+    expect(prisma.chartinkAlert.findMany).not.toHaveBeenCalled();
+  });
+
+  it('findRealizedPnls maps tradeId -> pnl, skipping null pnl', async () => {
+    prisma.trade.findMany.mockResolvedValue([
+      { id: 't1', pnl: 1525 },
+      { id: 't2', pnl: null },
+    ]);
+    const map = await repo.findRealizedPnls(['t1', 't2']);
+    expect(map.get('t1')).toBe(1525);
+    expect(map.has('t2')).toBe(false);
   });
 });
