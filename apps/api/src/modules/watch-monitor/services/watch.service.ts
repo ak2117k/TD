@@ -7,6 +7,7 @@ import { MarketFeedService } from '../../market-data/services/market-feed.servic
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
 import { WatchGateway } from '../gateways/watch.gateway';
 import { TradeExecutionService } from '../../trade-engine/services/trade-execution.service';
+import { DEFAULT_MAX_CAPITAL_PER_TRADE } from '@td/shared';
 
 export const WATCH_CAP = 50;
 
@@ -22,8 +23,10 @@ const TRAILING_STOP_PCT = 0.005;
 const PARTIAL_EXIT_FRACTION = 0.5;
 
 /** Maximum ₹ deployed per trade. Determines share quantity:
- *  qty = floor(MAX_INVESTMENT_PER_TRADE / referencePrice). */
-export const MAX_INVESTMENT_PER_TRADE = 200_000;
+ *  qty = floor(MAX_INVESTMENT_PER_TRADE / referencePrice).
+ *  Sourced from the shared per-trade risk cap (DEFAULT_MAX_CAPITAL_PER_TRADE)
+ *  so the watch sizer can never build an order the RiskManager will reject. */
+export const MAX_INVESTMENT_PER_TRADE = DEFAULT_MAX_CAPITAL_PER_TRADE;
 
 export class WatchCapExceededError extends Error {
   constructor(activeCount: number) {
@@ -57,6 +60,35 @@ export class WatchService {
     private readonly gateway: WatchGateway,
     private readonly trade: TradeExecutionService,
   ) {}
+
+  /**
+   * List watch entries (optionally a single IST day) enriched with the
+   * triggering Chartink scanner name and, for closed entries, the linked
+   * trade's realized P/L.
+   */
+  async list(opts: { status?: WatchStatus; date?: string }): Promise<
+    Array<WatchEntry & { scannerName: string | null; realizedPnl: number | null }>
+  > {
+    const entries = await this.repo.list(opts);
+    const alertIds = entries
+      .map((e) => e.alertId)
+      .filter((x): x is string => !!x);
+    const tradeIds = entries
+      .map((e) => e.paperTradeId ?? e.liveTradeId)
+      .filter((x): x is string => !!x);
+    const [scannerNames, realizedPnls] = await Promise.all([
+      this.repo.findScannerNames(alertIds),
+      this.repo.findRealizedPnls(tradeIds),
+    ]);
+    return entries.map((e) => {
+      const tradeId = e.paperTradeId ?? e.liveTradeId;
+      return {
+        ...e,
+        scannerName: e.alertId ? scannerNames.get(e.alertId) ?? null : null,
+        realizedPnl: tradeId ? realizedPnls.get(tradeId) ?? null : null,
+      };
+    });
+  }
 
   async createFromAlert(input: CreateFromAlertInput): Promise<WatchEntry> {
     // Tier 1 dedup: same Chartink setup (retries / Bull job replays).
@@ -108,7 +140,10 @@ export class WatchService {
       initialBreakdown: input.initialBreakdown,
       profitTarget: targetResult.target,
       profitTargetSource: targetResult.source,
-      stopLossScore: 60,
+      // Score-decay stop fires when a re-score drops below this floor. Kept
+      // BELOW the 60 entry-admission floor so an entry admitted at 60-69 is
+      // not dead-on-arrival — the stop only fires on genuine decay under 50.
+      stopLossScore: 50,
       optionsToken: picked?.optionsToken ?? null,
       optionsType: picked?.optionsType ?? null,
       optionsExpiry: picked?.optionsExpiry ?? null,
@@ -198,7 +233,9 @@ export class WatchService {
 
     const trade = await this.trade.executeTrade({
       symbol: (entry as any).optionsToken ? (entry as any).optionsToken : entry.symbol,
-      token: (entry as any).optionsToken ?? entry.symbol,
+      // Equity fallback must be the numeric instrument token (entry.token),
+      // not the symbol — findInstrumentId resolves NSE cash by token.
+      token: (entry as any).optionsToken ?? entry.token,
       exchange: (entry as any).exchange ?? 'NSE',
       side: entry.side as any,
       quantity: qty,
@@ -350,11 +387,14 @@ export class WatchService {
   }
 
   async transitionTargetHit(entryId: string, price: number): Promise<void> {
+    const entry = await this.repo.findById(entryId);
     await this.repo.createEvent({
       watchEntryId: entryId,
       eventType: WatchEventType.TARGET_HIT,
       price,
     });
+    // Close the linked trade so deployed capital is returned to cash.
+    await this.closeLinkedTrade(entry, 'target-hit');
     await this.repo.update(entryId, {
       status: WatchStatus.TARGET_HIT,
       closedAt: new Date(),
@@ -368,12 +408,15 @@ export class WatchService {
     score: number,
     cause: 'score-decay' | 'manual' | 'eod',
   ): Promise<void> {
+    const entry = await this.repo.findById(entryId);
     await this.repo.createEvent({
       watchEntryId: entryId,
       eventType: WatchEventType.SL_HIT_SCORE,
       score,
       notes: `cause:${cause}`,
     });
+    // Close the linked trade so deployed capital is returned to cash.
+    await this.closeLinkedTrade(entry, `sl-${cause}`);
     await this.repo.update(entryId, {
       status: WatchStatus.STOPPED,
       closedAt: new Date(),
@@ -392,6 +435,25 @@ export class WatchService {
       dismissedAt: new Date(),
     });
     await this.unsubscribeEntry(entryId);
+  }
+
+  /**
+   * Close the broker/paper trade linked to a watch entry so the cash
+   * balance is returned and the Trade record is marked CLOSED. Tolerant:
+   * a broker failure is logged, never thrown — the entry status transition
+   * must still proceed so the watch lifecycle is never left half-done.
+   */
+  private async closeLinkedTrade(entry: any, reason: string): Promise<void> {
+    const tradeId = entry?.paperTradeId ?? entry?.liveTradeId;
+    if (!tradeId) return;
+    try {
+      await this.trade.closeTrade(tradeId, reason);
+    } catch (err) {
+      this.logger.warn(
+        `closeLinkedTrade: failed to close trade ${tradeId} for ${entry?.symbol}: ` +
+          `${err instanceof Error ? err.message : err}. Entry status still updated.`,
+      );
+    }
   }
 
   private async unsubscribeEntry(entryId: string): Promise<void> {
@@ -477,16 +539,7 @@ export class WatchService {
       throw new Error(`Cannot closeTraded on entry in status ${entry.status}`);
     }
 
-    const tradeId = (entry as any).paperTradeId ?? (entry as any).liveTradeId;
-    if (tradeId) {
-      try {
-        await this.trade.closeTrade(tradeId, reason);
-      } catch (err) {
-        this.logger.warn(
-          `closeTraded: broker close failed for trade ${tradeId} (${entry.symbol}): ${err instanceof Error ? err.message : err}. Still marking entry EXITED.`,
-        );
-      }
-    }
+    await this.closeLinkedTrade(entry, reason);
 
     await this.repo.createEvent({
       watchEntryId: entryId,
@@ -525,34 +578,26 @@ export class WatchService {
 
     if (moveFavor < PARTIAL_EXIT_THRESHOLD_PCT) return;
 
-    // Trigger! Compute split.
-    // Dynamic qty: MAX_INVESTMENT_PER_TRADE / executedPrice.
-    // Matches WatchController.execute's computation so P&L is consistent.
+    // Trigger! Compute the split quantities for the WatchEntry bookkeeping.
     const initialQty = Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(ref, 1)));
     const partialQty = Math.floor(initialQty * PARTIAL_EXIT_FRACTION);
     const remainingQty = initialQty - partialQty;
 
-    // Place the close-half order via broker. closeTrade takes a single tradeId
-    // and closes the full position — for HALF closures we need executeTrade
-    // with an opposite-side order of `partialQty` shares. The trade-engine
-    // service should reconcile this with the existing open position.
-    // (If TradeExecutionService doesn't yet support partial close, log it and
-    // proceed — we still mark the WatchEntry's partial exit fields so the
-    // trailing logic can run on the conceptual half. Surface as a known gap.)
-    try {
-      await this.trade.executeTrade({
-        symbol: entry.symbol,
-        token: entry.token,
-        exchange: entry.exchange ?? 'NSE',
-        side: entry.side === 'BUY' ? 'SELL' : 'BUY',  // opposite side to close partial
-        quantity: partialQty,
-        orderType: 'MARKET',
-        positionType: 'INTRADAY',
-      } as any);
-    } catch (err) {
-      this.logger.warn(
-        `Partial exit broker call failed for ${entry.symbol}: ${err instanceof Error ? err.message : err}. Marking partial exit on WatchEntry anyway.`,
-      );
+    // Partially close the linked trade: closeTrade shrinks the original
+    // Trade row to PARTIALLY_FILLED and credits cash for the closed slice —
+    // no orphan rows, so the trades table stays a clean source of truth.
+    const partialTradeId = entry.paperTradeId ?? entry.liveTradeId;
+    if (partialTradeId) {
+      try {
+        await this.trade.closeTrade(partialTradeId, {
+          reason: 'partial-exit',
+          quantity: partialQty,
+        });
+      } catch (err) {
+        this.logger.warn(
+          `Partial exit close failed for ${entry.symbol}: ${err instanceof Error ? err.message : err}. Marking partial exit on WatchEntry anyway.`,
+        );
+      }
     }
 
     // Initialize trailing stop on the remaining half.
@@ -627,28 +672,10 @@ export class WatchService {
       `${entry.symbol}: trailing stop hit at ₹${ltp.toFixed(2)} (high-water=${entry.trailingHighWater}, stop=${stopPrice.toFixed(2)})`,
     );
 
-    // Use stored remainingQty from the partial-exit split; fall back to
-    // computing dynamically from the reference price if not yet set.
-    const ref = entry.executedPrice ?? entry.initialPrice;
-    const fullQty = Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(ref, 1)));
-    const remainingQty = entry.remainingQty ?? Math.floor(fullQty * (1 - PARTIAL_EXIT_FRACTION));
-
-    // Close remaining half via broker.
-    try {
-      await this.trade.executeTrade({
-        symbol: entry.symbol,
-        token: entry.token,
-        exchange: entry.exchange ?? 'NSE',
-        side: entry.side === 'BUY' ? 'SELL' : 'BUY',
-        quantity: remainingQty,
-        orderType: 'MARKET',
-        positionType: 'INTRADAY',
-      } as any);
-    } catch (err) {
-      this.logger.warn(
-        `Trailing stop broker close failed for ${entry.symbol}: ${err instanceof Error ? err.message : err}. Marking entry EXITED anyway.`,
-      );
-    }
+    // Close the remaining position via the linked trade — closeTrade
+    // credits cash and marks the Trade record CLOSED (whatever quantity
+    // remains after the earlier partial exit).
+    await this.closeLinkedTrade(entry, 'trailing-stop');
 
     await this.repo.createEvent({
       watchEntryId: entry.id,

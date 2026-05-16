@@ -188,7 +188,47 @@ export class ChartinkProcessService {
     }
 
     // === 5. Persist + Stage 2 trigger ===
-    if (scoringResult.score >= 50) {
+    if (scoringResult.score >= 60) {
+      // 5-min MACD hard gate: an entry requires the 5-minute MACD aligned
+      // with the trade side, regardless of total score. Daily/1m MACD remain
+      // soft score contributors — only the 5m timeframe is mandatory.
+      const macd5m = scoringResult.checks.find((c) => c.name === 'MACD on 5m');
+      if (!macd5m || !macd5m.passed) {
+        await this.repo.createAlertSetup({
+          alertId,
+          symbol: hit.symbol,
+          token: instrument.token,
+          hitPrice: hit.hitPrice,
+          kind: 'macd-misaligned',
+          setupId: null,
+          rejectReason: `5m MACD not aligned with ${side} (score ${scoringResult.score})`,
+          score: scoringResult.score,
+          lotCount: scoringResult.lotCount,
+          scoreBreakdown: scoringResult.checks,
+        });
+        return;
+      }
+
+      // SuperTrend hard gate: an entry requires the SuperTrend match check
+      // to pass, regardless of total score. Mirrors the 5m MACD gate above —
+      // a misaligned (or absent) SuperTrend kills the entry outright.
+      const supertrend = scoringResult.checks.find((c) => c.name === 'SuperTrend match');
+      if (!supertrend || !supertrend.passed) {
+        await this.repo.createAlertSetup({
+          alertId,
+          symbol: hit.symbol,
+          token: instrument.token,
+          hitPrice: hit.hitPrice,
+          kind: 'supertrend-misaligned',
+          setupId: null,
+          rejectReason: `SuperTrend not aligned with ${side} (score ${scoringResult.score})`,
+          score: scoringResult.score,
+          lotCount: scoringResult.lotCount,
+          scoreBreakdown: scoringResult.checks,
+        });
+        return;
+      }
+
       const persistedSetup = await this.repo.createAlertSetup({
         alertId,
         symbol: hit.symbol,
@@ -232,7 +272,7 @@ export class ChartinkProcessService {
         hitPrice: hit.hitPrice,
         kind: 'scored-low',
         setupId: null,
-        rejectReason: `score ${scoringResult.score} below 50`,
+        rejectReason: `score ${scoringResult.score} below 60`,
         score: scoringResult.score,
         lotCount: scoringResult.lotCount,
         scoreBreakdown: scoringResult.checks,

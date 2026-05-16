@@ -7,6 +7,7 @@ import { MarketFeedService } from '../../market-data/services/market-feed.servic
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
 import { WatchGateway } from '../gateways/watch.gateway';
 import { TradeExecutionService } from '../../trade-engine/services/trade-execution.service';
+import { DEFAULT_MAX_CAPITAL_PER_TRADE } from '@td/shared';
 
 const mockTrade = { closeTrade: jest.fn().mockResolvedValue({}) };
 
@@ -90,7 +91,7 @@ describe('WatchService.createFromAlert', () => {
     await svc.createFromAlert(baseInput);
     expect(repo.createEntry).toHaveBeenCalledWith(expect.objectContaining({
       symbol: 'TCS-EQ', side: 'BUY', initialPrice: 4000, initialScore: 72,
-      profitTarget: 4150, profitTargetSource: 'indicator-sr', stopLossScore: 60,
+      profitTarget: 4150, profitTargetSource: 'indicator-sr', stopLossScore: 50,
     }));
     expect(repo.createEvent).toHaveBeenCalledWith(expect.objectContaining({
       watchEntryId: 'w1', eventType: 'INITIAL', price: 4000, score: 72,
@@ -150,6 +151,47 @@ describe('WatchService.createFromAlert', () => {
       executedPrice: 4001,
       paperTradeId: 'paper-trade-123',
     }));
+  });
+
+  it('sizes the auto-executed order within the per-trade risk cap', async () => {
+    // Regression: the watch sizer built ~₹2,00,000 equity orders while the
+    // RiskManager capped a single trade at maxCapitalPerTrade — so every
+    // Chartink auto-execute was rejected and no paper trade ever filled.
+    // The sized order value must never exceed the per-trade risk cap.
+    repo.findById = jest.fn().mockResolvedValue({
+      id: 'w1', token: '11536', symbol: 'BLUECHIP-EQ', side: 'BUY',
+      status: 'WATCHING', initialPrice: 2000, initialBreakdown: { lotCount: 1 },
+      optionsToken: null, optionsLotSize: null, profitTarget: 2100,
+    });
+    repo.update = jest.fn().mockResolvedValue({});
+    mockTrade.executeTrade = jest.fn().mockResolvedValue({ id: 'pt1', entryPrice: 2000 });
+
+    await svc.createFromAlert(baseInput);
+
+    expect(mockTrade.executeTrade).toHaveBeenCalled();
+    const order = mockTrade.executeTrade.mock.calls[0][0];
+    const orderValue = order.quantity * order.price;
+    expect(orderValue).toBeLessThanOrEqual(DEFAULT_MAX_CAPITAL_PER_TRADE);
+  });
+
+  it('passes the entry numeric token (not the symbol) to executeTrade', async () => {
+    // Regression: executeEntry passed entry.symbol as the `token`, so
+    // findInstrumentId (which matches {symbol} OR {token}) could not resolve
+    // the NSE instrument — stored by numeric token — and every equity
+    // auto-execute died with "Instrument not found".
+    repo.findById = jest.fn().mockResolvedValue({
+      id: 'w1', token: '11536', symbol: 'TCS-EQ', side: 'BUY',
+      status: 'WATCHING', initialPrice: 4000, initialBreakdown: { lotCount: 1 },
+      optionsToken: null, optionsLotSize: null, profitTarget: 4150,
+    });
+    repo.update = jest.fn().mockResolvedValue({});
+    mockTrade.executeTrade = jest.fn().mockResolvedValue({ id: 'pt2', entryPrice: 4000 });
+
+    await svc.createFromAlert(baseInput);
+
+    expect(mockTrade.executeTrade).toHaveBeenCalledWith(
+      expect.objectContaining({ token: '11536' }),
+    );
   });
 
   it('leaves entry in WATCHING when auto-execute fails (e.g. insufficient cash)', async () => {
@@ -310,5 +352,77 @@ describe('WatchService.transitionStopped', () => {
       status: 'STOPPED', closedReason: 'sl-score-decay',
     }));
     expect(feed.unsubscribeForWatch).toHaveBeenCalled();
+  });
+});
+
+describe('WatchService — exits close the linked paper trade', () => {
+  let svc: WatchService;
+  let repo: any;
+
+  beforeEach(async () => {
+    repo = {
+      findById: jest.fn().mockResolvedValue({
+        id: 'w1', token: '11536', symbol: 'TCS-EQ', status: 'TRADED',
+        optionsToken: null, paperTradeId: 'pt-1',
+      }),
+      createEvent: jest.fn().mockResolvedValue({ id: 'e1' }),
+      update: jest.fn().mockResolvedValue({}),
+    };
+    mockTrade.closeTrade = jest.fn().mockResolvedValue({});
+    const mod = await Test.createTestingModule({
+      providers: [
+        WatchService,
+        { provide: WatchRepository, useValue: repo },
+        { provide: TargetCalculatorService, useValue: { compute: jest.fn() } },
+        { provide: StrikeSelectorService, useValue: { pick: jest.fn() } },
+        { provide: MarketFeedService, useValue: { unsubscribeForWatch: jest.fn() } },
+        { provide: LevelBookService, useValue: { getLevels: jest.fn() } },
+        { provide: WatchGateway, useValue: { emitTick: jest.fn(), emitEvent: jest.fn(), emitCreated: jest.fn() } },
+        { provide: TradeExecutionService, useValue: mockTrade },
+      ],
+    }).compile();
+    svc = mod.get(WatchService);
+  });
+
+  it('transitionTargetHit closes the linked trade so cash is returned', async () => {
+    await svc.transitionTargetHit('w1', 4160);
+    expect(mockTrade.closeTrade).toHaveBeenCalledWith('pt-1', expect.anything());
+  });
+
+  it('transitionStopped closes the linked trade so cash is returned', async () => {
+    await svc.transitionStopped('w1', 55, 'score-decay');
+    expect(mockTrade.closeTrade).toHaveBeenCalledWith('pt-1', expect.anything());
+  });
+});
+
+describe('WatchService.list — enrichment', () => {
+  it('attaches scannerName and realizedPnl to each entry', async () => {
+    const repo = {
+      list: jest.fn().mockResolvedValue([
+        { id: 'w1', alertId: 'a1', paperTradeId: 't1', liveTradeId: null, status: 'TARGET_HIT' },
+        { id: 'w2', alertId: null, paperTradeId: null, liveTradeId: null, status: 'WATCHING' },
+      ]),
+      findScannerNames: jest.fn().mockResolvedValue(new Map([['a1', 'Scanner X']])),
+      findRealizedPnls: jest.fn().mockResolvedValue(new Map([['t1', 4200]])),
+    };
+    const mod = await Test.createTestingModule({
+      providers: [
+        WatchService,
+        { provide: WatchRepository, useValue: repo },
+        { provide: TargetCalculatorService, useValue: { compute: jest.fn() } },
+        { provide: StrikeSelectorService, useValue: { pick: jest.fn() } },
+        { provide: MarketFeedService, useValue: {} },
+        { provide: LevelBookService, useValue: { getLevels: jest.fn() } },
+        { provide: WatchGateway, useValue: {} },
+        { provide: TradeExecutionService, useValue: mockTrade },
+      ],
+    }).compile();
+    const svc = mod.get(WatchService);
+
+    const result = await svc.list({ status: undefined, date: '2026-05-15' });
+
+    expect(repo.list).toHaveBeenCalledWith({ status: undefined, date: '2026-05-15' });
+    expect(result[0]).toMatchObject({ id: 'w1', scannerName: 'Scanner X', realizedPnl: 4200 });
+    expect(result[1]).toMatchObject({ id: 'w2', scannerName: null, realizedPnl: null });
   });
 });

@@ -5,6 +5,15 @@ import { ChartinkScoringService } from '../../chartink/services/chartink-scoring
 import { WatchService } from './watch.service';
 import { RiskGuardService } from './risk-guard.service';
 
+/**
+ * Score-decay stop grace window: the score-decay stop is suppressed for the
+ * first 10 minutes after an entry is created. Re-scores in this window are
+ * data-thin (fresh entries lack enough fresh candles for a stable score), so
+ * stopping on them false-killed ~97% of entries. The score is still written
+ * normally during the window — only the stop transition is held off.
+ */
+const SCORE_DECAY_GRACE_MS = 10 * 60_000;
+
 @Injectable()
 export class WatchMonitorService {
   private readonly logger = new Logger(WatchMonitorService.name);
@@ -63,6 +72,17 @@ export class WatchMonitorService {
       return;
     }
 
+    // Task 5: skip data-starved re-scores entirely. A score computed from
+    // insufficient fresh candles is garbage — do NOT update currentScore, do
+    // NOT evaluate the score-decay stop. Leave the entry fully untouched for
+    // the next tick. An entry must NEVER be stopped on a data-starved score.
+    if (result.dataStarved) {
+      this.logger.debug(
+        `rescoreOne: skipping ${entry.symbol} (${entry.id}) — data-starved score, entry left untouched`,
+      );
+      return;
+    }
+
     const newScore = result.score;
     const priorScore = entry.currentScore ?? entry.initialScore;
     const delta = newScore - priorScore;
@@ -82,6 +102,24 @@ export class WatchMonitorService {
       currentScore: newScore,
       lastRescoreAt: now,
     });
+
+    // Task 4: 10-minute grace period. The score-decay stop is suppressed for
+    // the first 10 minutes after the entry was created. The score above is
+    // still written normally — only the stop transition is held off. The
+    // price-based target/stop path (WatchService.applyTick) is separate and
+    // remains fully active throughout.
+    const createdAt = entry.createdAt ?? entry.initialAt;
+    const inGraceWindow =
+      !!createdAt && now.getTime() - new Date(createdAt).getTime() < SCORE_DECAY_GRACE_MS;
+    if (inGraceWindow) {
+      if (newScore < entry.stopLossScore) {
+        this.logger.debug(
+          `rescoreOne: ${entry.symbol} (${entry.id}) score ${newScore} < ${entry.stopLossScore} ` +
+            `but within 10-min grace window — score-decay stop suppressed`,
+        );
+      }
+      return;
+    }
 
     if (newScore < entry.stopLossScore) {
       await this.watch.transitionStopped(entry.id, newScore, 'score-decay');

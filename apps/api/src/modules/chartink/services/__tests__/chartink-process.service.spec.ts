@@ -8,6 +8,16 @@ import { AngelOneAdapterService } from '../../../market-data/services/angel-one-
 import { NseSectorIndexService } from '../../../market-data/services/nse-sector-index.service';
 import { WatchService, WatchCapExceededError } from '../../../watch-monitor/services/watch.service';
 
+/** A 5-min-MACD score-check entry, for exercising the MACD entry gate. */
+const macd5mCheck = (passed: boolean) => ({
+  name: 'MACD on 5m', points: passed ? 8 : 0, pointsPossible: 8, passed,
+});
+
+/** A SuperTrend match score-check entry, for exercising the SuperTrend entry gate. */
+const supertrendCheck = (passed: boolean) => ({
+  name: 'SuperTrend match', points: passed ? 8 : 0, pointsPossible: 8, passed,
+});
+
 /** Generate a minimal 50-bar closes array trending UP (each bar slightly higher). */
 function makeTrendingCloses(direction: 'UP' | 'DOWN' | 'FLAT', n = 50): number[] {
   const closes: number[] = [];
@@ -44,7 +54,7 @@ describe('ChartinkProcessService', () => {
       }),
     };
     scoring = {
-      score: jest.fn().mockResolvedValue({ score: 70, lotCount: 2, checks: [] }),
+      score: jest.fn().mockResolvedValue({ score: 70, lotCount: 2, checks: [macd5mCheck(true), supertrendCheck(true)] }),
       scoreToLotCount: jest.fn(),
     };
     // Default: 50 UP-trending candles so classifyTrend returns 'UP'
@@ -231,8 +241,8 @@ describe('ChartinkProcessService', () => {
       angelOne.getHistoricalData.mockResolvedValue(UP_CANDLES);
     });
 
-    it('persists kind=setup and calls watch.createFromAlert when score >= 50', async () => {
-      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [{ name: 'Sector aligned', points: 10, pointsPossible: 10, passed: true }] });
+    it('persists kind=setup and calls watch.createFromAlert when score >= 60', async () => {
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [{ name: 'Sector aligned', points: 10, pointsPossible: 10, passed: true }, macd5mCheck(true), supertrendCheck(true)] });
 
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
 
@@ -260,16 +270,28 @@ describe('ChartinkProcessService', () => {
       }));
     });
 
-    it('persists kind=scored-low and does NOT call watch.createFromAlert when score < 50', async () => {
+    it('persists kind=scored-low and does NOT call watch.createFromAlert when score < 60', async () => {
       scoring.score.mockResolvedValue({ score: 40, lotCount: 0, checks: [] });
 
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
 
       expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
         kind: 'scored-low',
-        rejectReason: 'score 40 below 50',
+        rejectReason: 'score 40 below 60',
         score: 40,
         lotCount: 0,
+      }));
+      expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
+    });
+
+    it('persists kind=scored-low for a score of 55 (above old 50 floor, below new 60 floor)', async () => {
+      scoring.score.mockResolvedValue({ score: 55, lotCount: 0, checks: [macd5mCheck(true), supertrendCheck(true)] });
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'scored-low',
+        rejectReason: 'score 55 below 60',
       }));
       expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
     });
@@ -287,7 +309,7 @@ describe('ChartinkProcessService', () => {
     });
 
     it('still persists kind=setup even when watch.createFromAlert throws WatchCapExceededError', async () => {
-      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [] });
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [macd5mCheck(true), supertrendCheck(true)] });
       watchSvc.createFromAlert.mockRejectedValue(new WatchCapExceededError(50));
 
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
@@ -299,7 +321,7 @@ describe('ChartinkProcessService', () => {
     });
 
     it('still persists kind=setup even when watch.createFromAlert throws unexpected error', async () => {
-      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [] });
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [macd5mCheck(true), supertrendCheck(true)] });
       watchSvc.createFromAlert.mockRejectedValue(new Error('db connection lost'));
 
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
@@ -322,6 +344,61 @@ describe('ChartinkProcessService', () => {
         setupContext: null,
       });
     });
+
+    it('rejects with kind=macd-misaligned when the 5m MACD is not aligned, even at score >= 60', async () => {
+      scoring.score.mockResolvedValue({
+        score: 80, lotCount: 3, checks: [macd5mCheck(false), supertrendCheck(true)],
+      });
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'macd-misaligned',
+        score: 80,
+      }));
+      expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
+    });
+
+    it('proceeds to kind=setup when the 5m MACD is aligned and score >= 60', async () => {
+      scoring.score.mockResolvedValue({
+        score: 70, lotCount: 2, checks: [macd5mCheck(true), supertrendCheck(true)],
+      });
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({ kind: 'setup' }));
+      expect(watchSvc.createFromAlert).toHaveBeenCalled();
+    });
+
+    it('rejects with kind=supertrend-misaligned when the SuperTrend check did not pass, even at score >= 60', async () => {
+      scoring.score.mockResolvedValue({
+        score: 80, lotCount: 3, checks: [macd5mCheck(true), supertrendCheck(false)],
+      });
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'supertrend-misaligned',
+        score: 80,
+        lotCount: 3,
+        scoreBreakdown: expect.any(Array),
+      }));
+      expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
+    });
+
+    it('rejects with kind=supertrend-misaligned when the SuperTrend check is missing entirely', async () => {
+      scoring.score.mockResolvedValue({
+        score: 75, lotCount: 2, checks: [macd5mCheck(true)],
+      });
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'supertrend-misaligned',
+        score: 75,
+      }));
+      expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
+    });
   });
 
   // ─── Stage 2 integration: watch.createFromAlert wiring ────────────────────
@@ -335,7 +412,7 @@ describe('ChartinkProcessService', () => {
 
     it('calls createFromAlert with setupId returned by repo.createAlertSetup', async () => {
       repo.createAlertSetup.mockResolvedValue({ id: 'my-setup-id-42' });
-      scoring.score.mockResolvedValue({ score: 75, lotCount: 2, checks: [] });
+      scoring.score.mockResolvedValue({ score: 75, lotCount: 2, checks: [macd5mCheck(true), supertrendCheck(true)] });
 
       await service.processOne('alert-A', { symbol: 'INFY', hitPrice: 1800 });
 
@@ -344,16 +421,19 @@ describe('ChartinkProcessService', () => {
       }));
     });
 
-    it('does NOT call createFromAlert when score is exactly 49', async () => {
-      scoring.score.mockResolvedValue({ score: 49, lotCount: 0, checks: [] });
+    it('does NOT call createFromAlert when score is exactly 59', async () => {
+      scoring.score.mockResolvedValue({ score: 59, lotCount: 0, checks: [macd5mCheck(true), supertrendCheck(true)] });
 
       await service.processOne('alert-A', { symbol: 'INFY', hitPrice: 1800 });
 
       expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'scored-low',
+      }));
     });
 
-    it('calls createFromAlert when score is exactly 50', async () => {
-      scoring.score.mockResolvedValue({ score: 50, lotCount: 1, checks: [] });
+    it('calls createFromAlert when score is exactly 60', async () => {
+      scoring.score.mockResolvedValue({ score: 60, lotCount: 1, checks: [macd5mCheck(true), supertrendCheck(true)] });
 
       await service.processOne('alert-A', { symbol: 'INFY', hitPrice: 1800 });
 

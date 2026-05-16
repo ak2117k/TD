@@ -20,7 +20,7 @@ export interface CreateAlertSetupInput {
   symbol: string;
   token: string | null;
   hitPrice: number;
-  kind: 'setup' | 'no-setup' | 'unresolved' | 'error' | 'mtf-misaligned' | 'sector-misaligned' | 'scored-low' | 'no-direction';
+  kind: 'setup' | 'no-setup' | 'unresolved' | 'error' | 'mtf-misaligned' | 'sector-misaligned' | 'scored-low' | 'no-direction' | 'macd-misaligned' | 'supertrend-misaligned';
   setupId: string | null;
   rejectReason: string | null;
   // Scoring + lot sizing (added 2026-05-12)

@@ -42,6 +42,7 @@ function makeEntry(overrides: Partial<Record<string, any>> = {}): Record<string,
     profitTarget: 1100,
     optionsToken: null,
     optionsLotSize: null,
+    paperTradeId: 'pt-1',
     partialExitedAt: null,
     trailingHighWater: null,
     trailingStopPrice: null,
@@ -139,13 +140,10 @@ describe('WatchService — partial-exit + trailing-stop', () => {
     // qty = floor(200_000 / 1000) = 200; partialQty = floor(200*0.5) = 100; remaining = 100
     await svc.onTick('11536', 1010, new Date());
 
-    // Should have called executeTrade (SELL, 100 shares) for partial close
-    expect(trade.executeTrade).toHaveBeenCalledWith(
-      expect.objectContaining({
-        side: 'SELL',
-        quantity: 100,
-        orderType: 'MARKET',
-      }),
+    // Should have partially closed the linked trade (100 of 200 shares)
+    expect(trade.closeTrade).toHaveBeenCalledWith(
+      'pt-1',
+      expect.objectContaining({ quantity: 100 }),
     );
 
     // Should have written a PARTIAL_EXIT event
@@ -184,12 +182,10 @@ describe('WatchService — partial-exit + trailing-stop', () => {
     // ltp = 990 → move = (1000-990)/1000 = 1%, exactly at threshold
     await svc.onTick('11536', 990, new Date());
 
-    // Partial close should be BUY (opposite of SELL), 100 shares
-    expect(trade.executeTrade).toHaveBeenCalledWith(
-      expect.objectContaining({
-        side: 'BUY',
-        quantity: 100,
-      }),
+    // Partial close of the linked trade — 100 shares
+    expect(trade.closeTrade).toHaveBeenCalledWith(
+      'pt-1',
+      expect.objectContaining({ quantity: 100 }),
     );
 
     // trailingStopPrice for SELL = ltp × 1.005
@@ -261,10 +257,8 @@ describe('WatchService — partial-exit + trailing-stop', () => {
     // Price drops to 1148 — below stop (1149.225)
     await svc.onTick('11536', 1148, new Date());
 
-    // Should close remaining 100 shares via broker
-    expect(trade.executeTrade).toHaveBeenCalledWith(
-      expect.objectContaining({ side: 'SELL', quantity: 100 }),
-    );
+    // Should close the remaining position via the linked trade
+    expect(trade.closeTrade).toHaveBeenCalledWith('pt-1', 'trailing-stop');
 
     // TRAILING_STOP_HIT event
     expect(repo.createEvent).toHaveBeenCalledWith(
@@ -302,7 +296,7 @@ describe('WatchService — partial-exit + trailing-stop', () => {
       (call: any[]) => call[0]?.eventType === 'PARTIAL_EXIT',
     );
     expect(partialExitEvent).toBeUndefined();
-    expect(trade.executeTrade).not.toHaveBeenCalled();
+    expect(trade.closeTrade).not.toHaveBeenCalled();
   });
 
   // 7. WATCHING entry → partial exit logic SKIPPED -------------------------
@@ -322,6 +316,6 @@ describe('WatchService — partial-exit + trailing-stop', () => {
       (call: any[]) => call[0]?.eventType === 'PARTIAL_EXIT',
     );
     expect(partialExitEvent).toBeUndefined();
-    expect(trade.executeTrade).not.toHaveBeenCalled();
+    expect(trade.closeTrade).not.toHaveBeenCalled();
   });
 });

@@ -89,6 +89,50 @@ const HISTORICAL_CHUNK_PACE_MS = 350;
 /** Minimum gap between ANY two historical calls (across all callers). 3 req/sec hard cap → 350ms. */
 const HISTORICAL_MIN_GAP_MS = 350;
 
+/**
+ * Per-timeframe TTL for the in-memory historical-candle cache (see
+ * `historicalCache`). Sized so that within one re-scoring pass of ~100
+ * watch entries, shared tokens (NIFTY, sector indices) and recently-
+ * fetched stocks serve from cache instead of issuing fresh broker calls,
+ * while never being stale enough to matter for scoring decisions:
+ *   - intraday frames: TTL ≈ a few bar-widths
+ *   - 1d: long TTL — the daily bar doesn't change intraday
+ * Unknown timeframes fall back to a conservative 60s.
+ */
+const HISTORICAL_CACHE_TTL_MS: Record<string, number> = {
+  '1m': 45 * 1000,
+  '3m': 2 * 60 * 1000,
+  '5m': 4 * 60 * 1000,
+  '10m': 7 * 60 * 1000,
+  '15m': 10 * 60 * 1000,
+  '30m': 20 * 60 * 1000,
+  '1h': 40 * 60 * 1000,
+  '1d': 2 * 60 * 60 * 1000,
+};
+const HISTORICAL_CACHE_TTL_DEFAULT_MS = 60 * 1000;
+
+/**
+ * Thrown when Angel One's historical endpoint responds with `data: null`
+ * (as opposed to `data: []`). Empirically this is the throttle / auth-
+ * rejection shape — Angel returns HTTP 200 with a null `data` field and a
+ * `message` like "Access denied because of exceeding access rate". A
+ * genuine "no candles in this window" response is `data: []`.
+ *
+ * Surfacing this as a distinct, named error lets callers (e.g. the Chartink
+ * scoring service) tell "the broker throttled us" apart from "no data" —
+ * the former marks the score `dataStarved` and suppresses false stop-outs,
+ * the latter is a genuine signal failure. The `name` is set explicitly so
+ * the marker survives serialization / `instanceof` across module boundaries.
+ */
+export class AngelThrottleError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AngelThrottleError';
+    // Restore prototype chain — required when targeting ES5/ES2015 down-level.
+    Object.setPrototypeOf(this, AngelThrottleError.prototype);
+  }
+}
+
 @Injectable()
 export class AngelOneAdapterService implements BrokerAdapter {
   private readonly logger = new Logger(AngelOneAdapterService.name);
@@ -137,6 +181,32 @@ export class AngelOneAdapterService implements BrokerAdapter {
     { data: MarketDepth; expiresAt: number }
   >();
   private static readonly DEPTH_TTL_MS = 1500;
+
+  /**
+   * In-memory TTL cache for `getHistoricalData`, keyed by
+   * `${token}:${exchange}:${timeframe}`. A re-scoring pass over ~100 watch
+   * entries would otherwise issue ~600 fresh broker calls; many of those
+   * are for shared tokens (NIFTY, sector indices) or stocks fetched
+   * seconds earlier. Caching the merged candle array per key collapses
+   * those duplicates without hitting Angel One's 3 req/sec limit.
+   *
+   * CONTRACT (mirrors the depthCache style):
+   *   - Only SUCCESSFUL, NON-EMPTY results are stored. An empty array
+   *     (genuine `data:[]`) or a throttle (`data:null` → AngelThrottleError)
+   *     is never cached — re-requesting must re-hit the broker so a
+   *     transient miss self-heals.
+   *   - TTL is per-timeframe (see HISTORICAL_CACHE_TTL_MS). Expired entries
+   *     are refetched on next access.
+   *   - The cache key intentionally ignores the [from,to] range: scoring
+   *     always asks for "the last N bars up to now", so a slightly-older
+   *     cached window of the same timeframe is an acceptable, in-TTL
+   *     substitute. Callers needing an exact historical range should not
+   *     rely on this cache being range-precise.
+   */
+  private readonly historicalCache = new Map<
+    string,
+    { data: any[]; expiresAt: number }
+  >();
 
   constructor(
     public readonly authService: AngelOneAuthService,
@@ -556,6 +626,68 @@ export class AngelOneAdapterService implements BrokerAdapter {
     from: Date,
     to: Date,
   ): Promise<any[]> {
+    // ─── TTL cache (Task B) ───────────────────────────────────────────
+    // Serve repeated fetches of the same (token, exchange, timeframe)
+    // within the per-timeframe TTL without re-hitting the broker. Only
+    // successful, non-empty results are cached (see historicalCache docs).
+    const cacheKey = `${token}:${exchange}:${timeframe}`;
+    const cached = this.historicalCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.data;
+    }
+
+    // Contain a throttle at this boundary. fetchHistoricalChunk raises a
+    // typed AngelThrottleError so the throttle is detectable + logged, but
+    // every caller of getHistoricalData keeps the historical "[] on failure"
+    // contract — no caller needs its own try/catch. The empty result is not
+    // cached, so the next call self-heals; the scoring service still flags
+    // dataStarved off the empty candle set.
+    let result: any[];
+    try {
+      result = await this.getHistoricalDataUncached(
+        token,
+        exchange,
+        timeframe,
+        from,
+        to,
+      );
+    } catch (err) {
+      if (err instanceof AngelThrottleError) {
+        this.logger.warn(
+          `getHistoricalData throttled for ${cacheKey} — returning [] ` +
+            `(not cached): ${err.message}`,
+        );
+        return [];
+      }
+      throw err;
+    }
+
+    // Cache ONLY a genuine non-empty result. An empty array (data:[]) or a
+    // contained throttle must not be cached, so a transient miss self-heals
+    // on the next call.
+    if (result.length > 0) {
+      const ttl =
+        HISTORICAL_CACHE_TTL_MS[timeframe] ?? HISTORICAL_CACHE_TTL_DEFAULT_MS;
+      this.historicalCache.set(cacheKey, {
+        data: result,
+        expiresAt: Date.now() + ttl,
+      });
+    }
+    return result;
+  }
+
+  /**
+   * Uncached historical fetch — the original auto-chunking implementation.
+   * `getHistoricalData` wraps this with the TTL cache. Kept private so all
+   * callers go through the cache.
+   */
+  private async getHistoricalDataUncached(
+    token: string,
+    exchange: string,
+    timeframe: string,
+    from: Date,
+    to: Date,
+  ): Promise<any[]> {
     const interval = TIMEFRAME_MAP[timeframe] ?? timeframe;
     const maxDays = TIMEFRAME_MAX_RANGE_DAYS[interval] ?? 30; // conservative default if interval unknown
     const maxRangeMs = maxDays * 24 * 60 * 60 * 1000;
@@ -647,7 +779,22 @@ export class AngelOneAdapterService implements BrokerAdapter {
         `Historical raw: token=${token} status=${response?.status} message=${response?.message ?? '-'} errorcode=${response?.errorcode ?? '-'} dataLen=${Array.isArray(response?.data) ? response.data.length : 'n/a'}`,
       );
 
-      if (!response?.data) {
+      // Distinguish the two "no rows" shapes:
+      //   - data: []   → genuine empty window (weekend/holiday/pre-listing).
+      //                  Return [] so callers see "no candles", not an error.
+      //   - data: null → Angel rejected the call: throttle (3 req/sec cap
+      //                  exceeded) or auth failure. This is NOT "no data" —
+      //                  surface it as a typed AngelThrottleError so callers
+      //                  can mark the result data-starved instead of
+      //                  mistaking it for a genuine empty series.
+      if (response?.data == null) {
+        throw new AngelThrottleError(
+          `Angel One historical fetch rejected (data:null) for token=${token} ` +
+            `interval=${interval}: ${response?.message ?? 'no message'} ` +
+            `(errorcode=${response?.errorcode ?? '-'})`,
+        );
+      }
+      if (!Array.isArray(response.data)) {
         return [];
       }
 
@@ -661,6 +808,14 @@ export class AngelOneAdapterService implements BrokerAdapter {
         volume: Number(candle[5]),
       }));
     } catch (error) {
+      // Re-throw a throttle error AS-IS so its `AngelThrottleError` type and
+      // `name` survive — callers depend on that marker to tell throttle
+      // apart from a generic fetch failure. Wrapping it in a plain Error
+      // (as below) would erase the distinction.
+      if (error instanceof AngelThrottleError) {
+        this.logger.warn(`Historical fetch throttled: ${error.message}`);
+        throw error;
+      }
       const msg = error instanceof Error ? error.message : String(error);
       this.logger.error(`Failed to fetch historical data: ${msg}`);
       throw new Error(`Get historical data failed: ${msg}`);

@@ -133,3 +133,143 @@ describe('AngelOneAdapterService.getMarketDepth', () => {
     expect(depth!.asks[0]).toEqual({ price: 250.2, qty: 80, orders: 4 });
   });
 });
+
+/**
+ * Task B — getHistoricalData in-memory TTL cache, and
+ * Task C — detectable throttle (AngelThrottleError) for the data:null case.
+ */
+describe('AngelOneAdapterService — historical cache + throttle detection', () => {
+  /** Build an adapter whose SmartAPI exposes a controllable getCandleData. */
+  function buildAdapter(getCandleData: jest.Mock) {
+    const fakeAuth = {
+      getSmartApi: () => ({ getCandleData }),
+    } as unknown as AngelOneAuthService;
+    const fakeWs = {
+      on: jest.fn(),
+      removeListener: jest.fn(),
+    } as unknown as AngelOneWebSocketService;
+    return new AngelOneAdapterService(fakeAuth, fakeWs);
+  }
+
+  /** One candle row in Angel's array shape: [ts, o, h, l, c, v]. */
+  function row(ts: string, c = 100): [string, number, number, number, number, number] {
+    return [ts, c, c + 1, c - 1, c, 1000];
+  }
+
+  // ─── Task B: cache ────────────────────────────────────────────────────
+  describe('candle cache', () => {
+    it('serves a repeated fetch (same token:exchange:timeframe) from cache within TTL', async () => {
+      const mock = jest
+        .fn()
+        .mockResolvedValue({ status: true, data: [row('2026-05-15 09:15'), row('2026-05-15 09:16')] });
+      const adapter = buildAdapter(mock);
+      const from = new Date('2026-05-15T03:45:00Z');
+      const to = new Date('2026-05-15T04:00:00Z');
+
+      const a = await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
+      const b = await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
+
+      expect(mock).toHaveBeenCalledTimes(1); // second call served from cache
+      expect(b).toEqual(a);
+      expect(b).toHaveLength(2);
+    });
+
+    it('refetches once the TTL has expired', async () => {
+      const mock = jest
+        .fn()
+        .mockResolvedValue({ status: true, data: [row('2026-05-15 09:15')] });
+      const adapter = buildAdapter(mock);
+      const from = new Date('2026-05-15T03:45:00Z');
+      const to = new Date('2026-05-15T04:00:00Z');
+
+      jest.useFakeTimers();
+      try {
+        await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
+        // Advance past the 1m TTL (~45s).
+        jest.advanceTimersByTime(60_000);
+        await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
+      } finally {
+        jest.useRealTimers();
+      }
+      expect(mock).toHaveBeenCalledTimes(2);
+    });
+
+    it('does NOT cache an empty result (genuine data:[])', async () => {
+      const mock = jest.fn().mockResolvedValue({ status: true, data: [] });
+      const adapter = buildAdapter(mock);
+      const from = new Date('2026-05-15T03:45:00Z');
+      const to = new Date('2026-05-15T04:00:00Z');
+
+      const a = await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
+      expect(a).toEqual([]);
+      const b = await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
+      expect(b).toEqual([]);
+      // Empty result must not be cached — the broker is re-hit.
+      expect(mock).toHaveBeenCalledTimes(2);
+    });
+
+    it('does NOT cache a throttled (data:null) result', async () => {
+      const mock = jest.fn().mockResolvedValue({ status: false, data: null, message: 'throttled' });
+      const adapter = buildAdapter(mock);
+      const from = new Date('2026-05-15T03:45:00Z');
+      const to = new Date('2026-05-15T04:00:00Z');
+
+      // A throttle is contained → returns [] (never thrown to the caller).
+      const a = await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
+      expect(a).toEqual([]);
+      // A second call must re-hit the broker (nothing cached).
+      const b = await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
+      expect(b).toEqual([]);
+      expect(mock).toHaveBeenCalledTimes(2);
+    });
+
+    it('keys the cache by token:exchange:timeframe — different tokens do not collide', async () => {
+      const mock = jest
+        .fn()
+        .mockResolvedValue({ status: true, data: [row('2026-05-15 09:15')] });
+      const adapter = buildAdapter(mock);
+      const from = new Date('2026-05-15T03:45:00Z');
+      const to = new Date('2026-05-15T04:00:00Z');
+
+      await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
+      await adapter.getHistoricalData('99926000', 'NSE', '1m', from, to);
+      await adapter.getHistoricalData('2885', 'NSE', '5m', from, to);
+      // Three distinct keys → three broker calls.
+      expect(mock).toHaveBeenCalledTimes(3);
+      // Re-request the first key → still cached.
+      await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
+      expect(mock).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  // ─── Task C: detectable throttle ──────────────────────────────────────
+  describe('throttle detection (data:null)', () => {
+    it('contains a throttle (data:null) — returns [] and logs a warning, never throws to callers', async () => {
+      const mock = jest
+        .fn()
+        .mockResolvedValue({ status: false, data: null, message: 'Access denied because of exceeding access rate' });
+      const adapter = buildAdapter(mock);
+      const warn = jest
+        .spyOn((adapter as any).logger, 'warn')
+        .mockImplementation(() => {});
+      const from = new Date('2026-05-15T03:45:00Z');
+      const to = new Date('2026-05-15T04:00:00Z');
+
+      // Detectable but contained: getHistoricalData keeps the [] contract for
+      // all callers, and surfaces the throttle via a WARN log.
+      const result = await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
+      expect(result).toEqual([]);
+      expect(warn).toHaveBeenCalled();
+    });
+
+    it('returns [] (does NOT throw) for a genuine empty data:[] response', async () => {
+      const mock = jest.fn().mockResolvedValue({ status: true, data: [] });
+      const adapter = buildAdapter(mock);
+      const from = new Date('2026-05-15T03:45:00Z');
+      const to = new Date('2026-05-15T04:00:00Z');
+
+      const result = await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
+      expect(result).toEqual([]);
+    });
+  });
+});

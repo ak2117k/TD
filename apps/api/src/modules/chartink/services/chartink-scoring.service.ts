@@ -27,6 +27,15 @@ export interface ScoringResult {
   score: number;
   lotCount: 0 | 1 | 2 | 3;
   checks: ScoreCheckResult[];
+  /**
+   * True when the score is unreliable because broker candle data was
+   * missing/insufficient (throttled fetches, empty responses, not-yet-
+   * converged windows) rather than genuine signal failure. Set when 3+
+   * checks failed for a data-availability reason. CONTRACT: consumers
+   * (e.g. the watch monitor) use this to suppress false-stops — a
+   * data-starved low score must NOT be treated as a real "score cratered".
+   */
+  dataStarved: boolean;
 }
 
 const NIFTY_TOKEN = '99926000';
@@ -82,7 +91,54 @@ export class ChartinkScoringService {
 
     const score = checks.reduce((sum, c) => sum + c.points, 0);
     const lotCount = this.scoreToLotCount(score);
-    return { score, lotCount, checks };
+    const dataStarved = this.isDataStarved(checks);
+    return { score, lotCount, checks, dataStarved };
+  }
+
+  /**
+   * A check is "data-starved" when it failed specifically because broker
+   * candle data was missing/insufficient (empty response, not-yet-converged
+   * window) or the broker throttled the fetch — as opposed to a genuine
+   * signal failure (trend wrong, MACD red, etc).
+   *
+   * Detected via the check's `detail`:
+   *   - `reason` containing "insufficient" / "candles" — the explicit
+   *     insufficient-candles guards in the checks below.
+   *   - `error` carrying the throttle marker from the adapter (task 2:
+   *     AngelThrottleError) or a generic candle-fetch failure.
+   */
+  private static readonly DATA_STARVED_REASONS = [
+    'insufficient candles',
+    'insufficient sector candles',
+    'insufficient nifty candles',
+    'insufficient candles for atr',
+    'insufficient daily candles',
+  ];
+
+  private isCheckDataStarved(c: ScoreCheckResult): boolean {
+    if (c.passed) return false;
+    const detail = c.detail ?? {};
+    const reason = typeof detail.reason === 'string' ? detail.reason.toLowerCase() : '';
+    if (reason && ChartinkScoringService.DATA_STARVED_REASONS.includes(reason)) {
+      return true;
+    }
+    // Defensive: any reason that mentions insufficient candles.
+    if (reason.includes('insufficient') && reason.includes('candle')) {
+      return true;
+    }
+    const error = typeof detail.error === 'string' ? detail.error.toLowerCase() : '';
+    if (error) {
+      // Throttle error from the adapter (task 2) — name or message marker.
+      if (error.includes('angelthrottle') || error.includes('throttl')) return true;
+      if (error.includes('data:null')) return true;
+    }
+    return false;
+  }
+
+  /** dataStarved when 3 or more checks failed for data-availability reasons. */
+  private isDataStarved(checks: ScoreCheckResult[]): boolean {
+    const starved = checks.filter((c) => this.isCheckDataStarved(c)).length;
+    return starved >= 3;
   }
 
   scoreToLotCount(score: number): 0 | 1 | 2 | 3 {
@@ -208,7 +264,11 @@ export class ChartinkScoringService {
     const name = `MACD on ${tf}`;
     try {
       const candles = await this.fetchCandles(input.token, input.exchange, tf, lookback);
-      if (candles.length < 35) {
+      // MACD's 26-period EMA needs a long warmup before its seed residual
+      // decays out. Below 120 bars the line is materially un-converged
+      // (several percent off the true value) and diverges from broker
+      // apps — treat it as insufficient rather than report a wrong number.
+      if (candles.length < 120) {
         return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient candles' } };
       }
       const closes = candles.map((c) => c.close);
@@ -216,19 +276,31 @@ export class ChartinkScoringService {
       if (!m || m.macd === null || m.signal === null) {
         return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'macd null' } };
       }
-      const passed = input.side === 'BUY' ? m.macd > m.signal : m.macd < m.signal;
+      // Pass only when the histogram has the right colour AND the MACD line
+      // is on the right side of the zero line:
+      //   BUY  → green (macd > signal) AND macd > 0  (positive momentum)
+      //   SELL → red   (macd < signal) AND macd < 0  (negative momentum)
+      const aboveZero = m.macd > 0;
+      const belowZero = m.macd < 0;
+      const green = m.macd > m.signal; // histogram green
+      const red = m.macd < m.signal;   // histogram red
+      const passed = input.side === 'BUY'
+        ? green && aboveZero
+        : red && belowZero;
       return {
         name, points: passed ? pointsPossible : 0, pointsPossible, passed,
-        detail: { macd: m.macd, signal: m.signal },
+        detail: { macd: m.macd, signal: m.signal, aboveZero, belowZero },
       };
     } catch (err) {
       return { name, points: 0, pointsPossible, passed: false, detail: { error: errMsg(err) } };
     }
   }
 
-  private checkMacdDaily(input: ScoringInput) { return this.checkMacdAtTf(input, '1d', 10, 50); }
-  private checkMacdOneMin(input: ScoringInput) { return this.checkMacdAtTf(input, '1m', 7, 60); }
-  private checkMacdFiveMin(input: ScoringInput) { return this.checkMacdAtTf(input, '5m', 8, 60); }
+  // 250-bar windows so MACD's 26-EMA warms up fully (seed residual decays
+  // to ~10^-7) — see checkMacdAtTf. macd() itself is correct, just starved.
+  private checkMacdDaily(input: ScoringInput) { return this.checkMacdAtTf(input, '1d', 10, 250); }
+  private checkMacdOneMin(input: ScoringInput) { return this.checkMacdAtTf(input, '1m', 7, 250); }
+  private checkMacdFiveMin(input: ScoringInput) { return this.checkMacdAtTf(input, '5m', 8, 250); }
 
   private async checkPriceVs20Ema(input: ScoringInput): Promise<ScoreCheckResult> {
     const name = 'Price vs 20-EMA';
