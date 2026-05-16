@@ -267,6 +267,8 @@ export class TradeExecutionService {
           exitReasonTag?: ExitReasonTag | string | null;
           exitNotes?: string | null;
           reason?: string | null;
+          /** Close only this many units (partial exit). Omit to close all. */
+          quantity?: number;
         },
   ): Promise<Trade> {
     const opts =
@@ -286,6 +288,14 @@ export class TradeExecutionService {
       );
     }
 
+    // Quantity to close: an explicit `quantity` closes only that slice
+    // (partial exit); omitted or over-sized closes the whole remaining trade.
+    const closeQty = Math.min(
+      Math.max(1, Math.floor(opts.quantity ?? trade.quantity)),
+      trade.quantity,
+    );
+    const isFullClose = closeQty >= trade.quantity;
+
     const instrument = (trade as any).instrument;
     const exitSide = trade.side === 'BUY' ? 'SELL' : 'BUY';
 
@@ -295,7 +305,7 @@ export class TradeExecutionService {
       exchange: instrument?.exchange ?? '',
       side: exitSide as 'BUY' | 'SELL',
       orderType: 'MARKET',
-      quantity: trade.quantity,
+      quantity: closeQty,
       positionType: trade.positionType as
         | 'INTRADAY'
         | 'DELIVERY'
@@ -305,20 +315,31 @@ export class TradeExecutionService {
     let exitPrice = 0;
 
     if (trade.isPaperTrade) {
-      const paperResponse =
-        await this.paperTradeService.simulateOrder(closeOrder);
-
-      // Prefer the simulator's slippage-adjusted fillPrice (mirrors the
-      // entry-side fix). Fall back to live LTP and then to entryPrice as
-      // last-resort defensive measures. Without this, paper closes would
-      // ignore simulated exit slippage and silently corrupt every closed
-      // paper trade's P&L on the exit side — the journal becomes
-      // unreliable evidence for evaluating scanners.
+      // Resolve a usable price BEFORE simulating, so the paper fill — and
+      // the cash credited back to the virtual balance — uses a real exit
+      // price even when the instrument has no cached LTP. Without a price
+      // on the close order the simulator fills at 0, credits no cash, and
+      // books a phantom catastrophic loss.
       const lastPrice = instrument
         ? await this.getLastPrice(instrument.token, instrument.exchange)
         : null;
+      closeOrder.price =
+        lastPrice && lastPrice > 0
+          ? lastPrice
+          : trade.entryPrice && trade.entryPrice > 0
+            ? trade.entryPrice
+            : undefined;
+
+      const paperResponse =
+        await this.paperTradeService.simulateOrder(closeOrder);
+
+      // Pick the first STRICTLY-POSITIVE price. A 0 fill (no LTP) must never
+      // be accepted — find(>0) is used instead of the ?? chain, which would
+      // treat a literal 0 as a valid value and corrupt P&L.
       exitPrice =
-        paperResponse.fillPrice ?? lastPrice ?? trade.entryPrice ?? 0;
+        [paperResponse.fillPrice, lastPrice, trade.entryPrice].find(
+          (p): p is number => typeof p === 'number' && p > 0,
+        ) ?? 0;
 
       if (!exitPrice || exitPrice <= 0) {
         this.logger.error(
@@ -358,14 +379,26 @@ export class TradeExecutionService {
       }
     }
 
-    // Calculate P&L
+    // Calculate P&L on the slice being closed, then accumulate it onto any
+    // P&L already realized by earlier partial closes of this same trade.
     const entryPrice = trade.entryPrice ?? 0;
     const multiplier = trade.side === 'BUY' ? 1 : -1;
-    const pnl = multiplier * (exitPrice - entryPrice) * trade.quantity;
+    const slicePnl = multiplier * (exitPrice - entryPrice) * closeQty;
+    const pnl = (trade.pnl ?? 0) + slicePnl;
     const pnlPercent =
       entryPrice > 0
         ? (pnl / (entryPrice * trade.quantity)) * 100
         : 0;
+
+    // Paper exits incur a flat brokerage and defer any winning profit to
+    // the 18:00 settlement. applyExitAccounting books both against the
+    // virtual balance and returns the charge, which we persist on the
+    // trade's `fees` field so the startup balance replay reads it back.
+    // Live trades are billed by the real broker — never charged here.
+    const brokerCharge = trade.isPaperTrade
+      ? this.paperTradeService.applyExitAccounting(slicePnl)
+      : 0;
+    const totalFees = (trade.fees ?? 0) + brokerCharge;
 
     // Pick the human-readable note: prefer structured exitNotes, fall back
     // to the legacy `reason` string (kill-switch path), preserve original
@@ -376,26 +409,44 @@ export class TradeExecutionService {
       ? `Closed: ${opts.reason}`
       : trade.notes ?? undefined;
 
-    // Update trade record
-    const updatedTrade = await this.tradeRepository.updateTrade(tradeId, {
-      status: 'CLOSED',
-      exitPrice,
-      exitTime: new Date(),
-      pnl,
-      pnlPercent,
-      notes: noteForLegacyField,
-      exitReasonTag: opts.exitReasonTag ?? null,
-      exitNotes: exitNote,
-    });
+    // Full close → CLOSED with exit price/time. Partial close → the trade
+    // stays open as PARTIALLY_FILLED with its quantity reduced to the
+    // remainder, so the trades table never accumulates orphan rows.
+    const updatedTrade = await this.tradeRepository.updateTrade(
+      tradeId,
+      isFullClose
+        ? {
+            status: 'CLOSED',
+            exitPrice,
+            exitTime: new Date(),
+            pnl,
+            pnlPercent,
+            fees: totalFees,
+            notes: noteForLegacyField,
+            exitReasonTag: opts.exitReasonTag ?? null,
+            exitNotes: exitNote,
+          }
+        : {
+            status: 'PARTIALLY_FILLED',
+            quantity: trade.quantity - closeQty,
+            pnl,
+            fees: totalFees,
+            notes: noteForLegacyField,
+          },
+    );
 
-    // Remove from position manager
-    this.positionManagerService.removePosition(tradeId, pnl);
+    // Position manager mirrors only fully-closed trades; a partial leaves
+    // the position in place — it is removed on the final close.
+    if (isFullClose) {
+      this.positionManagerService.removePosition(tradeId, pnl);
+    }
 
     // Emit updates
     this.tradeGateway.emitTradeUpdate(updatedTrade);
 
     this.logger.log(
-      `Trade ${tradeId} closed. P&L: ${pnl.toFixed(2)} (${pnlPercent.toFixed(2)}%)`,
+      `Trade ${tradeId} ${isFullClose ? 'closed' : 'partially closed'} ` +
+        `(${closeQty} @ ${exitPrice.toFixed(2)}). P&L: ${pnl.toFixed(2)} (${pnlPercent.toFixed(2)}%)`,
     );
 
     return updatedTrade;

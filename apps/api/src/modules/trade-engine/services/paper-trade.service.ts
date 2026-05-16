@@ -1,10 +1,12 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import {
   OrderRequest,
   OrderResponse,
   TickData,
 } from '../../../common/interfaces/broker-adapter.interface';
 import { TradeRepository } from '../repositories/trade.repository';
+import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { v4 as uuidv4 } from 'uuid';
 
 /** Simulated slippage range: 0.01% to 0.05%. */
@@ -13,6 +15,13 @@ const MAX_SLIPPAGE_PCT = 0.0005;
 
 /** Default starting virtual capital (INR). ₹20,00,000 (20 lakhs). */
 const DEFAULT_VIRTUAL_CAPITAL = 2_000_000;
+
+/**
+ * Flat brokerage + statutory charges modelled on every paper EXIT, in INR.
+ * Charged once per close event — a partial exit and the final exit each
+ * cost this amount, mirroring how a real broker bills per executed order.
+ */
+export const BROKER_CHARGE_PER_EXIT = 100;
 
 /**
  * Epoch — trades created BEFORE this timestamp do not affect the paper
@@ -41,6 +50,8 @@ interface PendingPaperOrder {
 interface VirtualPosition {
   symbol: string;
   exchange: string;
+  /** Angel One feed token — used by refreshOpenPositions to poll the LTP. */
+  token: string;
   side: 'BUY' | 'SELL';
   quantity: number;
   averagePrice: number;
@@ -58,8 +69,16 @@ export class PaperTradeService implements OnModuleInit {
   /** Virtual positions keyed by `symbol:exchange:side`. */
   private readonly virtualPositions = new Map<string, VirtualPosition>();
 
-  /** Virtual cash balance. */
+  /** Virtual cash balance — spendable cash, excludes deferred profit. */
   private virtualBalance = DEFAULT_VIRTUAL_CAPITAL;
+
+  /**
+   * Profit from winning exits, withheld from the spendable cash balance
+   * until the 18:00 IST after-hours settlement (see applyExitAccounting
+   * and settlePendingProfit). It still counts toward equity — it is the
+   * user's money, just not yet released to cash.
+   */
+  private pendingProfit = 0;
 
   /** Callbacks for when a pending order fills. */
   private readonly fillCallbacks = new Map<
@@ -70,18 +89,32 @@ export class PaperTradeService implements OnModuleInit {
   /** LTP cache for simulating fills. */
   private readonly ltpCache = new Map<string, number>();
 
-  constructor(private readonly tradeRepository: TradeRepository) {}
+  constructor(
+    private readonly tradeRepository: TradeRepository,
+    private readonly marketFeed: MarketFeedService,
+  ) {}
 
   /**
    * On API startup, replay every persisted paper trade to recover the balance.
    * The trades table is the source of truth — we never store balance separately,
    * so in-memory state cannot drift from the trade history.
    *
-   * Replay rules (mirror what fillAtPrice does on each fill):
-   *   - Closed BUY  : balance += pnl                                (= -entry×qty + exit×qty)
-   *   - Closed SELL : balance += pnl                                (= +entry×qty - exit×qty)
-   *   - Open   BUY  : balance -= entry × qty                        (only the opening fill ran)
-   *   - Open   SELL : balance += entry × qty                        (short credits cash on open)
+   * Replay rules (mirror what fillAtPrice + applyExitAccounting do live):
+   *   - Closed           : balance += pnl − fees   (broker charges netted out)
+   *   - Open BUY         : balance -= entry × qty
+   *   - Open SELL        : balance += entry × qty   (short credits cash on open)
+   *   - PARTIALLY_FILLED : as Open on the remaining qty, plus balance += pnl − fees
+   *                        (realized P&L already booked on the closed slice)
+   *
+   * It also rehydrates the in-memory virtualPositions map so deployedCapital
+   * and openPositions survive a restart.
+   *
+   * Note: deferred profit (pendingProfit) is in-memory only. A restart
+   * treats every closed trade's profit as already settled — the replay
+   * folds it straight into the balance. So restarting between a winning
+   * close and the 18:00 settlement effectively settles that profit early;
+   * acceptable for a paper account, where the replay is a clean-slate
+   * approximation anyway.
    */
   async onModuleInit(): Promise<void> {
     try {
@@ -90,26 +123,68 @@ export class PaperTradeService implements OnModuleInit {
       );
       let bal = DEFAULT_VIRTUAL_CAPITAL;
       let realized = 0;
-      let openCount = 0;
-      let deployed = 0;
+      const positions = new Map<string, VirtualPosition>();
+
       for (const t of paperTrades) {
-        const isClosed = t.status === 'CLOSED' && t.exitPrice != null && t.pnl != null;
+        const isClosed =
+          t.status === 'CLOSED' && t.exitPrice != null && t.pnl != null;
         if (isClosed) {
-          bal += t.pnl ?? 0;
-          realized += t.pnl ?? 0;
-        } else if (t.entryPrice != null && (t.status === 'OPEN' || t.status === 'PENDING')) {
-          const orderValue = t.entryPrice * t.quantity;
-          if (t.side === 'BUY') {
-            bal -= orderValue;
-            deployed += orderValue;
-          } else {
-            bal += orderValue;
-            deployed += orderValue;
-          }
-          openCount++;
+          // A fully-closed trade's net cash effect is its realized P&L
+          // less the broker charges booked on its exit(s). `fees`
+          // accumulates ₹100 per close event — see applyExitAccounting.
+          const net = (t.pnl ?? 0) - (t.fees ?? 0);
+          bal += net;
+          realized += net;
+          continue;
+        }
+
+        // OPEN / PENDING / PARTIALLY_FILLED — still an open position whose
+        // `quantity` is the units that remain open.
+        if (t.entryPrice == null || t.quantity <= 0) continue;
+        const remainingValue = t.entryPrice * t.quantity;
+        if (t.side === 'BUY') {
+          bal -= remainingValue;
+        } else {
+          bal += remainingValue;
+        }
+        // A PARTIALLY_FILLED trade already realized P&L on its closed slice
+        // (less the broker charge); that cash moved with the partial close,
+        // so fold the net back in.
+        if (t.status === 'PARTIALLY_FILLED' && t.pnl != null) {
+          const net = t.pnl - (t.fees ?? 0);
+          bal += net;
+          realized += net;
+        }
+
+        // Rehydrate the in-memory virtual position so getAccount() reports
+        // deployedCapital / openPositions correctly after a restart.
+        const inst = (t as any).instrument;
+        if (inst?.symbol && inst?.exchange) {
+          positions.set(`${inst.symbol}:${inst.exchange}`, {
+            symbol: inst.symbol,
+            exchange: inst.exchange,
+            token: inst.token ?? '',
+            side: t.side as 'BUY' | 'SELL',
+            quantity: t.quantity,
+            averagePrice: t.entryPrice,
+            ltp: t.entryPrice,
+            pnl: 0,
+          });
         }
       }
+
       this.virtualBalance = bal;
+      this.pendingProfit = 0;
+      this.virtualPositions.clear();
+      for (const [key, pos] of positions) {
+        this.virtualPositions.set(key, pos);
+      }
+
+      const deployed = Array.from(positions.values()).reduce(
+        (sum, p) => sum + p.averagePrice * p.quantity,
+        0,
+      );
+      const openCount = positions.size;
       this.logger.log(
         `[Paper] Balance recovered (epoch=${PAPER_ACCOUNT_EPOCH.toISOString()}) ` +
           `from ${paperTrades.length} trades: ` +
@@ -219,15 +294,17 @@ export class PaperTradeService implements OnModuleInit {
 
   /**
    * Account summary for the UI badge: starting capital, current cash balance,
-   * deployed capital tied up in open positions, and unrealized P&L from live
-   * ticks. `equity = balance + deployed + unrealizedPnl` is the total mark-to-
-   * market account value.
+   * deployed capital tied up in open positions, unrealized P&L from live
+   * ticks, and pending (deferred) profit awaiting the 18:00 settlement.
+   * `equity = balance + deployed + unrealizedPnl + pendingProfit` is the
+   * total mark-to-market account value.
    */
   getAccount(): {
     startingCapital: number;
     balance: number;
     deployedCapital: number;
     unrealizedPnl: number;
+    pendingProfit: number;
     equity: number;
     openPositions: number;
     epoch: string;
@@ -244,10 +321,90 @@ export class PaperTradeService implements OnModuleInit {
       balance: this.virtualBalance,
       deployedCapital: deployed,
       unrealizedPnl: unrealized,
-      equity: this.virtualBalance + deployed + unrealized,
+      pendingProfit: this.pendingProfit,
+      equity:
+        this.virtualBalance + deployed + unrealized + this.pendingProfit,
       openPositions: positions.length,
       epoch: PAPER_ACCOUNT_EPOCH.toISOString(),
     };
+  }
+
+  /** Deferred profit from winning exits awaiting the 18:00 IST settlement. */
+  getPendingProfit(): number {
+    return this.pendingProfit;
+  }
+
+  /**
+   * Apply paper-account accounting for ONE position exit (close event).
+   *
+   * A flat ₹100 brokerage is charged on every close — partial or full.
+   * The SELL fill in fillAtPrice() already credited the full exit value
+   * to cash, so here:
+   *   - LOSS  : just remove the ₹100 brokerage. The loss itself is
+   *             already reflected in the (smaller) exit proceeds.
+   *   - PROFIT: the realized gain is NOT spendable yet — claw it back out
+   *             of cash and park it in `pendingProfit`. Only the base
+   *             capital (minus ₹100) stays in the balance. The profit is
+   *             released after market hours by settlePendingProfit().
+   *
+   * Returns the brokerage charged so the caller can record it on the
+   * trade row's `fees` field for the startup balance replay.
+   */
+  applyExitAccounting(realizedPnl: number): number {
+    this.virtualBalance -= BROKER_CHARGE_PER_EXIT;
+    if (realizedPnl > 0) {
+      this.virtualBalance -= realizedPnl;
+      this.pendingProfit += realizedPnl;
+      this.logger.log(
+        `[Paper] Exit accounting: -₹${BROKER_CHARGE_PER_EXIT} brokerage, ` +
+          `₹${realizedPnl.toFixed(0)} profit deferred to 18:00 settlement ` +
+          `(pending=₹${this.pendingProfit.toFixed(0)})`,
+      );
+    } else {
+      this.logger.log(
+        `[Paper] Exit accounting: -₹${BROKER_CHARGE_PER_EXIT} brokerage ` +
+          `(loss of ₹${Math.abs(realizedPnl).toFixed(0)} booked)`,
+      );
+    }
+    return BROKER_CHARGE_PER_EXIT;
+  }
+
+  /**
+   * After-hours profit settlement — runs daily at 18:00 IST. Winning exits
+   * withhold their profit from spendable cash during the session (see
+   * applyExitAccounting); this sweeps the accumulated `pendingProfit` into
+   * the balance once trading is done for the day.
+   */
+  @Cron('0 0 18 * * *', { timeZone: 'Asia/Kolkata' })
+  settlePendingProfit(): void {
+    if (this.pendingProfit <= 0) return;
+    const settled = this.pendingProfit;
+    this.virtualBalance += settled;
+    this.pendingProfit = 0;
+    this.logger.log(
+      `[Paper] 18:00 settlement — credited ₹${settled.toFixed(0)} of ` +
+        `deferred profit. Balance now ₹${this.virtualBalance.toLocaleString('en-IN')}`,
+    );
+  }
+
+  /**
+   * Live equity refresher — runs every 15 s. Open paper positions' unrealized
+   * P&L is normally updated by simulateTick(), but the equity-symbol tick
+   * stream does not reliably reach this service, so the badge would freeze
+   * at the entry price. This polls MarketFeedService's quote cache directly
+   * and recomputes ltp/pnl on every open position, keeping
+   * getAccount().equity live without depending on the tick handler.
+   */
+  @Cron('*/15 * * * * *', { timeZone: 'Asia/Kolkata' })
+  refreshOpenPositions(): void {
+    for (const pos of this.virtualPositions.values()) {
+      if (!pos.token) continue;
+      const quote = this.marketFeed.getQuote(pos.token);
+      if (!quote || quote.ltp <= 0) continue;
+      pos.ltp = quote.ltp;
+      const multiplier = pos.side === 'BUY' ? 1 : -1;
+      pos.pnl = multiplier * (quote.ltp - pos.averagePrice) * pos.quantity;
+    }
   }
 
   getPendingOrders(): PendingPaperOrder[] {
@@ -256,6 +413,7 @@ export class PaperTradeService implements OnModuleInit {
 
   resetVirtualPortfolio(startingCapital?: number): void {
     this.virtualBalance = startingCapital ?? DEFAULT_VIRTUAL_CAPITAL;
+    this.pendingProfit = 0;
     this.virtualPositions.clear();
     this.pendingOrders.clear();
     this.fillCallbacks.clear();
@@ -308,6 +466,7 @@ export class PaperTradeService implements OnModuleInit {
       this.virtualPositions.set(posKey, {
         symbol: request.symbol,
         exchange: request.exchange,
+        token: request.token,
         side: request.side as 'BUY' | 'SELL',
         quantity: request.quantity,
         averagePrice: fillPrice,
@@ -337,6 +496,7 @@ export class PaperTradeService implements OnModuleInit {
         this.virtualPositions.set(posKey, {
           symbol: request.symbol,
           exchange: request.exchange,
+          token: request.token,
           side: request.side as 'BUY' | 'SELL',
           quantity: excess,
           averagePrice: fillPrice,

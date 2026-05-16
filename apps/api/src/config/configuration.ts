@@ -20,8 +20,8 @@ export default () => ({
   trading: {
     paperTrading: process.env.PAPER_TRADING === 'true',
     maxDailyLoss: parseInt(process.env.MAX_DAILY_LOSS || '5000', 10),
-    maxCapitalPerTrade: parseInt(process.env.MAX_CAPITAL_PER_TRADE || '50000', 10),
-    maxConcurrentPositions: parseInt(process.env.MAX_CONCURRENT_POSITIONS || '5', 10),
+    maxCapitalPerTrade: parseInt(process.env.MAX_CAPITAL_PER_TRADE || '200000', 10),
+    maxConcurrentPositions: parseInt(process.env.MAX_CONCURRENT_POSITIONS || '10', 10),
   },
   aiEngine: {
     url: process.env.AI_ENGINE_URL || 'http://localhost:5000',

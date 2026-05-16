@@ -82,8 +82,8 @@ export const TIMEFRAMES = {
 
 // Risk management defaults
 export const DEFAULT_MAX_DAILY_LOSS = 5000; // INR
-export const DEFAULT_MAX_CAPITAL_PER_TRADE = 50000; // INR
-export const DEFAULT_MAX_CONCURRENT_POSITIONS = 5;
+export const DEFAULT_MAX_CAPITAL_PER_TRADE = 200000; // INR
+export const DEFAULT_MAX_CONCURRENT_POSITIONS = 10;
 export const DEFAULT_RISK_REWARD_RATIO = 2; // 1:2 minimum
 export const DEFAULT_STOPLOSS_PERCENT = 2; // 2% of entry
 

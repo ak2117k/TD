@@ -160,12 +160,21 @@ export class RiskManagerService {
     const openTrades = await this.tradeRepository.getOpenTrades();
     const totalDailyLoss = realizedPnl + this.currentUnrealizedPnl;
 
+    // Capital deployed = summed entry value of every open trade. Derived
+    // from the open trades (not the mutable currentCapitalDeployed counter,
+    // which only advances on a matching tick) so it is restart-safe and
+    // consistent with positionsUsed.
+    const capitalDeployed = openTrades.reduce(
+      (sum, t) => sum + (t.entryPrice ?? 0) * t.quantity,
+      0,
+    );
+
     return {
       dailyLossUsed: Math.abs(Math.min(0, totalDailyLoss)),
       dailyLossLimit: settings.maxDailyLoss,
       positionsUsed: openTrades.length,
       positionsLimit: settings.maxConcurrentPositions,
-      capitalDeployed: this.currentCapitalDeployed,
+      capitalDeployed,
       capitalLimit: settings.maxCapitalPerTrade * settings.maxConcurrentPositions,
       killSwitchActive: this.killSwitchActive,
     };

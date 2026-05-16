@@ -21,6 +21,8 @@ export class TradeRepository {
     return this.prisma.trade.findMany({
       where: { isPaperTrade: true, createdAt: { gte: since } },
       orderBy: { createdAt: 'asc' },
+      // instrument is needed to rehydrate virtual positions on restart.
+      include: { instrument: true },
     });
   }
 

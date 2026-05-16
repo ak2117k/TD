@@ -72,6 +72,7 @@ describe('TradeExecutionService.closeTrade — exit-reason persistence', () => {
               message: 'ok',
             })),
             simulateTick: jest.fn(),
+            applyExitAccounting: jest.fn(() => 100),
           },
         },
         {
@@ -317,7 +318,11 @@ describe('TradeExecutionService.closeTrade — paper-trade exit price', () => {
   let module: TestingModule;
   let service: TradeExecutionService;
   let repo: ReturnType<typeof buildMockRepo>;
-  let paperService: { simulateOrder: jest.Mock; simulateTick: jest.Mock };
+  let paperService: {
+    simulateOrder: jest.Mock;
+    simulateTick: jest.Mock;
+    applyExitAccounting: jest.Mock;
+  };
   let brokerAdapter: { getLiveQuote: jest.Mock; placeOrder: jest.Mock };
 
   beforeEach(async () => {
@@ -342,11 +347,16 @@ describe('TradeExecutionService.closeTrade — paper-trade exit price', () => {
         fillPrice: 130.5,
       })),
       simulateTick: jest.fn(),
+      applyExitAccounting: jest.fn(() => 100),
     };
 
     brokerAdapter = {
       getLiveQuote: jest.fn(async () => ({ ltp: 125.0 })),
-      placeOrder: jest.fn(),
+      placeOrder: jest.fn(async () => ({
+        orderId: 'broker_close_1',
+        status: 'FILLED',
+        message: 'ok',
+      })),
     };
 
     module = await Test.createTestingModule({
@@ -450,5 +460,178 @@ describe('TradeExecutionService.closeTrade — paper-trade exit price', () => {
     expect(errSpy.mock.calls[0][0]).toMatch(
       /Paper close .* resolved no exitPrice/,
     );
+  });
+
+  it('partial close: shrinks the original trade, marks PARTIALLY_FILLED, accumulates pnl', async () => {
+    // closeTrade with an explicit quantity smaller than the trade closes
+    // only that slice — the original Trade row must shrink, not spawn an
+    // orphan row, so the trades table stays a clean source of truth.
+    const trade = await service.closeTrade('trade_1', { quantity: 20 });
+
+    expect(trade.status).toBe('PARTIALLY_FILLED');
+    expect(trade.quantity).toBe(30); // 50 - 20
+    // exit 20 @ 130.5, entry 100 → realized = (130.5 - 100) * 20 = 610
+    expect(trade.pnl).toBeCloseTo(610, 2);
+  });
+
+  it('falls back to a real price when the simulator fills at 0 (no cached LTP)', async () => {
+    // A market close for an instrument with no cached LTP fills at 0; the
+    // old `??` chain accepted that 0 and booked a phantom catastrophic loss.
+    paperService.simulateOrder.mockResolvedValueOnce({
+      orderId: 'paper_close_zero',
+      status: 'FILLED',
+      message: 'no ltp',
+      fillPrice: 0,
+    });
+    brokerAdapter.getLiveQuote.mockRejectedValueOnce(new Error('feed down'));
+
+    const trade = await service.closeTrade('trade_1');
+
+    // exit must fall back to entryPrice (100), never 0
+    expect(trade.exitPrice).toBe(100);
+    expect(trade.pnl).toBeCloseTo(0, 2);
+    // and the close order must carry a real price so the cash credit is real
+    const closeOrderArg = paperService.simulateOrder.mock.calls[0][0];
+    expect(closeOrderArg.price).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * Broker-charge feature — every paper exit routes through
+ * PaperTradeService.applyExitAccounting (flat ₹100 brokerage + deferred
+ * profit) and records the charge on the trade row's `fees` field so the
+ * startup balance replay can reconstruct it.
+ */
+describe('TradeExecutionService.closeTrade — broker charge', () => {
+  let module: TestingModule;
+  let service: TradeExecutionService;
+  let repo: ReturnType<typeof buildMockRepo>;
+  let paperService: {
+    simulateOrder: jest.Mock;
+    simulateTick: jest.Mock;
+    applyExitAccounting: jest.Mock;
+  };
+
+  beforeEach(async () => {
+    repo = buildMockRepo();
+    repo._trades['trade_1'] = {
+      id: 'trade_1',
+      status: 'OPEN',
+      side: 'BUY',
+      quantity: 50,
+      entryPrice: 100,
+      isPaperTrade: true,
+      positionType: 'INTRADAY',
+      notes: null,
+      fees: 0,
+      instrument: { symbol: 'NIFTY24MAY22500CE', token: '99926000', exchange: 'NFO' },
+    };
+
+    paperService = {
+      simulateOrder: jest.fn(async () => ({
+        orderId: 'paper_close_1',
+        status: 'FILLED',
+        message: 'ok',
+        fillPrice: 130.5,
+      })),
+      simulateTick: jest.fn(),
+      applyExitAccounting: jest.fn(() => 100),
+    };
+
+    const brokerAdapter = {
+      getLiveQuote: jest.fn(async () => ({ ltp: 125.0 })),
+      placeOrder: jest.fn(async () => ({
+        orderId: 'broker_close_1',
+        status: 'FILLED',
+        message: 'ok',
+      })),
+    };
+
+    module = await Test.createTestingModule({
+      providers: [
+        TradeExecutionService,
+        { provide: BROKER_ADAPTER_TOKEN, useValue: brokerAdapter },
+        { provide: PaperTradeService, useValue: paperService },
+        {
+          provide: RiskManagerService,
+          useValue: {
+            validateTrade: jest.fn(async () => ({ allowed: true })),
+            getDailyRiskStatus: jest.fn(async () => ({})),
+            activateKillSwitch: jest.fn(),
+          },
+        },
+        { provide: OrderTrackerService, useValue: { trackOrder: jest.fn() } },
+        {
+          provide: PositionManagerService,
+          useValue: {
+            addPosition: jest.fn(),
+            removePosition: jest.fn(),
+            updatePositionPnL: jest.fn(),
+          },
+        },
+        { provide: TradeRepository, useValue: repo },
+        {
+          provide: TradeGateway,
+          useValue: {
+            emitTradeUpdate: jest.fn(),
+            emitKillSwitchActivated: jest.fn(),
+            emitRiskStatus: jest.fn(),
+          },
+        },
+        {
+          provide: SettingsService,
+          useValue: {
+            getSettings: jest.fn(async () => ({ paperTrading: true })),
+            activateKillSwitch: jest.fn(),
+          },
+        },
+        {
+          provide: MarketFeedService,
+          useValue: { getQuote: jest.fn(() => null), getBreadth: jest.fn() },
+        },
+        {
+          provide: MarketContextService,
+          useValue: { snapshot: jest.fn(async () => null) },
+        },
+      ],
+    }).compile();
+
+    service = module.get(TradeExecutionService);
+  });
+
+  it('routes a paper exit through applyExitAccounting with the slice P&L', async () => {
+    await service.closeTrade('trade_1', {
+      exitReasonTag: ExitReasonTag.HIT_TARGET,
+    });
+
+    // slice P&L = (130.5 - 100) * 50 = 1525
+    expect(paperService.applyExitAccounting).toHaveBeenCalledTimes(1);
+    expect(paperService.applyExitAccounting).toHaveBeenCalledWith(1525);
+  });
+
+  it('records the broker charge on the trade row fees field (full close)', async () => {
+    const trade = await service.closeTrade('trade_1');
+    expect(trade.fees).toBe(100); // 0 existing + ₹100 this exit
+  });
+
+  it('charges a partial close too — slice P&L and fees both reflect the slice', async () => {
+    const trade = await service.closeTrade('trade_1', { quantity: 20 });
+
+    // slice P&L = (130.5 - 100) * 20 = 610
+    expect(paperService.applyExitAccounting).toHaveBeenCalledWith(610);
+    expect(trade.status).toBe('PARTIALLY_FILLED');
+    expect(trade.fees).toBe(100);
+  });
+
+  it('accumulates fees across exits — a second close on the same trade adds ₹100', async () => {
+    repo._trades['trade_1'].fees = 100; // an earlier partial already charged ₹100
+    const trade = await service.closeTrade('trade_1');
+    expect(trade.fees).toBe(200);
+  });
+
+  it('does NOT charge brokerage when closing a live (non-paper) trade', async () => {
+    repo._trades['trade_1'].isPaperTrade = false;
+    await service.closeTrade('trade_1');
+    expect(paperService.applyExitAccounting).not.toHaveBeenCalled();
   });
 });

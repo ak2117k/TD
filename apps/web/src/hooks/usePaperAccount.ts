@@ -7,6 +7,8 @@ export interface PaperAccount {
   balance: number;
   deployedCapital: number;
   unrealizedPnl: number;
+  /** Profit from winning exits, held until the 18:00 IST settlement. */
+  pendingProfit: number;
   equity: number;
   openPositions: number;
   /** ISO timestamp — trades before this are ignored (legacy journal data). */

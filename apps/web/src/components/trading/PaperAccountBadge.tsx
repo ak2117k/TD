@@ -7,10 +7,11 @@ function fmtINR(n: number): string {
 
 /**
  * Compact paper-trading balance widget. Shows:
- *   - Equity   = balance + deployed + unrealized P&L (total account value)
- *   - Balance  = idle cash not tied up in positions
+ *   - Equity   = balance + deployed + unrealized P&L + pending (total value)
+ *   - Cash     = idle cash not tied up in positions
  *   - Deployed = capital locked in open positions
- *   - +/-P&L   = unrealized P&L from live ticks (color-coded)
+ *   - Unreal   = unrealized P&L from live ticks (color-coded)
+ *   - Pending  = profit from winning exits, credited at the 18:00 settlement
  *
  * Polls /api/trades/paper-account every 5s.
  */
@@ -81,6 +82,19 @@ export function PaperAccountBadge() {
           <span className={`font-mono ${unrealColor}`}>
             {account.unrealizedPnl >= 0 ? '+' : ''}
             {fmtINR(account.unrealizedPnl)}
+          </span>
+        </div>
+      )}
+      {account.pendingProfit > 0 && (
+        <div className="flex items-baseline gap-1">
+          <span
+            className="text-[var(--color-text-muted)]"
+            title="Profit from winning exits — credited to cash after the 18:00 IST settlement"
+          >
+            Pending
+          </span>
+          <span className="font-mono text-amber-300">
+            +{fmtINR(account.pendingProfit)}
           </span>
         </div>
       )}

@@ -7,12 +7,16 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { UpdateSettingsDto } from '../dto/settings.dto';
 import { UserSettings } from '@prisma/client';
+import {
+  DEFAULT_MAX_CAPITAL_PER_TRADE,
+  DEFAULT_MAX_CONCURRENT_POSITIONS,
+} from '@td/shared';
 
 const DEFAULT_SETTINGS = {
   paperTrading: true,
   maxDailyLoss: 5000,
-  maxCapitalPerTrade: 50000,
-  maxConcurrentPositions: 5,
+  maxCapitalPerTrade: DEFAULT_MAX_CAPITAL_PER_TRADE,
+  maxConcurrentPositions: DEFAULT_MAX_CONCURRENT_POSITIONS,
   defaultRiskReward: 2.0,
   autoTradeMode: 'OFF',
   activeStrategies: ['rsi-reversal', 'ema-crossover', 'vwap-deviation'],
