@@ -75,3 +75,7 @@ secrets.json
 # Local data dumps (runtime artifacts, not source)
 ai-engine/data/
 apps/api/data/
+
+# Local test screenshots (debugging artifacts, not source)
+/chartink-activated.png
+/drawing-test-*.png
