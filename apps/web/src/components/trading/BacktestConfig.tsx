@@ -3,6 +3,7 @@ import { Play, Plus, Loader2, Search } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import api from '@/services/api';
 import type { BacktestConfig as BacktestConfigType } from '@/stores/backtest-store';
+import { presetRange, todayIso, DATE_PRESETS } from '@/utils/backtestDateRange';
 
 interface Strategy {
   name: string;
@@ -108,12 +109,21 @@ export default function BacktestConfig({
     onAddToCompare?.(config);
   }
 
+  const today = todayIso();
+  const rangeError =
+    config.startDate && config.endDate && config.startDate >= config.endDate
+      ? 'Start date must be before end date.'
+      : config.endDate && config.endDate > today
+        ? 'End date cannot be in the future.'
+        : null;
+
   const isValid =
     config.strategy &&
     config.symbol &&
     config.startDate &&
     config.endDate &&
-    config.initialCapital > 0;
+    config.initialCapital > 0 &&
+    !rangeError;
 
   const inputClass =
     'w-full rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-primary)] px-3 py-2 text-sm text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent-blue)] focus:ring-1 focus:ring-[var(--color-accent-blue)]/30 transition-colors';
@@ -210,26 +220,55 @@ export default function BacktestConfig({
         </div>
       </div>
 
-      {/* Date range */}
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className={labelClass}>Start Date</label>
-          <input
-            type="date"
-            value={config.startDate}
-            onChange={(e) => onConfigChange({ startDate: e.target.value })}
-            className={inputClass}
-          />
+      {/* Date range — quick presets + explicit from/to pickers */}
+      <div>
+        <div className="mb-1.5 flex items-center justify-between">
+          <label className="text-xs font-medium text-[var(--color-text-secondary)]">
+            Date Range
+          </label>
+          <div className="flex gap-1">
+            {DATE_PRESETS.map((p) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => onConfigChange(presetRange(p))}
+                className="rounded border border-[var(--color-border-subtle)] px-2 py-0.5 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent-blue)] hover:text-[var(--color-text-primary)]"
+              >
+                {p}
+              </button>
+            ))}
+          </div>
         </div>
-        <div>
-          <label className={labelClass}>End Date</label>
-          <input
-            type="date"
-            value={config.endDate}
-            onChange={(e) => onConfigChange({ endDate: e.target.value })}
-            className={inputClass}
-          />
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="mb-1 block text-[11px] text-[var(--color-text-muted)]">
+              From
+            </label>
+            <input
+              type="date"
+              value={config.startDate}
+              max={config.endDate || today}
+              onChange={(e) => onConfigChange({ startDate: e.target.value })}
+              className={inputClass}
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-[11px] text-[var(--color-text-muted)]">
+              To
+            </label>
+            <input
+              type="date"
+              value={config.endDate}
+              min={config.startDate || undefined}
+              max={today}
+              onChange={(e) => onConfigChange({ endDate: e.target.value })}
+              className={inputClass}
+            />
+          </div>
         </div>
+        {rangeError && (
+          <p className="mt-1.5 text-[11px] text-red-400">{rangeError}</p>
+        )}
       </div>
 
       {/* Capital + Position size */}

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import api from '@/services/api';
+import { presetRange } from '@/utils/backtestDateRange';
 
 export interface BacktestTradeResult {
   entryTime: string;
@@ -80,8 +81,9 @@ const defaultConfig: BacktestConfig = {
   symbol: '',
   exchange: 'NSE',
   timeframe: '1d',
-  startDate: '',
-  endDate: '',
+  // Open run-ready on a sensible window (last 3 months → today) instead of
+  // blank fields; the user can still pick any range or use a preset.
+  ...presetRange('3M'),
   initialCapital: 1000000,
   positionSize: 1,
 };
