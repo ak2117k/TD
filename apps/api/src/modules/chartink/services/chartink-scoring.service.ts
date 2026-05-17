@@ -21,6 +21,13 @@ export interface ScoringInput {
   side: SetupSide;
   entryPrice: number;
   setupContext?: { levelBookSnapshot?: { pdh: number; pdl: number; orh: number | null; orl: number | null; vwap: number } } | null;
+  /**
+   * Optional "as of" timestamp for backtest replay. When set, EVERY
+   * historical-candle fetch ends at this instant instead of "now" — so the
+   * 10-check scoring sees only data that existed at `asOf`. When omitted,
+   * behaviour is byte-identical to live scoring (windows end at `new Date()`).
+   */
+  asOf?: Date;
 }
 
 export interface ScoringResult {
@@ -158,7 +165,7 @@ export class ChartinkScoringService {
       return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'no sector mapping' } };
     }
     try {
-      const candles = await this.fetch15mCandles(sectorToken, 'NSE', 50);
+      const candles = await this.fetch15mCandles(sectorToken, 'NSE', 50, input.asOf);
       const closes = candles.map((c) => c.close);
       const trend = this.classifyTrend(closes);
       if (!trend) {
@@ -199,8 +206,8 @@ export class ChartinkScoringService {
     }
     try {
       const lookback = 20; // bars
-      const stockCandles = await this.fetch15mCandles(input.token, input.exchange, lookback + 2);
-      const sectorCandles = await this.fetch15mCandles(sectorToken, 'NSE', lookback + 2);
+      const stockCandles = await this.fetch15mCandles(input.token, input.exchange, lookback + 2, input.asOf);
+      const sectorCandles = await this.fetch15mCandles(sectorToken, 'NSE', lookback + 2, input.asOf);
       if (stockCandles.length < lookback || sectorCandles.length < lookback) {
         return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient candles' } };
       }
@@ -236,7 +243,7 @@ export class ChartinkScoringService {
       return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'setup is on the index itself' } };
     }
     try {
-      const candles = await this.fetch15mCandles(NIFTY_TOKEN, NIFTY_EXCHANGE, 50);
+      const candles = await this.fetch15mCandles(NIFTY_TOKEN, NIFTY_EXCHANGE, 50, input.asOf);
       const closes = candles.map((c) => c.close);
       const trend = this.classifyTrend(closes);
       if (!trend) {
@@ -263,7 +270,7 @@ export class ChartinkScoringService {
   ): Promise<ScoreCheckResult> {
     const name = `MACD on ${tf}`;
     try {
-      const candles = await this.fetchCandles(input.token, input.exchange, tf, lookback);
+      const candles = await this.fetchCandles(input.token, input.exchange, tf, lookback, input.asOf);
       // MACD's 26-period EMA needs a long warmup before its seed residual
       // decays out. Below 120 bars the line is materially un-converged
       // (several percent off the true value) and diverges from broker
@@ -306,7 +313,7 @@ export class ChartinkScoringService {
     const name = 'Price vs 20-EMA';
     const pointsPossible = 10;
     try {
-      const candles = await this.fetch15mCandles(input.token, input.exchange, 50);
+      const candles = await this.fetch15mCandles(input.token, input.exchange, 50, input.asOf);
       const closes = candles.map((c) => c.close);
       const trend = this.classifyTrend(closes);
       if (!trend) {
@@ -332,7 +339,7 @@ export class ChartinkScoringService {
     const name = 'SuperTrend match';
     const pointsPossible = 10;
     try {
-      const candles = await this.fetch15mCandles(input.token, input.exchange, 50);
+      const candles = await this.fetch15mCandles(input.token, input.exchange, 50, input.asOf);
       if (candles.length < 11) {
         return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient candles' } };
       }
@@ -358,7 +365,7 @@ export class ChartinkScoringService {
       return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'no level book' } };
     }
     try {
-      const candles = await this.fetch15mCandles(input.token, input.exchange, 50);
+      const candles = await this.fetch15mCandles(input.token, input.exchange, 50, input.asOf);
       if (candles.length < 21) {
         return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient candles for ATR' } };
       }
@@ -394,8 +401,8 @@ export class ChartinkScoringService {
     const name = 'Volume confirmation';
     const pointsPossible = 5;
     try {
-      const todayCandles = await this.fetchCandles(input.token, input.exchange, '5m', 100);
-      const dailyCandles = await this.fetchCandles(input.token, input.exchange, '1d', 25);
+      const todayCandles = await this.fetchCandles(input.token, input.exchange, '5m', 100, input.asOf);
+      const dailyCandles = await this.fetchCandles(input.token, input.exchange, '1d', 25, input.asOf);
       if (dailyCandles.length < 20) {
         return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient daily candles' } };
       }
@@ -436,7 +443,7 @@ export class ChartinkScoringService {
    */
   private candleCache = new Map<string, { lookback: number; promise: Promise<Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>> }>();
 
-  private async fetchCandles(token: string, exchange: string, tf: string, lookback: number): Promise<Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>> {
+  private async fetchCandles(token: string, exchange: string, tf: string, lookback: number, asOf?: Date): Promise<Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>> {
     const key = `${token}:${exchange}:${tf}`;
     const cached = this.candleCache.get(key);
     if (cached && cached.lookback >= lookback) {
@@ -447,15 +454,16 @@ export class ChartinkScoringService {
     // Either no cache or cached lookback is smaller. Fetch fresh, sized to the
     // larger of the two. The next caller for either size serves from cache.
     const targetLookback = Math.max(lookback, cached?.lookback ?? 0);
-    const promise = this.fetchCandlesUncached(token, exchange, tf, targetLookback);
+    const promise = this.fetchCandlesUncached(token, exchange, tf, targetLookback, asOf);
     this.candleCache.set(key, { lookback: targetLookback, promise });
     const candles = await promise;
     return candles.slice(-lookback);
   }
 
-  private async fetchCandlesUncached(token: string, exchange: string, tf: string, lookback: number): Promise<Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>> {
+  private async fetchCandlesUncached(token: string, exchange: string, tf: string, lookback: number, asOf?: Date): Promise<Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>> {
     const lookbackMs = this.lookbackMsForTf(tf, lookback);
-    const to = new Date();
+    // For backtest replay, the window ends at `asOf`; otherwise at "now".
+    const to = asOf ?? new Date();
     const from = new Date(to.getTime() - lookbackMs);
     const candles = (await this.adapter.getHistoricalData(token, exchange, tf, from, to)) as any[];
     return candles.map((c) => ({
@@ -468,8 +476,8 @@ export class ChartinkScoringService {
     }));
   }
 
-  private fetch15mCandles(token: string, exchange: string, n: number) {
-    return this.fetchCandles(token, exchange, '15m', n);
+  private fetch15mCandles(token: string, exchange: string, n: number, asOf?: Date) {
+    return this.fetchCandles(token, exchange, '15m', n, asOf);
   }
 
   private lookbackMsForTf(tf: string, count: number): number {

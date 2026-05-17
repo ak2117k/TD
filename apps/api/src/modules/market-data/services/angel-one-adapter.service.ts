@@ -112,6 +112,20 @@ const HISTORICAL_CACHE_TTL_MS: Record<string, number> = {
 const HISTORICAL_CACHE_TTL_DEFAULT_MS = 60 * 1000;
 
 /**
+ * Live-fetch window for the historical cache. The TTL cache is meaningful
+ * ONLY for "give me the last N bars up to now" fetches — the cache key
+ * ignores [from,to], so a slightly-stale cached window is an acceptable
+ * substitute for a fresh live fetch.
+ *
+ * A backtest replay asks for candles "as of a past timestamp" — its `to`
+ * is days/weeks old. Such a fetch must NOT be served the recent cached
+ * entry, and must NOT poison the cache with old data. We detect a backtest
+ * fetch by `to` being further than this window from `Date.now()`: anything
+ * older bypasses the cache entirely (fetch fresh, do not store).
+ */
+const HISTORICAL_CACHE_LIVE_WINDOW_MS = 2 * 60 * 1000;
+
+/**
  * Thrown when Angel One's historical endpoint responds with `data: null`
  * (as opposed to `data: []`). Empirically this is the throttle / auth-
  * rejection shape — Angel returns HTTP 200 with a null `data` field and a
@@ -630,10 +644,21 @@ export class AngelOneAdapterService implements BrokerAdapter {
     // Serve repeated fetches of the same (token, exchange, timeframe)
     // within the per-timeframe TTL without re-hitting the broker. Only
     // successful, non-empty results are cached (see historicalCache docs).
+    //
+    // The cache applies ONLY to LIVE fetches — `to` within
+    // HISTORICAL_CACHE_LIVE_WINDOW_MS of now. A backtest replay fetches
+    // "as of a past timestamp" (old `to`); serving or populating the
+    // recent cached entry from such a fetch would cross-contaminate live
+    // scoring and backtest replay. Old-`to` fetches bypass the cache
+    // entirely: fetch fresh, never store.
     const cacheKey = `${token}:${exchange}:${timeframe}`;
-    const cached = this.historicalCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) {
-      return cached.data;
+    const isLiveFetch =
+      Date.now() - to.getTime() <= HISTORICAL_CACHE_LIVE_WINDOW_MS;
+    if (isLiveFetch) {
+      const cached = this.historicalCache.get(cacheKey);
+      if (cached && cached.expiresAt > Date.now()) {
+        return cached.data;
+      }
     }
 
     // Contain a throttle at this boundary. fetchHistoricalChunk raises a
@@ -662,10 +687,12 @@ export class AngelOneAdapterService implements BrokerAdapter {
       throw err;
     }
 
-    // Cache ONLY a genuine non-empty result. An empty array (data:[]) or a
-    // contained throttle must not be cached, so a transient miss self-heals
-    // on the next call.
-    if (result.length > 0) {
+    // Cache ONLY a genuine non-empty result of a LIVE fetch. An empty array
+    // (data:[]) or a contained throttle must not be cached, so a transient
+    // miss self-heals on the next call. A backtest replay (old `to`,
+    // !isLiveFetch) must never populate the cache — its old-dated candles
+    // would poison subsequent live fetches of the same key.
+    if (isLiveFetch && result.length > 0) {
       const ttl =
         HISTORICAL_CACHE_TTL_MS[timeframe] ?? HISTORICAL_CACHE_TTL_DEFAULT_MS;
       this.historicalCache.set(cacheKey, {

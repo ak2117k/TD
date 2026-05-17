@@ -22,6 +22,7 @@ import { RsiReversalStrategy } from './strategies/rsi-reversal.strategy';
 import { EmaCrossoverStrategy } from './strategies/ema-crossover.strategy';
 import { VwapDeviationStrategy } from './strategies/vwap-deviation.strategy';
 import { AnandSniperV25CombinedStrategy } from './strategies/anand-sniper-v25-combined.strategy';
+import { ChartinkGatedStrategy } from './strategies/chartink-gated.strategy';
 import { LevelBookService } from './services/level-book.service';
 import { LevelBookCron } from './services/level-book.cron';
 import { SetupTrackerService } from './services/setup-tracker.service';
@@ -68,6 +69,7 @@ import type { ContextFactor } from './services/context-scoring/types';
     EmaCrossoverStrategy,
     VwapDeviationStrategy,
     AnandSniperV25CombinedStrategy,
+    ChartinkGatedStrategy,
 
     // User-defined strategy engine
     StrategyParserService,

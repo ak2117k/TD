@@ -5,6 +5,7 @@ import { RsiReversalStrategy } from '../strategies/rsi-reversal.strategy';
 import { EmaCrossoverStrategy } from '../strategies/ema-crossover.strategy';
 import { VwapDeviationStrategy } from '../strategies/vwap-deviation.strategy';
 import { AnandSniperV25CombinedStrategy } from '../strategies/anand-sniper-v25-combined.strategy';
+import { ChartinkGatedStrategy } from '../strategies/chartink-gated.strategy';
 import { LevelsContextStrategy } from '../strategies/levels-context.strategy';
 
 @Injectable()
@@ -18,6 +19,7 @@ export class StrategyRegistryService implements OnModuleInit {
     private readonly emaCrossoverStrategy: EmaCrossoverStrategy,
     private readonly vwapDeviationStrategy: VwapDeviationStrategy,
     private readonly anandSniperV25CombinedStrategy: AnandSniperV25CombinedStrategy,
+    private readonly chartinkGatedStrategy: ChartinkGatedStrategy,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -26,6 +28,7 @@ export class StrategyRegistryService implements OnModuleInit {
     this.register(this.emaCrossoverStrategy);
     this.register(this.vwapDeviationStrategy);
     this.register(this.anandSniperV25CombinedStrategy);
+    this.register(this.chartinkGatedStrategy);
 
     // Register the levels-context strategy — constructed directly (no NestJS
     // injection needed; it has no service dependencies).

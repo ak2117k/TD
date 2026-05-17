@@ -50,6 +50,19 @@ export interface BacktestInput {
   candles: CandleData[];
   initialCapital: number;
   positionSize: number;
+  /**
+   * Optional instrument/run context. Existing single-symbol strategies that
+   * only need the `candles` array ignore these. Strategies that replay an
+   * external scoring pipeline "as of a past timestamp" (e.g. the Chartink
+   * 10-check backtest) read them to know WHICH instrument and date window
+   * they are evaluating. All optional so no existing strategy breaks.
+   */
+  symbol?: string;
+  token?: string;
+  exchange?: string;
+  timeframe?: string;
+  startDate?: Date;
+  endDate?: Date;
 }
 
 export interface BacktestResult {
@@ -88,8 +101,12 @@ export interface TradingStrategy {
   /** Analyze current market data and return a signal or null */
   analyze(data: MarketSnapshot): SignalOutput | null;
 
-  /** Run backtest against historical data */
-  backtest(input: BacktestInput): BacktestResult;
+  /**
+   * Run backtest against historical data. May be synchronous (the legacy
+   * single-symbol strategies) or asynchronous (strategies that fetch extra
+   * data, e.g. an as-of replay of the Chartink scoring pipeline).
+   */
+  backtest(input: BacktestInput): BacktestResult | Promise<BacktestResult>;
 
   /** Get current strategy parameters */
   getParameters(): Record<string, any>;

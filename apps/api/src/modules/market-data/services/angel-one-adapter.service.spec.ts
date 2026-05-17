@@ -157,14 +157,24 @@ describe('AngelOneAdapterService — historical cache + throttle detection', () 
   }
 
   // ─── Task B: cache ────────────────────────────────────────────────────
+  // NOTE: the historical cache only applies to LIVE fetches — `to` within
+  // ~2 minutes of now (see "live-window guard" below). These cache-behaviour
+  // tests therefore use a now-anchored `to`; an old `to` deliberately
+  // bypasses the cache (backtest replay path).
   describe('candle cache', () => {
+    /** A small live window: `to` ≈ now, `from` 15 minutes earlier. */
+    function liveWindow(): { from: Date; to: Date } {
+      const to = new Date();
+      const from = new Date(to.getTime() - 15 * 60 * 1000);
+      return { from, to };
+    }
+
     it('serves a repeated fetch (same token:exchange:timeframe) from cache within TTL', async () => {
       const mock = jest
         .fn()
         .mockResolvedValue({ status: true, data: [row('2026-05-15 09:15'), row('2026-05-15 09:16')] });
       const adapter = buildAdapter(mock);
-      const from = new Date('2026-05-15T03:45:00Z');
-      const to = new Date('2026-05-15T04:00:00Z');
+      const { from, to } = liveWindow();
 
       const a = await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
       const b = await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
@@ -179,10 +189,9 @@ describe('AngelOneAdapterService — historical cache + throttle detection', () 
         .fn()
         .mockResolvedValue({ status: true, data: [row('2026-05-15 09:15')] });
       const adapter = buildAdapter(mock);
-      const from = new Date('2026-05-15T03:45:00Z');
-      const to = new Date('2026-05-15T04:00:00Z');
+      const { from, to } = liveWindow();
 
-      jest.useFakeTimers();
+      jest.useFakeTimers({ now: to.getTime() });
       try {
         await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
         // Advance past the 1m TTL (~45s).
@@ -197,8 +206,7 @@ describe('AngelOneAdapterService — historical cache + throttle detection', () 
     it('does NOT cache an empty result (genuine data:[])', async () => {
       const mock = jest.fn().mockResolvedValue({ status: true, data: [] });
       const adapter = buildAdapter(mock);
-      const from = new Date('2026-05-15T03:45:00Z');
-      const to = new Date('2026-05-15T04:00:00Z');
+      const { from, to } = liveWindow();
 
       const a = await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
       expect(a).toEqual([]);
@@ -211,8 +219,7 @@ describe('AngelOneAdapterService — historical cache + throttle detection', () 
     it('does NOT cache a throttled (data:null) result', async () => {
       const mock = jest.fn().mockResolvedValue({ status: false, data: null, message: 'throttled' });
       const adapter = buildAdapter(mock);
-      const from = new Date('2026-05-15T03:45:00Z');
-      const to = new Date('2026-05-15T04:00:00Z');
+      const { from, to } = liveWindow();
 
       // A throttle is contained → returns [] (never thrown to the caller).
       const a = await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
@@ -228,8 +235,7 @@ describe('AngelOneAdapterService — historical cache + throttle detection', () 
         .fn()
         .mockResolvedValue({ status: true, data: [row('2026-05-15 09:15')] });
       const adapter = buildAdapter(mock);
-      const from = new Date('2026-05-15T03:45:00Z');
-      const to = new Date('2026-05-15T04:00:00Z');
+      const { from, to } = liveWindow();
 
       await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
       await adapter.getHistoricalData('99926000', 'NSE', '1m', from, to);
@@ -239,6 +245,72 @@ describe('AngelOneAdapterService — historical cache + throttle detection', () 
       // Re-request the first key → still cached.
       await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
       expect(mock).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  // ─── Historical cache live-window guard (backtest replay bypass) ──────
+  describe('cache live-window guard', () => {
+    it('bypasses the cache entirely for an old `to` (backtest replay) — every call hits the broker', async () => {
+      const mock = jest
+        .fn()
+        .mockResolvedValue({ status: true, data: [row('2026-04-17 09:15')] });
+      const adapter = buildAdapter(mock);
+      // `to` 30 days in the past — a backtest as-of replay, not a live fetch.
+      const to = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const from = new Date(to.getTime() - 15 * 60 * 1000);
+
+      await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
+      await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
+      await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
+      // No caching for old `to` — broker hit every time.
+      expect(mock).toHaveBeenCalledTimes(3);
+    });
+
+    it('an old-`to` fetch does NOT populate the cache — a later live fetch still hits the broker', async () => {
+      const mock = jest
+        .fn()
+        .mockResolvedValue({ status: true, data: [row('2026-04-17 09:15')] });
+      const adapter = buildAdapter(mock);
+
+      // Backtest replay first (old `to`).
+      const oldTo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const oldFrom = new Date(oldTo.getTime() - 15 * 60 * 1000);
+      await adapter.getHistoricalData('2885', 'NSE', '1m', oldFrom, oldTo);
+      expect(mock).toHaveBeenCalledTimes(1);
+
+      // Now a LIVE fetch of the same key — must NOT be served the poisoned
+      // backtest entry; must hit the broker (and then cache).
+      const liveTo = new Date();
+      const liveFrom = new Date(liveTo.getTime() - 15 * 60 * 1000);
+      await adapter.getHistoricalData('2885', 'NSE', '1m', liveFrom, liveTo);
+      expect(mock).toHaveBeenCalledTimes(2);
+      // The live fetch DID cache — a repeat live fetch is served from cache.
+      await adapter.getHistoricalData('2885', 'NSE', '1m', liveFrom, liveTo);
+      expect(mock).toHaveBeenCalledTimes(2);
+    });
+
+    it('a live fetch is not served from a cache entry created by a backtest replay', async () => {
+      // Live fetch first → cached. Then an old-`to` fetch bypasses the cache
+      // and must NOT be served the live entry (different data window).
+      const liveData = { status: true, data: [row('2026-05-17 09:15')] };
+      const oldData = { status: true, data: [row('2026-04-17 09:15')] };
+      const mock = jest
+        .fn()
+        .mockResolvedValueOnce(liveData)
+        .mockResolvedValueOnce(oldData);
+      const adapter = buildAdapter(mock);
+
+      const liveTo = new Date();
+      const liveFrom = new Date(liveTo.getTime() - 15 * 60 * 1000);
+      await adapter.getHistoricalData('2885', 'NSE', '1m', liveFrom, liveTo);
+
+      const oldTo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const oldFrom = new Date(oldTo.getTime() - 15 * 60 * 1000);
+      const backtest = await adapter.getHistoricalData('2885', 'NSE', '1m', oldFrom, oldTo);
+
+      // Backtest call bypassed the cache and got its own (old) data.
+      expect(mock).toHaveBeenCalledTimes(2);
+      expect(backtest[0].timestamp).toEqual(new Date('2026-04-17 09:15'));
     });
   });
 

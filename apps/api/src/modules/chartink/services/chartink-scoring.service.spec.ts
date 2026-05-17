@@ -450,4 +450,65 @@ describe('ChartinkScoringService', () => {
       expect(result.dataStarved).toBe(false);
     });
   });
+
+  // ─── As-of-time scoring (backtest replay) ───────────────────────────────
+  describe('asOf — historical candle fetches end at a past timestamp', () => {
+    const buyInput: ScoringInput = {
+      token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
+      entryPrice: 2880, setupContext: null,
+    };
+
+    function risingCandles(n: number) {
+      return Array.from({ length: n }, (_, i) => ({
+        timestamp: new Date(Date.UTC(2026, 4, 12, 0, i * 5)),
+        open: 100 + i * 0.5, high: 100 + i * 0.5 + 0.5, low: 100 + i * 0.5 - 0.5,
+        close: 100 + i * 0.5 + 0.25, volume: 1000 + i * 50,
+      }));
+    }
+
+    it('passing asOf makes EVERY historical fetch use `to` === that past date', async () => {
+      mockAdapter.getHistoricalData.mockResolvedValue(risingCandles(300));
+      const asOf = new Date(Date.UTC(2026, 3, 1, 9, 30)); // 2026-04-01 09:30 UTC
+
+      await service.score({ ...buyInput, asOf });
+
+      expect(mockAdapter.getHistoricalData).toHaveBeenCalled();
+      // Every call's `to` arg (index 4) must equal asOf exactly.
+      for (const call of mockAdapter.getHistoricalData.mock.calls) {
+        const to = call[4] as Date;
+        expect(to.getTime()).toBe(asOf.getTime());
+      }
+    });
+
+    it('asOf also shifts the `from` arg back from asOf (window ends at asOf, not now)', async () => {
+      mockAdapter.getHistoricalData.mockResolvedValue(risingCandles(300));
+      const asOf = new Date(Date.UTC(2026, 3, 1, 9, 30));
+
+      await service.score({ ...buyInput, asOf });
+
+      for (const call of mockAdapter.getHistoricalData.mock.calls) {
+        const from = call[3] as Date;
+        const to = call[4] as Date;
+        // from is strictly before to, and the window ends exactly at asOf.
+        expect(from.getTime()).toBeLessThan(to.getTime());
+        expect(to.getTime()).toBe(asOf.getTime());
+      }
+    });
+
+    it('omitting asOf → every fetch `to` is approximately now (unchanged behaviour)', async () => {
+      mockAdapter.getHistoricalData.mockResolvedValue(risingCandles(300));
+      const before = Date.now();
+
+      await service.score(buyInput);
+
+      const after = Date.now();
+      expect(mockAdapter.getHistoricalData).toHaveBeenCalled();
+      for (const call of mockAdapter.getHistoricalData.mock.calls) {
+        const to = call[4] as Date;
+        // `to` was new Date() at fetch time — within the test's wall-clock window.
+        expect(to.getTime()).toBeGreaterThanOrEqual(before);
+        expect(to.getTime()).toBeLessThanOrEqual(after + 1000);
+      }
+    });
+  });
 });

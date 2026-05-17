@@ -163,10 +163,16 @@ export class BacktestService {
       );
     }
 
-    const result = strategy.backtest({
+    const result = await strategy.backtest({
       candles,
       initialCapital: config.initialCapital,
       positionSize: config.positionSize,
+      symbol: config.symbol,
+      token,
+      exchange,
+      timeframe: config.timeframe,
+      startDate: config.startDate,
+      endDate: config.endDate,
     });
 
     // Restore original parameters so other backtests aren't affected
