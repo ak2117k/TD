@@ -126,19 +126,29 @@ export class PaperTradeService implements OnModuleInit {
       const positions = new Map<string, VirtualPosition>();
 
       for (const t of paperTrades) {
-        const isClosed =
-          t.status === 'CLOSED' && t.exitPrice != null && t.pnl != null;
-        if (isClosed) {
-          // A fully-closed trade's net cash effect is its realized P&L
-          // less the broker charges booked on its exit(s). `fees`
-          // accumulates ₹100 per close event — see applyExitAccounting.
+        // A trade is "still open" ONLY if its status is one of the open
+        // statuses the rest of the platform recognises (the same set
+        // TradeRepository.getOpenTrades() filters on). Every other status
+        // — CLOSED, CANCELLED, REJECTED, EXPIRED, … — is non-open and must
+        // NOT be re-hydrated as an open position. Before the fix the replay
+        // only excluded `status === 'CLOSED'`, so a trade carrying any
+        // other terminal status was wrongly rebuilt as a ghost open
+        // position, overstating deployedCapital.
+        const isOpen =
+          t.status === 'OPEN' || t.status === 'PARTIALLY_FILLED';
+
+        if (!isOpen) {
+          // A non-open trade's net cash effect is its realized P&L less the
+          // broker charges booked on its exit(s). `fees` accumulates ₹100
+          // per close event — see applyExitAccounting. CANCELLED/REJECTED
+          // trades carry pnl=null → net 0, a clean no-op.
           const net = (t.pnl ?? 0) - (t.fees ?? 0);
           bal += net;
           realized += net;
           continue;
         }
 
-        // OPEN / PENDING / PARTIALLY_FILLED — still an open position whose
+        // OPEN / PARTIALLY_FILLED — still an open position whose
         // `quantity` is the units that remain open.
         if (t.entryPrice == null || t.quantity <= 0) continue;
         const remainingValue = t.entryPrice * t.quantity;
@@ -298,8 +308,22 @@ export class PaperTradeService implements OnModuleInit {
    * ticks, and pending (deferred) profit awaiting the 18:00 settlement.
    * `equity = balance + deployed + unrealizedPnl + pendingProfit` is the
    * total mark-to-market account value.
+   *
+   * `deployedCapital` and `openPositions` are derived from the `Trade`
+   * table's open trades — the SAME source RiskManagerService.getDailyRiskStatus()
+   * uses (Σ entryPrice × quantity over status IN ['OPEN','PARTIALLY_FILLED']).
+   * The DB is the single source of truth, so the badge and the risk engine
+   * can never drift. (Before the fix this summed the in-memory
+   * `virtualPositions` map, which left ghost entries when a position closed
+   * mid-session via a path other than a netting SELL fill — overstating
+   * deployed capital and equity.)
+   *
+   * `unrealizedPnl` stays live (it is recomputed from market ticks by
+   * refreshOpenPositions / simulateTick), but is summed ONLY for positions
+   * that are still open in the DB — a stale entry in the in-memory map for
+   * an already-closed trade contributes nothing.
    */
-  getAccount(): {
+  async getAccount(): Promise<{
     startingCapital: number;
     balance: number;
     deployedCapital: number;
@@ -308,14 +332,35 @@ export class PaperTradeService implements OnModuleInit {
     equity: number;
     openPositions: number;
     epoch: string;
-  } {
-    const positions = Array.from(this.virtualPositions.values());
-    let deployed = 0;
+  }> {
+    // DB open trades — the authoritative open-position set.
+    const openTrades = await this.tradeRepository.getOpenTrades();
+    const deployed = openTrades.reduce(
+      (sum, t) => sum + (t.entryPrice ?? 0) * t.quantity,
+      0,
+    );
+    const openPositions = openTrades.length;
+
+    // Live unrealized P&L: only count in-memory positions that correspond
+    // to a still-open DB trade (keyed by symbol:exchange). Ghost positions
+    // — left in the map after a close — are excluded.
+    const openKeys = new Set(
+      openTrades
+        .map((t) => {
+          const inst = (t as any).instrument;
+          return inst?.symbol && inst?.exchange
+            ? `${inst.symbol}:${inst.exchange}`
+            : null;
+        })
+        .filter((k): k is string => k != null),
+    );
     let unrealized = 0;
-    for (const p of positions) {
-      deployed += p.averagePrice * p.quantity;
-      unrealized += p.pnl;
+    for (const [key, pos] of this.virtualPositions) {
+      if (openKeys.has(key)) {
+        unrealized += pos.pnl;
+      }
     }
+
     return {
       startingCapital: DEFAULT_VIRTUAL_CAPITAL,
       balance: this.virtualBalance,
@@ -324,7 +369,7 @@ export class PaperTradeService implements OnModuleInit {
       pendingProfit: this.pendingProfit,
       equity:
         this.virtualBalance + deployed + unrealized + this.pendingProfit,
-      openPositions: positions.length,
+      openPositions,
       epoch: PAPER_ACCOUNT_EPOCH.toISOString(),
     };
   }

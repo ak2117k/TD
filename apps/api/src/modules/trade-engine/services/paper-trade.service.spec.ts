@@ -7,6 +7,7 @@ import { OrderRequest } from '../../../common/interfaces/broker-adapter.interfac
 /** Stub repo for the service constructor — onModuleInit isn't called in these tests. */
 const mockTradeRepository = {
   findPaperTradesSince: jest.fn().mockResolvedValue([]),
+  getOpenTrades: jest.fn().mockResolvedValue([]),
 };
 
 /** Stub market feed — quote cache is empty unless a test overrides getQuote. */
@@ -179,14 +180,14 @@ describe('PaperTradeService.simulateOrder — position netting', () => {
     // Trailing stop fires: SELL 1000 @ 100.5 → cash +100,500 (realized +500)
     await service.simulateOrder(buildSell(1000, 100.5));
 
-    const acc = service.getAccount();
+    const acc = await service.getAccount();
     // Cash math (ignoring slippage): 2,000,000 - 200,000 + 101,000 + 100,500
     //   = 2,001,500. Slippage adds ±0.05% per fill — total worst case ~₹300.
     // The trade is profitable (closed +₹1,500 minus slippage costs), so we
     // bracket the result: noticeably above start, well under +₹2k.
     expect(acc.balance).toBeGreaterThan(2_000_500);
     expect(acc.balance).toBeLessThan(2_002_000);
-    // Position fully closed → deployed=0, openPositions=0
+    // Position fully closed → deployed=0, openPositions=0 (no open trades in DB)
     expect(acc.deployedCapital).toBe(0);
     expect(acc.openPositions).toBe(0);
     // Equity matches cash since no open positions remain.
@@ -215,18 +216,34 @@ describe('PaperTradeService.onModuleInit — balance + position rehydration', ()
   }
 
   it('rehydrates virtual positions from open trades so deployedCapital is restored', async () => {
-    const service = await buildWith([
+    const openTrades = [
       {
         status: 'OPEN', side: 'BUY', quantity: 10, entryPrice: 1000, pnl: null,
         instrument: { symbol: 'TCS-EQ', exchange: 'NSE' },
       },
-      {
-        status: 'CLOSED', side: 'BUY', quantity: 5, entryPrice: 100, exitPrice: 200,
-        pnl: 500, instrument: { symbol: 'INFY-EQ', exchange: 'NSE' },
-      },
-    ]);
+    ];
+    const repo = {
+      findPaperTradesSince: jest.fn().mockResolvedValue([
+        ...openTrades,
+        {
+          status: 'CLOSED', side: 'BUY', quantity: 5, entryPrice: 100, exitPrice: 200,
+          pnl: 500, instrument: { symbol: 'INFY-EQ', exchange: 'NSE' },
+        },
+      ]),
+      // getAccount() derives deployed/positions from the DB open trades.
+      getOpenTrades: jest.fn().mockResolvedValue(openTrades),
+    };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        PaperTradeService,
+        { provide: TradeRepository, useValue: repo },
+        { provide: MarketFeedService, useValue: mockMarketFeed },
+      ],
+    }).compile();
+    const service = module.get<PaperTradeService>(PaperTradeService);
+    await service.onModuleInit();
 
-    const acc = service.getAccount();
+    const acc = await service.getAccount();
     expect(acc.openPositions).toBe(1);
     expect(acc.deployedCapital).toBe(10_000); // 10 * 1000
     // balance = 20L - 10,000 (open BUY cost) + 500 (closed pnl)
@@ -234,14 +251,27 @@ describe('PaperTradeService.onModuleInit — balance + position rehydration', ()
   });
 
   it('rehydrates a PARTIALLY_FILLED trade as an open position of the remaining qty', async () => {
-    const service = await buildWith([
+    const openTrades = [
       {
         status: 'PARTIALLY_FILLED', side: 'BUY', quantity: 6, entryPrice: 1000, pnl: 120,
         instrument: { symbol: 'TCS-EQ', exchange: 'NSE' },
       },
-    ]);
+    ];
+    const repo = {
+      findPaperTradesSince: jest.fn().mockResolvedValue(openTrades),
+      getOpenTrades: jest.fn().mockResolvedValue(openTrades),
+    };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        PaperTradeService,
+        { provide: TradeRepository, useValue: repo },
+        { provide: MarketFeedService, useValue: mockMarketFeed },
+      ],
+    }).compile();
+    const service = module.get<PaperTradeService>(PaperTradeService);
+    await service.onModuleInit();
 
-    const acc = service.getAccount();
+    const acc = await service.getAccount();
     expect(acc.openPositions).toBe(1);
     expect(acc.deployedCapital).toBe(6_000); // 6 remaining * 1000
     // balance = 20L - 6,000 (remaining cost) + 120 (realized partial pnl)
@@ -288,24 +318,24 @@ describe('PaperTradeService.applyExitAccounting — broker charge + deferred pro
     service.resetVirtualPortfolio(2_000_000);
   });
 
-  it('a losing exit charges only the flat ₹100 brokerage and defers nothing', () => {
+  it('a losing exit charges only the flat ₹100 brokerage and defers nothing', async () => {
     const charge = service.applyExitAccounting(-5000);
     expect(charge).toBe(BROKER_CHARGE_PER_EXIT);
     expect(service.getVirtualBalance()).toBe(2_000_000 - 100);
-    expect(service.getAccount().pendingProfit).toBe(0);
+    expect((await service.getAccount()).pendingProfit).toBe(0);
   });
 
-  it('a winning exit withholds the profit — only base capital returns to cash', () => {
+  it('a winning exit withholds the profit — only base capital returns to cash', async () => {
     const charge = service.applyExitAccounting(8000);
     expect(charge).toBe(BROKER_CHARGE_PER_EXIT);
     // cash drops by profit + brokerage; the profit is parked, not spendable
     expect(service.getVirtualBalance()).toBe(2_000_000 - 8000 - 100);
-    expect(service.getAccount().pendingProfit).toBe(8000);
+    expect((await service.getAccount()).pendingProfit).toBe(8000);
   });
 
-  it('equity counts deferred profit, so a win lifts equity immediately (minus brokerage)', () => {
+  it('equity counts deferred profit, so a win lifts equity immediately (minus brokerage)', async () => {
     service.applyExitAccounting(8000);
-    const acc = service.getAccount();
+    const acc = await service.getAccount();
     expect(acc.equity).toBe(2_000_000 - 100);
     expect(acc.pendingProfit).toBe(8000);
   });
@@ -332,11 +362,11 @@ describe('PaperTradeService.settlePendingProfit — 18:00 IST after-hours settle
     service.resetVirtualPortfolio(2_000_000);
   });
 
-  it('sweeps accumulated deferred profit into the spendable cash balance', () => {
+  it('sweeps accumulated deferred profit into the spendable cash balance', async () => {
     service.applyExitAccounting(8000); // balance 1,991,900 · pending 8,000
     service.settlePendingProfit();
     expect(service.getVirtualBalance()).toBe(2_000_000 - 100); // profit credited back
-    expect(service.getAccount().pendingProfit).toBe(0);
+    expect((await service.getAccount()).pendingProfit).toBe(0);
   });
 
   it('is a no-op when there is no pending profit', () => {
@@ -346,11 +376,11 @@ describe('PaperTradeService.settlePendingProfit — 18:00 IST after-hours settle
     expect(service.getVirtualBalance()).toBe(balBefore);
   });
 
-  it('equity is unchanged by settlement — it only moves pending → cash', () => {
+  it('equity is unchanged by settlement — it only moves pending → cash', async () => {
     service.applyExitAccounting(8000);
-    const equityBefore = service.getAccount().equity;
+    const equityBefore = (await service.getAccount()).equity;
     service.settlePendingProfit();
-    expect(service.getAccount().equity).toBe(equityBefore);
+    expect((await service.getAccount()).equity).toBe(equityBefore);
   });
 });
 
@@ -359,17 +389,22 @@ describe('PaperTradeService.settlePendingProfit — 18:00 IST after-hours settle
  * polling the market-feed quote cache, independent of the tick stream.
  */
 describe('PaperTradeService.refreshOpenPositions — live equity refresher', () => {
-  async function buildWithFeed(feed: {
-    getQuote: jest.Mock;
-  }): Promise<PaperTradeService> {
+  async function buildWithFeed(
+    feed: { getQuote: jest.Mock },
+    openTrades: any[] = [],
+  ): Promise<PaperTradeService> {
+    const repo = {
+      findPaperTradesSince: jest.fn().mockResolvedValue([]),
+      getOpenTrades: jest.fn().mockResolvedValue(openTrades),
+    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PaperTradeService,
-        { provide: TradeRepository, useValue: mockTradeRepository },
+        { provide: TradeRepository, useValue: repo },
         { provide: MarketFeedService, useValue: feed },
       ],
     }).compile();
-    const service = module.get(PaperTradeService);
+    const service = module.get<PaperTradeService>(PaperTradeService);
     service.resetVirtualPortfolio(2_000_000);
     return service;
   }
@@ -381,7 +416,13 @@ describe('PaperTradeService.refreshOpenPositions — live equity refresher', () 
 
   it('updates each open position ltp/pnl from the market-feed quote cache', async () => {
     const feed = { getQuote: jest.fn(() => ({ ltp: 110 })) };
-    const service = await buildWithFeed(feed);
+    // The position is also open in the DB, so its live pnl counts toward equity.
+    const service = await buildWithFeed(feed, [
+      {
+        status: 'OPEN', side: 'BUY', quantity: 2000, entryPrice: 100,
+        instrument: { symbol: 'TCS-EQ', exchange: 'NSE' },
+      },
+    ]);
     await service.simulateOrder(buyOrder);
 
     service.refreshOpenPositions();
@@ -391,7 +432,7 @@ describe('PaperTradeService.refreshOpenPositions — live equity refresher', () 
     expect(pos.ltp).toBe(110);
     // pnl = (110 - ~100) * 2000 ≈ 20,000 (entry slippage only)
     expect(pos.pnl).toBeGreaterThan(19_000);
-    expect(service.getAccount().unrealizedPnl).toBeGreaterThan(19_000);
+    expect((await service.getAccount()).unrealizedPnl).toBeGreaterThan(19_000);
   });
 
   it('skips a position whose token has no cached quote, keeping its last value', async () => {
@@ -401,5 +442,170 @@ describe('PaperTradeService.refreshOpenPositions — live equity refresher', () 
 
     expect(() => service.refreshOpenPositions()).not.toThrow();
     expect(service.getVirtualPositions()[0].pnl).toBe(0);
+  });
+});
+
+/**
+ * Stale-state regression: getAccount() must derive deployedCapital and
+ * openPositions from the `Trade` table's open trades — the SAME source the
+ * risk manager uses — so the UI badge and the risk engine can never drift.
+ *
+ * Before the fix, getAccount() summed the in-memory `virtualPositions` map,
+ * which was hydrated once at startup and not always cleaned when a position
+ * closed mid-session via a path other than a netting SELL fill (e.g. the
+ * position manager closing the DB trade directly). Closed positions lingered
+ * as ghosts, overstating deployedCapital and equity.
+ */
+describe('PaperTradeService.getAccount — Trade table is the single source of truth', () => {
+  async function buildWith(
+    openTrades: any[],
+    feedQuote: ((token: string) => any) | null = null,
+  ): Promise<PaperTradeService> {
+    const repo = {
+      findPaperTradesSince: jest.fn().mockResolvedValue([]),
+      getOpenTrades: jest.fn().mockResolvedValue(openTrades),
+    };
+    const feed = { getQuote: jest.fn(feedQuote ?? (() => null)) };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        PaperTradeService,
+        { provide: TradeRepository, useValue: repo },
+        { provide: MarketFeedService, useValue: feed },
+      ],
+    }).compile();
+    const service = module.get<PaperTradeService>(PaperTradeService);
+    service.resetVirtualPortfolio(2_000_000);
+    return service;
+  }
+
+  it('deployedCapital and openPositions equal the summed entry value / count of DB open trades', async () => {
+    const service = await buildWith([
+      { status: 'OPEN', side: 'BUY', quantity: 10, entryPrice: 1000 }, // ₹10,000
+      { status: 'PARTIALLY_FILLED', side: 'SELL', quantity: 4, entryPrice: 250.5 }, // ₹1,002
+    ]);
+
+    const acc = await service.getAccount();
+
+    // Mirrors RiskManagerService.getDailyRiskStatus(): Σ entryPrice × qty.
+    expect(acc.deployedCapital).toBe(1000 * 10 + 250.5 * 4);
+    expect(acc.openPositions).toBe(2);
+  });
+
+  it('a position closed mid-session is NOT counted in deployedCapital / openPositions', async () => {
+    // Position opened — lives in the in-memory map AND in the DB open trades.
+    const service = await buildWith([
+      { status: 'OPEN', side: 'BUY', quantity: 2000, entryPrice: 100 },
+    ]);
+    await service.simulateOrder({
+      symbol: 'TCS-EQ', token: '11536', exchange: 'NSE', side: 'BUY',
+      orderType: 'MARKET', quantity: 2000, price: 100, positionType: 'INTRADAY',
+    });
+
+    const before = await service.getAccount();
+    expect(before.openPositions).toBe(1);
+    expect(before.deployedCapital).toBe(2000 * 100);
+
+    // The trade closes in the DB (status flips to CLOSED) but the in-memory
+    // virtualPositions map is NOT cleaned — a ghost lingers. getAccount()
+    // must still report deployed=0 because it reads the DB, not the map.
+    (service as any).tradeRepository.getOpenTrades.mockResolvedValue([]);
+
+    const after = await service.getAccount();
+    expect(after.openPositions).toBe(0);
+    expect(after.deployedCapital).toBe(0);
+    // …even though the ghost is still present in the in-memory map.
+    expect(service.getVirtualPositions().length).toBeGreaterThan(0);
+  });
+
+  it('unrealizedPnl counts only positions that are still open in the DB (ignores ghosts)', async () => {
+    // Two positions opened in the map; only TCS remains open in the DB.
+    const service = await buildWith(
+      [{ status: 'OPEN', side: 'BUY', quantity: 2000, entryPrice: 100,
+         instrument: { symbol: 'TCS-EQ', exchange: 'NSE' } }],
+      (token: string) => (token === '11536' ? { ltp: 110 } : { ltp: 500 }),
+    );
+    await service.simulateOrder({
+      symbol: 'TCS-EQ', token: '11536', exchange: 'NSE', side: 'BUY',
+      orderType: 'MARKET', quantity: 2000, price: 100, positionType: 'INTRADAY',
+    });
+    await service.simulateOrder({
+      symbol: 'INFY-EQ', token: '99999', exchange: 'NSE', side: 'BUY',
+      orderType: 'MARKET', quantity: 1000, price: 400, positionType: 'INTRADAY',
+    });
+    service.refreshOpenPositions();
+
+    const acc = await service.getAccount();
+    // Only TCS's live pnl (~+20,000) counts; the INFY ghost (+100,000) does not.
+    expect(acc.unrealizedPnl).toBeGreaterThan(19_000);
+    expect(acc.unrealizedPnl).toBeLessThan(25_000);
+    expect(acc.openPositions).toBe(1);
+  });
+});
+
+/**
+ * Startup-replay regression: a closed trade must NOT be re-hydrated as an
+ * open position regardless of its exact terminal status. The replay must
+ * treat only OPEN / PARTIALLY_FILLED as open — every other status
+ * (CLOSED, CANCELLED, REJECTED, EXPIRED, …) is a non-open trade.
+ */
+describe('PaperTradeService.onModuleInit — terminal-status replay safety', () => {
+  async function replayWith(trades: any[]): Promise<PaperTradeService> {
+    const repo = {
+      findPaperTradesSince: jest.fn().mockResolvedValue(trades),
+      getOpenTrades: jest.fn().mockResolvedValue(
+        trades.filter((t) => t.status === 'OPEN' || t.status === 'PARTIALLY_FILLED'),
+      ),
+    };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        PaperTradeService,
+        { provide: TradeRepository, useValue: repo },
+        { provide: MarketFeedService, useValue: mockMarketFeed },
+      ],
+    }).compile();
+    const service = module.get<PaperTradeService>(PaperTradeService);
+    await service.onModuleInit();
+    return service;
+  }
+
+  it('does not rehydrate a CANCELLED trade as an open position', async () => {
+    const service = await replayWith([
+      {
+        status: 'CANCELLED', side: 'BUY', quantity: 10, entryPrice: 1000,
+        instrument: { symbol: 'TCS-EQ', exchange: 'NSE' },
+      },
+    ]);
+    // A cancelled order never deployed capital — it must not appear as open.
+    expect(service.getVirtualPositions()).toHaveLength(0);
+    const acc = await service.getAccount();
+    expect(acc.openPositions).toBe(0);
+    expect(acc.deployedCapital).toBe(0);
+  });
+
+  it('does not rehydrate a REJECTED trade as an open position', async () => {
+    const service = await replayWith([
+      {
+        status: 'REJECTED', side: 'BUY', quantity: 5, entryPrice: 800,
+        instrument: { symbol: 'INFY-EQ', exchange: 'NSE' },
+      },
+    ]);
+    expect(service.getVirtualPositions()).toHaveLength(0);
+    expect((await service.getAccount()).openPositions).toBe(0);
+  });
+
+  it('still rehydrates genuine OPEN trades alongside non-open terminal ones', async () => {
+    const service = await replayWith([
+      {
+        status: 'OPEN', side: 'BUY', quantity: 10, entryPrice: 1000,
+        instrument: { symbol: 'TCS-EQ', exchange: 'NSE' },
+      },
+      {
+        status: 'EXPIRED', side: 'BUY', quantity: 7, entryPrice: 500,
+        instrument: { symbol: 'WIPRO-EQ', exchange: 'NSE' },
+      },
+    ]);
+    // Only the OPEN trade is a live position.
+    expect(service.getVirtualPositions()).toHaveLength(1);
+    expect(service.getVirtualPositions()[0].symbol).toBe('TCS-EQ');
   });
 });

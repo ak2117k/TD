@@ -17,6 +17,7 @@ import {
   MCX_CLOSE_HOUR,
   MCX_CLOSE_MINUTE,
 } from '@td/shared/constants';
+import { formatTradeRejection } from '../../../common/utils/trade-rejection-log';
 
 /**
  * Risk Manager Service
@@ -52,12 +53,18 @@ export class RiskManagerService {
   async validateTrade(request: ExecuteTradeDto): Promise<RiskValidation> {
     // 0. Kill switch — absolute first check, no exceptions
     if (this.killSwitchActive) {
+      const reason = `Kill switch active: ${this.killSwitchReason}`;
       this.logger.warn(
-        `Trade REJECTED — kill switch active: ${this.killSwitchReason}`,
+        formatTradeRejection({
+          symbol: request.symbol,
+          side: request.side,
+          stage: 'execution',
+          reason,
+        }),
       );
       return {
         allowed: false,
-        reason: `Kill switch active: ${this.killSwitchReason}`,
+        reason,
       };
     }
 
@@ -66,12 +73,14 @@ export class RiskManagerService {
     // 1. Max daily loss check
     const dailyLossCheck = await this.checkMaxDailyLoss(
       settings.maxDailyLoss,
+      request,
     );
     if (!dailyLossCheck.allowed) return dailyLossCheck;
 
     // 2. Max concurrent positions check
     const positionCheck = await this.checkMaxConcurrentPositions(
       settings.maxConcurrentPositions,
+      request,
     );
     if (!positionCheck.allowed) return positionCheck;
 
@@ -93,7 +102,7 @@ export class RiskManagerService {
 
     // 4. Market hours check
     if (settings.tradingHoursOnly) {
-      const hoursCheck = this.checkMarketHours(request.exchange);
+      const hoursCheck = this.checkMarketHours(request);
       if (!hoursCheck.allowed) return hoursCheck;
     }
 
@@ -186,6 +195,7 @@ export class RiskManagerService {
 
   private async checkMaxDailyLoss(
     maxDailyLoss: number,
+    request: ExecuteTradeDto,
   ): Promise<RiskValidation> {
     const realizedPnl = await this.tradeRepository.getDailyPnL(new Date());
     const totalDailyPnl = realizedPnl + this.currentUnrealizedPnl;
@@ -193,7 +203,14 @@ export class RiskManagerService {
     // If total P&L is negative and exceeds the max daily loss threshold
     if (totalDailyPnl < 0 && Math.abs(totalDailyPnl) >= maxDailyLoss) {
       const reason = `Max daily loss limit reached: loss=${Math.abs(totalDailyPnl).toFixed(2)}, limit=${maxDailyLoss}`;
-      this.logger.warn(`Trade REJECTED — ${reason}`);
+      this.logger.warn(
+        formatTradeRejection({
+          symbol: request.symbol,
+          side: request.side,
+          stage: 'execution',
+          reason,
+        }),
+      );
       return { allowed: false, reason };
     }
 
@@ -202,12 +219,20 @@ export class RiskManagerService {
 
   private async checkMaxConcurrentPositions(
     maxPositions: number,
+    request: ExecuteTradeDto,
   ): Promise<RiskValidation> {
     const openTrades = await this.tradeRepository.getOpenTrades();
 
     if (openTrades.length >= maxPositions) {
       const reason = `Max concurrent positions reached: ${openTrades.length}/${maxPositions}`;
-      this.logger.warn(`Trade REJECTED — ${reason}`);
+      this.logger.warn(
+        formatTradeRejection({
+          symbol: request.symbol,
+          side: request.side,
+          stage: 'execution',
+          reason,
+        }),
+      );
       return { allowed: false, reason };
     }
 
@@ -223,7 +248,14 @@ export class RiskManagerService {
 
     if (orderValue > maxCapital) {
       const reason = `Order value ${orderValue.toFixed(2)} exceeds max capital per trade: ${maxCapital}`;
-      this.logger.warn(`Trade REJECTED — ${reason}`);
+      this.logger.warn(
+        formatTradeRejection({
+          symbol: request.symbol,
+          side: request.side,
+          stage: 'execution',
+          reason,
+        }),
+      );
       return { allowed: false, reason };
     }
 
@@ -256,13 +288,21 @@ export class RiskManagerService {
       const reason =
         `Insufficient paper cash: need ₹${orderValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}, ` +
         `available ₹${available.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
-      this.logger.warn(`Trade REJECTED — ${reason}`);
+      this.logger.warn(
+        formatTradeRejection({
+          symbol: request.symbol,
+          side: request.side,
+          stage: 'execution',
+          reason,
+        }),
+      );
       return { allowed: false, reason };
     }
     return { allowed: true };
   }
 
-  private checkMarketHours(exchange: string): RiskValidation {
+  private checkMarketHours(request: ExecuteTradeDto): RiskValidation {
+    const exchange = request.exchange;
     const now = new Date();
     // Convert to IST (UTC+5:30)
     const istOffset = 5.5 * 60 * 60 * 1000;
@@ -284,7 +324,14 @@ export class RiskManagerService {
 
     if (timeInMinutes < openMinutes || timeInMinutes > closeMinutes) {
       const reason = `Outside trading hours for ${exchange}: current IST ${hours}:${String(minutes).padStart(2, '0')}, market ${Math.floor(openMinutes / 60)}:${String(openMinutes % 60).padStart(2, '0')}-${Math.floor(closeMinutes / 60)}:${String(closeMinutes % 60).padStart(2, '0')}`;
-      this.logger.warn(`Trade REJECTED — ${reason}`);
+      this.logger.warn(
+        formatTradeRejection({
+          symbol: request.symbol,
+          side: request.side,
+          stage: 'execution',
+          reason,
+        }),
+      );
       return { allowed: false, reason };
     }
 
@@ -305,7 +352,14 @@ export class RiskManagerService {
 
     if (duplicate) {
       const reason = `Duplicate position: already have an open ${request.side} position in ${request.symbol} on ${request.exchange}`;
-      this.logger.warn(`Trade REJECTED — ${reason}`);
+      this.logger.warn(
+        formatTradeRejection({
+          symbol: request.symbol,
+          side: request.side,
+          stage: 'execution',
+          reason,
+        }),
+      );
       return { allowed: false, reason };
     }
 
