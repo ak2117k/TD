@@ -6,6 +6,7 @@ import { AngelOneAdapterService } from '../../market-data/services/angel-one-ada
 import { NseSectorIndexService } from '../../market-data/services/nse-sector-index.service';
 import { WatchService, WatchCapExceededError } from '../../watch-monitor/services/watch.service';
 import { formatTradeRejection } from '../../../common/utils/trade-rejection-log';
+import { isWithinEntryWindow } from '../../../common/utils/market-hours';
 
 interface Hit {
   symbol: string;
@@ -27,11 +28,13 @@ type RejectKind = Exclude<
   'setup' | 'no-setup' | 'sector-misaligned' | 'mtf-misaligned' | 'macd-misaligned' | 'supertrend-misaligned'
 >;
 
-const REJECT_STAGE: Record<RejectKind, 'process' | 'scoring'> = {
+const REJECT_STAGE: Record<RejectKind, 'ingest' | 'process' | 'scoring'> = {
   unresolved: 'process',
   'no-direction': 'process',
   'scored-low': 'scoring',
   error: 'scoring',
+  // 15:00 IST entry cutoff — rejected before any processing/scoring work.
+  'market-closed': 'ingest',
 };
 
 const RATE_LIMIT_MS = 350;
@@ -101,6 +104,27 @@ export class ChartinkProcessService {
   }
 
   async processOne(alertId: string, hit: Hit, scanName?: string): Promise<void> {
+    // === 0. ENTRY-WINDOW GATE (15:00 IST cutoff) ===
+    // No new WATCHING entry may be opened after 15:00 IST (or before 09:15,
+    // or on a weekend). Reject BEFORE any symbol resolution / scoring / broker
+    // work so a late Chartink alert costs nothing. This gates OPENING only —
+    // the rescore loop and every exit path keep running until 15:30 / EOD.
+    if (!isWithinEntryWindow()) {
+      await this.rejectSetup(
+        {
+          alertId,
+          symbol: hit.symbol,
+          token: null,
+          hitPrice: hit.hitPrice,
+          kind: 'market-closed',
+          setupId: null,
+          rejectReason: 'outside entry window 09:15-15:00 IST',
+        },
+        { scan: scanName },
+      );
+      return;
+    }
+
     // === 1. Resolve symbol ===
     // Chartink sends bare symbols ("LLOYDSENGG"). Our local Instrument
     // table stores them with the NSE series suffix:

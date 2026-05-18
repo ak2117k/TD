@@ -9,6 +9,7 @@ import { WatchGateway } from '../gateways/watch.gateway';
 import { TradeExecutionService } from '../../trade-engine/services/trade-execution.service';
 import { DEFAULT_MAX_CAPITAL_PER_TRADE } from '@td/shared';
 import { formatTradeRejection } from '../../../common/utils/trade-rejection-log';
+import { isWithinEntryWindow } from '../../../common/utils/market-hours';
 
 export const WATCH_CAP = 50;
 
@@ -240,6 +241,25 @@ export class WatchService {
     if (!entry) throw new Error(`WatchEntry ${entryId} not found`);
     if (entry.status !== WatchStatus.WATCHING) {
       throw new Error(`Cannot execute on entry in status ${entry.status}`);
+    }
+
+    // 15:00 IST entry cutoff — defensive gate for the manual-execute path
+    // (POST /watch/:id/execute) and a backstop for auto-execute. No NEW
+    // position may be opened after 15:00 IST. We do NOT throw and we do NOT
+    // change status — the entry stays WATCHING (same outcome as a failed
+    // auto-execute) so existing rescore/exit handling is untouched. Open
+    // positions are still managed and squared off normally by the rescore
+    // loop and the exit paths, which run on their own 15:30/EOD schedule.
+    if (!isWithinEntryWindow()) {
+      this.logger.warn(
+        formatTradeRejection({
+          symbol: entry.symbol,
+          side: entry.side ?? undefined,
+          stage: 'execution',
+          reason: 'outside entry window 09:15-15:00 IST — entry stays WATCHING',
+        }),
+      );
+      return null;
     }
 
     const optionsLotSize = (entry as any).optionsLotSize ?? null;

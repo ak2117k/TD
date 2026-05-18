@@ -8,6 +8,7 @@ import { ChartinkScoringService } from '../chartink-scoring.service';
 import { AngelOneAdapterService } from '../../../market-data/services/angel-one-adapter.service';
 import { NseSectorIndexService } from '../../../market-data/services/nse-sector-index.service';
 import { WatchService, WatchCapExceededError } from '../../../watch-monitor/services/watch.service';
+import * as marketHours from '../../../../common/utils/market-hours';
 
 /** A 5-min-MACD score-check entry, for exercising the MACD entry gate. */
 const macd5mCheck = (passed: boolean) => ({
@@ -41,6 +42,10 @@ describe('ChartinkProcessService', () => {
   const UP_CANDLES = makeTrendingCloses('UP', 50).map((close) => ({ close, timestamp: new Date(), open: close, high: close, low: close, volume: 1000 }));
 
   beforeEach(async () => {
+    // Default: every test runs as if INSIDE the 09:15-15:00 IST entry window
+    // so the pipeline is exercised. The dedicated cutoff describe-block below
+    // overrides this with its own spy to test the closed-market path.
+    jest.spyOn(marketHours, 'isWithinEntryWindow').mockReturnValue(true);
     repo = { createAlertSetup: jest.fn().mockResolvedValue({ id: 'setup-row-1' }) };
     mdRepo = {
       getInstrumentBySymbol: jest.fn(),
@@ -77,6 +82,10 @@ describe('ChartinkProcessService', () => {
     }).compile();
 
     service = moduleRef.get(ChartinkProcessService);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
   });
 
   // ─── Step 1: Symbol resolution ─────────────────────────────────────────────
@@ -484,6 +493,64 @@ describe('ChartinkProcessService', () => {
       await service.processOne('alert-A', { symbol: 'INFY', hitPrice: 1800 });
 
       expect(watchSvc.createFromAlert).toHaveBeenCalled();
+    });
+  });
+
+  // ─── 15:00 IST entry cutoff (ingest gate) ─────────────────────────────────
+  // No new WATCHING entry may be created after 15:00 IST. When outside the
+  // entry window the stock is rejected with kind='market-closed' BEFORE any
+  // scoring or broker work — no symbol resolution, no scoring, no watch entry.
+
+  describe('15:00 IST entry cutoff', () => {
+    let windowSpy: jest.SpyInstance;
+
+    afterEach(() => {
+      windowSpy?.mockRestore();
+    });
+
+    it('rejects with kind=market-closed and skips scoring when outside the entry window', async () => {
+      windowSpy = jest.spyOn(marketHours, 'isWithinEntryWindow').mockReturnValue(false);
+      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', exchange: 'NSE' });
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
+        alertId: 'alert-1',
+        symbol: 'RELIANCE',
+        kind: 'market-closed',
+        rejectReason: expect.stringContaining('entry window 09:15-15:00 IST'),
+      }));
+      // No scoring, no watch entry, no symbol resolution work after the gate.
+      expect(scoring.score).not.toHaveBeenCalled();
+      expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
+    });
+
+    it('logs an ingest-stage [trade-rejected] line when outside the entry window', async () => {
+      windowSpy = jest.spyOn(marketHours, 'isWithinEntryWindow').mockReturnValue(false);
+      const logSpy = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 }, 'MY SCANNER');
+
+      const line = logSpy.mock.calls
+        .map((c) => String(c[0]))
+        .find((s) => s.startsWith('[trade-rejected]'));
+      expect(line).toBeDefined();
+      expect(line).toContain('RELIANCE');
+      expect(line).toContain('stage=ingest');
+      logSpy.mockRestore();
+    });
+
+    it('proceeds normally (scores + creates setup) when inside the entry window', async () => {
+      windowSpy = jest.spyOn(marketHours, 'isWithinEntryWindow').mockReturnValue(true);
+      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', exchange: 'NSE' });
+      mdRepo.getInstrumentByToken.mockResolvedValue({ id: 'sec-1', token: '99926019', exchange: 'NSE' });
+      angelOne.getHistoricalData.mockResolvedValue(UP_CANDLES);
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [macd5mCheck(true), supertrendCheck(true)] });
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      expect(scoring.score).toHaveBeenCalled();
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({ kind: 'setup' }));
     });
   });
 

@@ -9,6 +9,7 @@ import { LevelBookService } from '../../signal-generator/services/level-book.ser
 import { WatchGateway } from '../gateways/watch.gateway';
 import { TradeExecutionService } from '../../trade-engine/services/trade-execution.service';
 import { DEFAULT_MAX_CAPITAL_PER_TRADE } from '@td/shared';
+import * as marketHours from '../../../common/utils/market-hours';
 
 const mockTrade = { closeTrade: jest.fn().mockResolvedValue({}) };
 
@@ -21,6 +22,10 @@ describe('WatchService.createFromAlert', () => {
   let levelBook: any;
 
   beforeEach(async () => {
+    // Default: run as if INSIDE the 09:15-15:00 IST entry window so the
+    // auto-execute path is exercised. The executeEntry cutoff describe-block
+    // overrides this with its own spy to test the after-15:00 path.
+    jest.spyOn(marketHours, 'isWithinEntryWindow').mockReturnValue(true);
     repo = {
       findActiveBySetupId: jest.fn().mockResolvedValue(null),
       findActiveByToken: jest.fn().mockResolvedValue([]),
@@ -48,6 +53,10 @@ describe('WatchService.createFromAlert', () => {
       ],
     }).compile();
     svc = mod.get(WatchService);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
   });
 
   const baseInput = {
@@ -587,5 +596,80 @@ describe('WatchService.list — enrichment', () => {
     expect(repo.list).toHaveBeenCalledWith({ status: undefined, date: '2026-05-15' });
     expect(result[0]).toMatchObject({ id: 'w1', scannerName: 'Scanner X', realizedPnl: 4200 });
     expect(result[1]).toMatchObject({ id: 'w2', scannerName: null, realizedPnl: null });
+  });
+});
+
+describe('WatchService.executeEntry — 15:00 IST entry cutoff', () => {
+  let svc: WatchService;
+  let repo: any;
+  let trade: any;
+  let windowSpy: jest.SpyInstance;
+
+  const watchingEntry = {
+    id: 'w1', token: '11536', symbol: 'TCS-EQ', side: 'BUY',
+    status: 'WATCHING', initialPrice: 4000, initialBreakdown: { lotCount: 1 },
+    optionsToken: null, optionsLotSize: null, profitTarget: 4150,
+  };
+
+  async function build() {
+    repo = {
+      findById: jest.fn().mockResolvedValue(watchingEntry),
+      update: jest.fn().mockResolvedValue({}),
+    };
+    trade = { executeTrade: jest.fn().mockResolvedValue({ id: 'pt1', entryPrice: 4001 }) };
+    const mod = await Test.createTestingModule({
+      providers: [
+        WatchService,
+        { provide: WatchRepository, useValue: repo },
+        { provide: TargetCalculatorService, useValue: { compute: jest.fn() } },
+        { provide: StrikeSelectorService, useValue: { pick: jest.fn() } },
+        { provide: MarketFeedService, useValue: { subscribeForWatch: jest.fn() } },
+        { provide: LevelBookService, useValue: { getLevels: jest.fn() } },
+        { provide: WatchGateway, useValue: { emitTick: jest.fn() } },
+        { provide: TradeExecutionService, useValue: trade },
+      ],
+    }).compile();
+    svc = mod.get(WatchService);
+  }
+
+  beforeEach(build);
+
+  afterEach(() => {
+    windowSpy?.mockRestore();
+  });
+
+  it('refuses to execute and leaves the entry WATCHING when outside the entry window', async () => {
+    windowSpy = jest.spyOn(marketHours, 'isWithinEntryWindow').mockReturnValue(false);
+
+    const result = await svc.executeEntry('w1', { mode: 'paper' });
+
+    // No broker call, entry never marked TRADED, no throw.
+    expect(trade.executeTrade).not.toHaveBeenCalled();
+    expect(repo.update).not.toHaveBeenCalled();
+    expect(result).toBeNull();
+  });
+
+  it('logs a clear warning when refusing to execute outside the entry window', async () => {
+    windowSpy = jest.spyOn(marketHours, 'isWithinEntryWindow').mockReturnValue(false);
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+
+    await svc.executeEntry('w1', { mode: 'paper' });
+
+    const line = warn.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(line).toContain('TCS-EQ');
+    expect(line.toLowerCase()).toMatch(/entry window|15:00/);
+    warn.mockRestore();
+  });
+
+  it('executes normally and marks the entry TRADED when inside the entry window', async () => {
+    windowSpy = jest.spyOn(marketHours, 'isWithinEntryWindow').mockReturnValue(true);
+
+    const result = await svc.executeEntry('w1', { mode: 'paper' });
+
+    expect(trade.executeTrade).toHaveBeenCalled();
+    expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
+      status: 'TRADED',
+    }));
+    expect(result).toMatchObject({ id: 'pt1' });
   });
 });
