@@ -56,6 +56,23 @@ model Candle {
   @@map("candles")
 }
 
+/// Broad stock → NSE sector-index mapping. Populated daily by
+/// NseSectorIndexService from the NIFTY 500 constituent CSV (which carries
+/// an Industry column). Each row maps a bare trading symbol to its NSE
+/// `Industry` string and the resolved NIFTY sectoral-index token.
+/// `sectorIndexToken` is nullable: some industries (e.g. "Diversified")
+/// have no clean sector index, and we still persist the row so the lookup
+/// has a definitive answer instead of falling through to slow tiers.
+model StockSector {
+  symbol           String   @id
+  industry         String
+  sectorIndexToken String?
+  updatedAt        DateTime @updatedAt
+
+  @@index([sectorIndexToken])
+  @@map("stock_sectors")
+}
+
 model OISnapshot {
   id           String   @id @default(cuid())
   instrumentId String

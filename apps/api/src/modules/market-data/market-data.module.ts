@@ -7,6 +7,7 @@ import { MarketFeedService, BROKER_ADAPTER_TOKEN } from './services/market-feed.
 import { CandleAggregatorService } from './services/candle-aggregator.service';
 import { InstrumentService } from './services/instrument.service';
 import { MarketDataRepository } from './repositories/market-data.repository';
+import { StockSectorRepository } from './repositories/stock-sector.repository';
 import { OITrackerProcessor } from './workers/oi-tracker.processor';
 import { DailyBackfillWorker } from './workers/daily-backfill.worker';
 import { AngelOneAuthService } from './services/angel-one-auth.service';
@@ -55,6 +56,9 @@ import { OptionsChainModule } from '../options-chain/options-chain.module';
 
     // Repository (Prisma data access)
     MarketDataRepository,
+
+    // Broad stock → sector-index map persistence (NIFTY 500 universe).
+    StockSectorRepository,
 
     // Bull queue processor
     OITrackerProcessor,
