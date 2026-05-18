@@ -7,6 +7,7 @@ import { ChartinkRepository } from './repositories/chartink.repository';
 import { ChartinkIngestService } from './services/chartink-ingest.service';
 import { ChartinkProcessService } from './services/chartink-process.service';
 import { ChartinkScoringService } from './services/chartink-scoring.service';
+import { ChartinkRejectionsService } from './services/chartink-rejections.service';
 import { ChartinkProcessWorker } from './workers/chartink-process.worker';
 import { ChartinkWebhookController } from './controllers/chartink-webhook.controller';
 import { ChartinkController } from './controllers/chartink.controller';
@@ -30,6 +31,7 @@ import { ChartinkController } from './controllers/chartink.controller';
     ChartinkIngestService,
     ChartinkProcessService,
     ChartinkScoringService,
+    ChartinkRejectionsService,
     ChartinkProcessWorker,
   ],
   exports: [ChartinkRepository, ChartinkScoringService],

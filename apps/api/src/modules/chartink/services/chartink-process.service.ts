@@ -1,16 +1,38 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { ChartinkRepository } from '../repositories/chartink.repository';
+import { ChartinkRepository, CreateAlertSetupInput } from '../repositories/chartink.repository';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
-import { MtfAlignmentService } from '../../signal-generator/services/mtf-alignment.service';
 import { ChartinkScoringService, classifyTrend } from './chartink-scoring.service';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { NseSectorIndexService } from '../../market-data/services/nse-sector-index.service';
 import { WatchService, WatchCapExceededError } from '../../watch-monitor/services/watch.service';
+import { formatTradeRejection } from '../../../common/utils/trade-rejection-log';
 
 interface Hit {
   symbol: string;
   hitPrice: number;
 }
+
+/**
+ * Outcome kinds that mean "not traded". Each one maps to a pipeline stage for
+ * the [trade-rejected] log line. `setup` is the only non-rejection kind, so it
+ * never flows through {@link ChartinkProcessService.rejectSetup}.
+ *
+ * The pipeline is now pure score-based: the three misalignment-veto kinds
+ * (`mtf-misaligned`, `macd-misaligned`, `supertrend-misaligned`) are NEVER
+ * produced here — misalignment only lowers the 0-100 score — so they are
+ * excluded from {@link RejectKind}.
+ */
+type RejectKind = Exclude<
+  CreateAlertSetupInput['kind'],
+  'setup' | 'no-setup' | 'sector-misaligned' | 'mtf-misaligned' | 'macd-misaligned' | 'supertrend-misaligned'
+>;
+
+const REJECT_STAGE: Record<RejectKind, 'process' | 'scoring'> = {
+  unresolved: 'process',
+  'no-direction': 'process',
+  'scored-low': 'scoring',
+  error: 'scoring',
+};
 
 const RATE_LIMIT_MS = 350;
 
@@ -21,7 +43,6 @@ export class ChartinkProcessService {
   constructor(
     private readonly repo: ChartinkRepository,
     private readonly mdRepo: MarketDataRepository,
-    private readonly mtf: MtfAlignmentService,
     private readonly scoring: ChartinkScoringService,
     private readonly angelOne: AngelOneAdapterService,
     private readonly nseSector: NseSectorIndexService,
@@ -30,9 +51,21 @@ export class ChartinkProcessService {
 
   async processAlert(alertId: string, hits: Hit[]): Promise<void> {
     this.logger.log(`Processing Chartink alert ${alertId} — ${hits.length} hits`);
+    // Resolve the Chartink scanner name once so every [trade-rejected] line
+    // can show which scan the stock came from. Best-effort — a lookup failure
+    // must not block processing.
+    let scanName: string | undefined;
+    try {
+      const alert = await this.repo.getAlertWithSetups(alertId);
+      scanName = alert?.scanner?.scanName ?? undefined;
+    } catch (err) {
+      this.logger.warn(
+        `could not resolve scanner name for alert ${alertId}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
     for (let i = 0; i < hits.length; i++) {
       try {
-        await this.processOne(alertId, hits[i]);
+        await this.processOne(alertId, hits[i], scanName);
       } catch (err) {
         this.logger.warn(
           `processOne unexpected throw for ${hits[i].symbol}: ${err instanceof Error ? err.message : err}`,
@@ -42,7 +75,32 @@ export class ChartinkProcessService {
     }
   }
 
-  async processOne(alertId: string, hit: Hit): Promise<void> {
+  /**
+   * Persist a non-tradeable outcome AND emit the shared [trade-rejected] log
+   * line so the API terminal explains every stock that did not become a trade.
+   * Behaviour of the DB write is identical to a bare `repo.createAlertSetup`
+   * call — this only ADDS the console log.
+   */
+  private async rejectSetup(
+    input: CreateAlertSetupInput & { kind: RejectKind; rejectReason: string },
+    ctx: { scan?: string; side?: 'BUY' | 'SELL' },
+  ): Promise<void> {
+    await this.repo.createAlertSetup(input);
+    const line = formatTradeRejection({
+      symbol: input.symbol,
+      stage: REJECT_STAGE[input.kind],
+      reason: input.rejectReason,
+      scan: ctx.scan,
+      hitPrice: input.hitPrice,
+      side: ctx.side,
+      score: input.score ?? undefined,
+    });
+    // `error` is an abnormal outcome (scoring threw) — surface it as a warning.
+    if (input.kind === 'error') this.logger.warn(line);
+    else this.logger.log(line);
+  }
+
+  async processOne(alertId: string, hit: Hit, scanName?: string): Promise<void> {
     // === 1. Resolve symbol ===
     // Chartink sends bare symbols ("LLOYDSENGG"). Our local Instrument
     // table stores them with the NSE series suffix:
@@ -59,36 +117,22 @@ export class ChartinkProcessService {
       if (instrument) break;
     }
     if (!instrument) {
-      await this.repo.createAlertSetup({
-        alertId,
-        symbol: hit.symbol,
-        token: null,
-        hitPrice: hit.hitPrice,
-        kind: 'unresolved',
-        setupId: null,
-        rejectReason: `symbol not in local DB (tried ${SUFFIXES.map(s => s || 'bare').join(', ')})`,
-      });
+      await this.rejectSetup(
+        {
+          alertId,
+          symbol: hit.symbol,
+          token: null,
+          hitPrice: hit.hitPrice,
+          kind: 'unresolved',
+          setupId: null,
+          rejectReason: `symbol not in local DB (tried ${SUFFIXES.map(s => s || 'bare').join(', ')})`,
+        },
+        { scan: scanName },
+      );
       return;
     }
 
-    // === 2. MTF gate ===
-    // 4-TF directional agreement check before any deeper analysis.
-    // On misalignment we persist immediately and stop to save broker calls.
-    const mtf = await this.mtf.check(instrument.token, 'NSE');
-    if (!mtf.aligned) {
-      await this.repo.createAlertSetup({
-        alertId,
-        symbol: hit.symbol,
-        token: instrument.token,
-        hitPrice: hit.hitPrice,
-        kind: 'mtf-misaligned',
-        setupId: null,
-        rejectReason: `TF: ${mtf.summary}`,
-      });
-      return;
-    }
-
-    // === 3. DIRECTION GATE (sector trend, with stock-trend fallback) ===
+    // === 2. DIRECTION GATE (sector trend, with stock-trend fallback) ===
     // We prefer to derive side from the stock's sector index trend. If the
     // sector lookup or its data is unavailable for ANY reason, we fall back
     // to the stock's own 15m trend. Only when BOTH sources are unclear do we
@@ -130,6 +174,7 @@ export class ChartinkProcessService {
     }
 
     // Fall back to the stock's own 15m trend when the sector gate didn't yield a side.
+    let stockReason: string | null = null;
     if (!side) {
       directionSource = 'stock';
       try {
@@ -138,22 +183,29 @@ export class ChartinkProcessService {
           const stockTrend = classifyTrend(stockCloses);
           if (stockTrend === 'UP') side = 'BUY';
           else if (stockTrend === 'DOWN') side = 'SELL';
+          else stockReason = `stock 15m trend ${stockTrend ?? 'null'}`;
+        } else {
+          stockReason = `stock insufficient candles (${stockCloses.length})`;
         }
-      } catch {
-        // Swallow — the null check below records the combined failure.
+      } catch (err) {
+        // Don't swallow — capture the failure so the [trade-rejected] line explains it.
+        stockReason = `stock candle fetch failed: ${err instanceof Error ? err.message : err}`;
       }
     }
 
     if (!side) {
-      await this.repo.createAlertSetup({
-        alertId,
-        symbol: hit.symbol,
-        token: instrument.token,
-        hitPrice: hit.hitPrice,
-        kind: 'no-direction',
-        setupId: null,
-        rejectReason: `sector: ${sectorReason ?? 'unknown'}; stock trend also unclear`,
-      });
+      await this.rejectSetup(
+        {
+          alertId,
+          symbol: hit.symbol,
+          token: instrument.token,
+          hitPrice: hit.hitPrice,
+          kind: 'no-direction',
+          setupId: null,
+          rejectReason: `sector: ${sectorReason ?? 'unknown'}; stock trend also unclear (${stockReason ?? 'unknown'})`,
+        },
+        { scan: scanName },
+      );
       return;
     }
 
@@ -163,7 +215,7 @@ export class ChartinkProcessService {
       );
     }
 
-    // === 4. SCORING ===
+    // === 3. SCORING ===
     let scoringResult: Awaited<ReturnType<typeof this.scoring.score>>;
     try {
       scoringResult = await this.scoring.score({
@@ -175,60 +227,27 @@ export class ChartinkProcessService {
         setupContext: null,
       });
     } catch (err) {
-      await this.repo.createAlertSetup({
-        alertId,
-        symbol: hit.symbol,
-        token: instrument.token,
-        hitPrice: hit.hitPrice,
-        kind: 'error',
-        setupId: null,
-        rejectReason: err instanceof Error ? err.message : String(err),
-      });
+      await this.rejectSetup(
+        {
+          alertId,
+          symbol: hit.symbol,
+          token: instrument.token,
+          hitPrice: hit.hitPrice,
+          kind: 'error',
+          setupId: null,
+          rejectReason: err instanceof Error ? err.message : String(err),
+        },
+        { scan: scanName, side },
+      );
       return;
     }
 
-    // === 5. Persist + Stage 2 trigger ===
+    // === 4. Persist + Stage 2 trigger ===
+    // Pure score-based gate: score >= 60 → setup, score < 60 → scored-low.
+    // The 5m-MACD and SuperTrend checks remain SCORED factors inside
+    // ChartinkScoringService (they contribute points); they no longer veto
+    // an entry on their own — misalignment only lowers the total score.
     if (scoringResult.score >= 60) {
-      // 5-min MACD hard gate: an entry requires the 5-minute MACD aligned
-      // with the trade side, regardless of total score. Daily/1m MACD remain
-      // soft score contributors — only the 5m timeframe is mandatory.
-      const macd5m = scoringResult.checks.find((c) => c.name === 'MACD on 5m');
-      if (!macd5m || !macd5m.passed) {
-        await this.repo.createAlertSetup({
-          alertId,
-          symbol: hit.symbol,
-          token: instrument.token,
-          hitPrice: hit.hitPrice,
-          kind: 'macd-misaligned',
-          setupId: null,
-          rejectReason: `5m MACD not aligned with ${side} (score ${scoringResult.score})`,
-          score: scoringResult.score,
-          lotCount: scoringResult.lotCount,
-          scoreBreakdown: scoringResult.checks,
-        });
-        return;
-      }
-
-      // SuperTrend hard gate: an entry requires the SuperTrend match check
-      // to pass, regardless of total score. Mirrors the 5m MACD gate above —
-      // a misaligned (or absent) SuperTrend kills the entry outright.
-      const supertrend = scoringResult.checks.find((c) => c.name === 'SuperTrend match');
-      if (!supertrend || !supertrend.passed) {
-        await this.repo.createAlertSetup({
-          alertId,
-          symbol: hit.symbol,
-          token: instrument.token,
-          hitPrice: hit.hitPrice,
-          kind: 'supertrend-misaligned',
-          setupId: null,
-          rejectReason: `SuperTrend not aligned with ${side} (score ${scoringResult.score})`,
-          score: scoringResult.score,
-          lotCount: scoringResult.lotCount,
-          scoreBreakdown: scoringResult.checks,
-        });
-        return;
-      }
-
       const persistedSetup = await this.repo.createAlertSetup({
         alertId,
         symbol: hit.symbol,
@@ -265,18 +284,21 @@ export class ChartinkProcessService {
         }
       }
     } else {
-      await this.repo.createAlertSetup({
-        alertId,
-        symbol: hit.symbol,
-        token: instrument.token,
-        hitPrice: hit.hitPrice,
-        kind: 'scored-low',
-        setupId: null,
-        rejectReason: `score ${scoringResult.score} below 60`,
-        score: scoringResult.score,
-        lotCount: scoringResult.lotCount,
-        scoreBreakdown: scoringResult.checks,
-      });
+      await this.rejectSetup(
+        {
+          alertId,
+          symbol: hit.symbol,
+          token: instrument.token,
+          hitPrice: hit.hitPrice,
+          kind: 'scored-low',
+          setupId: null,
+          rejectReason: `score ${scoringResult.score} below 60`,
+          score: scoringResult.score,
+          lotCount: scoringResult.lotCount,
+          scoreBreakdown: scoringResult.checks,
+        },
+        { scan: scanName, side },
+      );
     }
   }
 

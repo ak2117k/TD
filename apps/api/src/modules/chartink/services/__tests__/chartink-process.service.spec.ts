@@ -1,4 +1,5 @@
 import { Test } from '@nestjs/testing';
+import { Logger } from '@nestjs/common';
 import { ChartinkProcessService } from '../chartink-process.service';
 import { ChartinkRepository } from '../../repositories/chartink.repository';
 import { MarketDataRepository } from '../../../market-data/repositories/market-data.repository';
@@ -94,21 +95,44 @@ describe('ChartinkProcessService', () => {
       setupId: null,
       rejectReason: 'symbol not in local DB (tried bare, -EQ, -BE, -BL, -IV)',
     });
-    expect(mtf.check).not.toHaveBeenCalled();
   });
 
-  it('does NOT call MTF when symbol fails to resolve', async () => {
+  it('does NOT proceed to scoring when symbol fails to resolve', async () => {
     mdRepo.getInstrumentBySymbol.mockResolvedValue(null);
     await service.processOne('alert-1', { symbol: 'UNKNOWN', hitPrice: 100 });
-    expect(mtf.check).not.toHaveBeenCalled();
+    expect(scoring.score).not.toHaveBeenCalled();
     expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({ kind: 'unresolved' }));
   });
 
-  // ─── Step 2: MTF gate ──────────────────────────────────────────────────────
+  // ─── Step 2: MTF no longer gates ───────────────────────────────────────────
+  // The pure score-based pipeline removed the MTF alignment pre-screen. MTF
+  // misalignment must NOT cause an early reject — the stock proceeds straight
+  // to direction-resolution and scoring. The mtf-misaligned kind is never
+  // produced anywhere anymore.
 
-  describe('MTF gate', () => {
-    it('persists mtf-misaligned and stops when TFs disagree', async () => {
+  describe('MTF no longer gates the pipeline', () => {
+    it('proceeds to scoring (and becomes a setup) even when MTF would be misaligned', async () => {
       mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', exchange: 'NSE' });
+      mdRepo.getInstrumentByToken.mockResolvedValue({ id: 'sec-1', token: '99926019', exchange: 'NSE' });
+      // Even if an MTF check were run, it would say "misaligned" — must not matter.
+      mtf.check.mockResolvedValue({
+        aligned: false,
+        agreedDirection: null,
+        directions: { '1d': 'UP', '1h': 'UP', '15m': 'DOWN', '5m': 'UP' },
+        summary: '1d=UP 1h=UP 15m=DOWN 5m=UP',
+      });
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [macd5mCheck(true), supertrendCheck(true)] });
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      // Pipeline reached scoring and produced a setup — no early MTF reject.
+      expect(scoring.score).toHaveBeenCalled();
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({ kind: 'setup' }));
+    });
+
+    it('never produces kind=mtf-misaligned', async () => {
+      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', exchange: 'NSE' });
+      mdRepo.getInstrumentByToken.mockResolvedValue({ id: 'sec-1', token: '99926019', exchange: 'NSE' });
       mtf.check.mockResolvedValue({
         aligned: false,
         agreedDirection: null,
@@ -118,16 +142,8 @@ describe('ChartinkProcessService', () => {
 
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
 
-      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
-        alertId: 'alert-1',
-        symbol: 'RELIANCE',
-        token: '2885',
-        hitPrice: 2885,
-        kind: 'mtf-misaligned',
-        rejectReason: expect.stringContaining('1d=UP 1h=UP 15m=DOWN 5m=UP'),
-      }));
-      // Must not proceed to sector gate
-      expect(nseSector.getSectorIndexForSymbol).not.toHaveBeenCalled();
+      const kinds = repo.createAlertSetup.mock.calls.map((c) => c[0].kind);
+      expect(kinds).not.toContain('mtf-misaligned');
     });
   });
 
@@ -345,7 +361,12 @@ describe('ChartinkProcessService', () => {
       });
     });
 
-    it('rejects with kind=macd-misaligned when the 5m MACD is not aligned, even at score >= 60', async () => {
+    // ─── Pure score-based: MACD-5m and SuperTrend no longer veto ────────────
+    // These two checks remain SCORED factors inside ChartinkScoringService —
+    // they contribute points — but a failing/absent check no longer kills an
+    // entry. As long as the total score reaches 60 the stock becomes a setup.
+
+    it('becomes a setup when the 5m MACD check FAILS but score is still >= 60', async () => {
       scoring.score.mockResolvedValue({
         score: 80, lotCount: 3, checks: [macd5mCheck(false), supertrendCheck(true)],
       });
@@ -353,15 +374,44 @@ describe('ChartinkProcessService', () => {
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
 
       expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
-        kind: 'macd-misaligned',
+        kind: 'setup',
         score: 80,
       }));
-      expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
+      expect(watchSvc.createFromAlert).toHaveBeenCalled();
     });
 
-    it('proceeds to kind=setup when the 5m MACD is aligned and score >= 60', async () => {
+    it('becomes a setup when the SuperTrend check FAILS but score is still >= 60', async () => {
       scoring.score.mockResolvedValue({
-        score: 70, lotCount: 2, checks: [macd5mCheck(true), supertrendCheck(true)],
+        score: 80, lotCount: 3, checks: [macd5mCheck(true), supertrendCheck(false)],
+      });
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'setup',
+        score: 80,
+        lotCount: 3,
+      }));
+      expect(watchSvc.createFromAlert).toHaveBeenCalled();
+    });
+
+    it('becomes a setup when the SuperTrend check is missing entirely but score is >= 60', async () => {
+      scoring.score.mockResolvedValue({
+        score: 75, lotCount: 2, checks: [macd5mCheck(true)],
+      });
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'setup',
+        score: 75,
+      }));
+      expect(watchSvc.createFromAlert).toHaveBeenCalled();
+    });
+
+    it('becomes a setup when BOTH the 5m MACD and SuperTrend checks fail but score is >= 60', async () => {
+      scoring.score.mockResolvedValue({
+        score: 65, lotCount: 1, checks: [macd5mCheck(false), supertrendCheck(false)],
       });
 
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
@@ -370,34 +420,30 @@ describe('ChartinkProcessService', () => {
       expect(watchSvc.createFromAlert).toHaveBeenCalled();
     });
 
-    it('rejects with kind=supertrend-misaligned when the SuperTrend check did not pass, even at score >= 60', async () => {
+    it('still rejects as scored-low when the 5m MACD passes but the total score is < 60', async () => {
       scoring.score.mockResolvedValue({
-        score: 80, lotCount: 3, checks: [macd5mCheck(true), supertrendCheck(false)],
+        score: 45, lotCount: 0, checks: [macd5mCheck(true), supertrendCheck(true)],
       });
 
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
 
       expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
-        kind: 'supertrend-misaligned',
-        score: 80,
-        lotCount: 3,
-        scoreBreakdown: expect.any(Array),
+        kind: 'scored-low',
+        rejectReason: 'score 45 below 60',
       }));
       expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
     });
 
-    it('rejects with kind=supertrend-misaligned when the SuperTrend check is missing entirely', async () => {
+    it('never produces kind=macd-misaligned or kind=supertrend-misaligned', async () => {
       scoring.score.mockResolvedValue({
-        score: 75, lotCount: 2, checks: [macd5mCheck(true)],
+        score: 80, lotCount: 3, checks: [macd5mCheck(false), supertrendCheck(false)],
       });
 
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
 
-      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
-        kind: 'supertrend-misaligned',
-        score: 75,
-      }));
-      expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
+      const kinds = repo.createAlertSetup.mock.calls.map((c) => c[0].kind);
+      expect(kinds).not.toContain('macd-misaligned');
+      expect(kinds).not.toContain('supertrend-misaligned');
     });
   });
 
@@ -438,6 +484,103 @@ describe('ChartinkProcessService', () => {
       await service.processOne('alert-A', { symbol: 'INFY', hitPrice: 1800 });
 
       expect(watchSvc.createFromAlert).toHaveBeenCalled();
+    });
+  });
+
+  // ─── "Why was this not traded" rejection logging ──────────────────────────
+
+  describe('rejection logging', () => {
+    let logSpy: jest.SpyInstance;
+    let warnSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      logSpy = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+      warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    });
+
+    afterEach(() => {
+      logSpy.mockRestore();
+      warnSpy.mockRestore();
+    });
+
+    it('logs a [trade-rejected] line for unresolved symbols (process stage)', async () => {
+      mdRepo.getInstrumentBySymbol.mockResolvedValue(null);
+
+      await service.processOne('alert-1', { symbol: 'UNKNOWN', hitPrice: 100 }, 'MY SCANNER');
+
+      expect(logSpy).toHaveBeenCalledWith(
+        '[trade-rejected] UNKNOWN | scan="MY SCANNER" hit=100 | stage=process reason="symbol not in local DB (tried bare, -EQ, -BE, -BL, -IV)"',
+      );
+    });
+
+    it('logs a [trade-rejected] line for no-direction (process stage)', async () => {
+      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', exchange: 'NSE' });
+      mdRepo.getInstrumentByToken.mockResolvedValue({ id: 'sec-1', token: '99926019', exchange: 'NSE' });
+      // Both sector and stock trend INDETERMINATE → no-direction.
+      const flatCandles = Array.from({ length: 50 }, () => ({
+        close: 100, timestamp: new Date(), open: 100, high: 100, low: 100, volume: 1,
+      }));
+      angelOne.getHistoricalData.mockResolvedValue(flatCandles);
+
+      await service.processOne('alert-1', { symbol: 'GESHIP', hitPrice: 1664 }, 'ANAND HIGH GAINER');
+
+      const noDirCall = logSpy.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0].includes('[trade-rejected] GESHIP') && c[0].includes('stage=process'),
+      );
+      expect(noDirCall).toBeDefined();
+    });
+
+    it('logs a [trade-rejected] line for scored-low with side and score (scoring stage)', async () => {
+      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', exchange: 'NSE' });
+      mdRepo.getInstrumentByToken.mockResolvedValue({ id: 'sec-1', token: '99926019', exchange: 'NSE' });
+      angelOne.getHistoricalData.mockResolvedValue(UP_CANDLES);
+      scoring.score.mockResolvedValue({ score: 40, lotCount: 0, checks: [] });
+
+      await service.processOne('alert-1', { symbol: 'RAYMOND', hitPrice: 496.6 }, 'ANAND HIGH GAINER');
+
+      expect(logSpy).toHaveBeenCalledWith(
+        '[trade-rejected] RAYMOND | scan="ANAND HIGH GAINER" hit=496.6 side=BUY score=40 | stage=scoring reason="score 40 below 60"',
+      );
+    });
+
+    it('uses logger.warn (not log) for the error kind', async () => {
+      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', exchange: 'NSE' });
+      mdRepo.getInstrumentByToken.mockResolvedValue({ id: 'sec-1', token: '99926019', exchange: 'NSE' });
+      angelOne.getHistoricalData.mockResolvedValue(UP_CANDLES);
+      scoring.score.mockRejectedValue(new Error('indicator crash'));
+
+      await service.processOne('alert-1', { symbol: 'TCS', hitPrice: 3500 }, 'ANAND HIGH GAINER');
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[trade-rejected] TCS | scan="ANAND HIGH GAINER" hit=3500 side=BUY | stage=scoring reason="indicator crash"',
+      );
+    });
+
+    it('omits the scan ctx field when no scan name is supplied', async () => {
+      mdRepo.getInstrumentBySymbol.mockResolvedValue(null);
+
+      await service.processOne('alert-1', { symbol: 'UNKNOWN', hitPrice: 100 });
+
+      expect(logSpy).toHaveBeenCalledWith(
+        '[trade-rejected] UNKNOWN | hit=100 | stage=process reason="symbol not in local DB (tried bare, -EQ, -BE, -BL, -IV)"',
+      );
+    });
+
+    it('captures the stock-trend fallback failure text into the no-direction log line', async () => {
+      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', exchange: 'NSE' });
+      mdRepo.getInstrumentByToken.mockResolvedValue({ id: 'sec-1', token: '99926019', exchange: 'NSE' });
+      // sector fetch fails, stock fallback fetch also throws — must not be swallowed silently
+      angelOne.getHistoricalData
+        .mockRejectedValueOnce(new Error('sector down'))
+        .mockRejectedValueOnce(new Error('stock fetch boom'));
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 100 }, 'ANAND HIGH GAINER');
+
+      const noDirCall = logSpy.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0].includes('[trade-rejected]') && c[0].includes('stage=process'),
+      );
+      expect(noDirCall).toBeDefined();
+      expect(noDirCall![0]).toContain('stock fetch boom');
     });
   });
 });

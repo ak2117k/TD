@@ -114,6 +114,46 @@ export class ChartinkRepository {
     });
   }
 
+  /**
+   * Fetch ChartinkAlertSetup rows whose processedAt falls inside [from, to],
+   * optionally filtered by `kind`, joined to the scanner (via alert) so the
+   * scanner name is available. Ordered processedAt desc, capped at `limit`.
+   */
+  async findAlertSetupsInRange(params: {
+    from: Date;
+    to: Date;
+    kind?: string;
+    limit: number;
+  }) {
+    return this.prisma.chartinkAlertSetup.findMany({
+      where: {
+        processedAt: { gte: params.from, lte: params.to },
+        ...(params.kind ? { kind: params.kind } : {}),
+      },
+      orderBy: { processedAt: 'desc' },
+      take: params.limit,
+      include: {
+        alert: {
+          select: { scanner: { select: { scanName: true } } },
+        },
+      },
+    });
+  }
+
+  /**
+   * Count ChartinkAlertSetup rows grouped by `kind` within [from, to].
+   * Used to compute totalProcessed / accepted / rejected / byKind.
+   */
+  async countAlertSetupsByKind(params: { from: Date; to: Date }) {
+    return this.prisma.chartinkAlertSetup.groupBy({
+      by: ['kind'],
+      where: {
+        processedAt: { gte: params.from, lte: params.to },
+      },
+      _count: { _all: true },
+    });
+  }
+
   async findChartinkSourceForSetup(setupId: string) {
     const row = await this.prisma.chartinkAlertSetup.findFirst({
       where: { setupId },

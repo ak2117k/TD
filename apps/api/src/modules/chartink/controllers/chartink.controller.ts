@@ -1,13 +1,36 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, NotFoundException, Param, Post, Query } from '@nestjs/common';
 import { ChartinkRepository } from '../repositories/chartink.repository';
 import { ChartinkScoringService, type SetupSide } from '../services/chartink-scoring.service';
+import { ChartinkRejectionsService } from '../services/chartink-rejections.service';
 
 @Controller('api/chartink')
 export class ChartinkController {
   constructor(
     private readonly repo: ChartinkRepository,
     private readonly scoring: ChartinkScoringService,
+    private readonly rejections: ChartinkRejectionsService,
   ) {}
+
+  /**
+   * Surfaces Chartink alert setups that did not result in a trade, with
+   * aggregate counts by rejection kind. All query params optional:
+   * `from` (ISO), `to` (ISO), `kind` (string), `limit` (number).
+   */
+  @Get('rejections')
+  async getRejections(
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('kind') kind?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const parsedLimit = limit != null ? parseInt(limit, 10) : undefined;
+    return this.rejections.getRejections({
+      from: from || undefined,
+      to: to || undefined,
+      kind: kind || undefined,
+      limit: parsedLimit != null && !Number.isNaN(parsedLimit) ? parsedLimit : undefined,
+    });
+  }
 
   @Get('scanners')
   async listScanners() {
