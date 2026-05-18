@@ -8,6 +8,7 @@ import { LevelBookService } from '../../signal-generator/services/level-book.ser
 import { WatchGateway } from '../gateways/watch.gateway';
 import { TradeExecutionService } from '../../trade-engine/services/trade-execution.service';
 import { DEFAULT_MAX_CAPITAL_PER_TRADE } from '@td/shared';
+import { formatTradeRejection } from '../../../common/utils/trade-rejection-log';
 
 export const WATCH_CAP = 50;
 
@@ -21,6 +22,11 @@ const TRAILING_STOP_PCT = 0.005;
 
 /** Fraction of position to exit at the partial-exit threshold. (Unchanged.) */
 const PARTIAL_EXIT_FRACTION = 0.5;
+
+/** Hard ₹ open-loss cut: a TRADED entry whose unrealized loss reaches this is
+ *  closed immediately on the tick — ~0.5% on a ~₹2L position, deliberately
+ *  tight. Retune by editing this single line. */
+const HARD_LOSS_CUT_RUPEES = 1000;
 
 /** Maximum ₹ deployed per trade. Determines share quantity:
  *  qty = floor(MAX_INVESTMENT_PER_TRADE / referencePrice).
@@ -116,6 +122,14 @@ export class WatchService {
 
     const active = await this.repo.countActive();
     if (active >= WATCH_CAP) {
+      this.logger.warn(
+        formatTradeRejection({
+          symbol: input.symbol,
+          side: input.side,
+          stage: 'watch',
+          reason: `Watch entry cap exceeded: ${active}/${WATCH_CAP} active`,
+        }),
+      );
       throw new WatchCapExceededError(active);
     }
 
@@ -192,7 +206,12 @@ export class WatchService {
       return updated ?? entry;
     } catch (err) {
       this.logger.warn(
-        `Auto-execute failed for ${entry.symbol} (entry stays WATCHING for manual retry): ${err instanceof Error ? err.message : err}`,
+        formatTradeRejection({
+          symbol: entry.symbol ?? input.symbol,
+          side: entry.side ?? input.side,
+          stage: 'execution',
+          reason: `Auto-execute failed (entry stays WATCHING for manual retry): ${err instanceof Error ? err.message : err}`,
+        }),
       );
       return entry;
     }
@@ -355,6 +374,19 @@ export class WatchService {
       return;
     }
 
+    // Hard loss-cut: any TRADED entry whose open loss reaches ₹1,000 is cut
+    // immediately. This is a price-based stop — a real, hard fact — so it
+    // fires regardless of the 10-minute score-decay grace window, and before
+    // the partial-exit / trailing-stop logic so a loss is never left to ride.
+    // Only the target-hit check above is allowed to win first (a profit exit).
+    if (entry.status === 'TRADED') {
+      const openPnl = this.computeOpenPnl(entry, ltp);
+      if (openPnl <= -HARD_LOSS_CUT_RUPEES) {
+        await this.transitionLossCut(entry.id, ltp, openPnl);
+        return;
+      }
+    }
+
     // Partial-exit + trailing-stop apply ONLY to TRADED equity entries.
     // Options positions skip this (50% of a lot is fractional). The
     // existing target-hit check above is allowed to fire first — if
@@ -421,6 +453,39 @@ export class WatchService {
       status: WatchStatus.STOPPED,
       closedAt: new Date(),
       closedReason: `sl-${cause}`,
+    });
+    await this.unsubscribeEntry(entryId);
+  }
+
+  /**
+   * Hard loss-cut exit: a TRADED entry's open loss reached ₹1,000 on a tick.
+   * Mirrors transitionStopped but is price-driven, not score-driven — it
+   * writes an SL_HIT_PRICE event (the existing WatchEventType for a
+   * price-based stop), closes the linked trade so cash is returned, and
+   * marks the entry STOPPED with closedReason 'loss-cut'.
+   */
+  async transitionLossCut(
+    entryId: string,
+    exitPrice: number,
+    openPnl: number,
+  ): Promise<void> {
+    const entry = await this.repo.findById(entryId);
+    this.logger.warn(
+      `Hard loss-cut: ${entry?.symbol ?? entryId} exited at ₹${exitPrice.toFixed(2)} ` +
+        `— open loss ₹${Math.abs(openPnl).toFixed(0)} (≥ ₹${HARD_LOSS_CUT_RUPEES} threshold)`,
+    );
+    await this.repo.createEvent({
+      watchEntryId: entryId,
+      eventType: WatchEventType.SL_HIT_PRICE,
+      price: exitPrice,
+      notes: `cause:loss-cut loss:${Math.abs(openPnl).toFixed(0)}`,
+    });
+    // Close the linked trade so deployed capital is returned to cash.
+    await this.closeLinkedTrade(entry, 'sl-loss-cut');
+    await this.repo.update(entryId, {
+      status: WatchStatus.STOPPED,
+      closedAt: new Date(),
+      closedReason: 'loss-cut',
     });
     await this.unsubscribeEntry(entryId);
   }
@@ -558,6 +623,23 @@ export class WatchService {
   // ============================================
   // Partial-exit + trailing-stop helpers
   // ============================================
+
+  /**
+   * Open (unrealized) ₹ P&L for an entry at a given price. This is the SAME
+   * computation the /watch UI shows in its P&L column (web util watchPnl.ts
+   * `profitView`) and that `checkPartialExitTrigger` sizes against:
+   *   ref = executedPrice ?? initialPrice
+   *   qty = floor(MAX_INVESTMENT_PER_TRADE / ref)
+   *   pnl = (ltp - ref) × sideMul × qty   (sideMul = +1 BUY, -1 SELL)
+   * Reused here so the loss-cut threshold matches the displayed P&L exactly.
+   */
+  private computeOpenPnl(entry: any, ltp: number): number {
+    const ref = entry.executedPrice ?? entry.initialPrice;
+    if (!ref || ref <= 0) return 0;
+    const sideMul = entry.side === 'BUY' ? 1 : -1;
+    const qty = Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(ref, 1)));
+    return (ltp - ref) * sideMul * qty;
+  }
 
   /**
    * Phase 1 check: TRADED entry hasn't done partial exit yet. If price has

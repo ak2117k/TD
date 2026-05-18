@@ -1,4 +1,5 @@
 import { Test } from '@nestjs/testing';
+import { Logger } from '@nestjs/common';
 import { WatchService, WatchCapExceededError } from './watch.service';
 import { WatchRepository } from '../repositories/watch.repository';
 import { TargetCalculatorService } from './target-calculator.service';
@@ -59,6 +60,50 @@ describe('WatchService.createFromAlert', () => {
     repo.countActive.mockResolvedValue(50);
     await expect(svc.createFromAlert(baseInput)).rejects.toBeInstanceOf(WatchCapExceededError);
     expect(repo.createEntry).not.toHaveBeenCalled();
+  });
+
+  it('emits a [trade-rejected] line when the watch cap is exceeded', async () => {
+    repo.countActive.mockResolvedValue(50);
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+
+    await expect(svc.createFromAlert(baseInput)).rejects.toBeInstanceOf(
+      WatchCapExceededError,
+    );
+
+    const line = warn.mock.calls
+      .map((c) => String(c[0]))
+      .find((s) => s.startsWith('[trade-rejected]'));
+    expect(line).toBeDefined();
+    expect(line).toContain('TCS-EQ');
+    expect(line).toContain('stage=watch');
+    expect(line).toContain('side=BUY');
+    expect(line).toMatch(/reason="Watch entry cap exceeded/);
+    warn.mockRestore();
+  });
+
+  it('emits a [trade-rejected] line when auto-execute fails', async () => {
+    repo.findById = jest.fn().mockResolvedValue({
+      id: 'w1', token: '11536', symbol: 'TCS-EQ', side: 'BUY',
+      status: 'WATCHING', initialPrice: 4000, initialBreakdown: { lotCount: 1 },
+      optionsToken: null, optionsLotSize: null,
+    });
+    repo.update = jest.fn().mockResolvedValue({});
+    mockTrade.executeTrade = jest.fn().mockRejectedValue(
+      new Error('Insufficient paper cash: need ₹20,00,000, available ₹0'),
+    );
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+
+    await svc.createFromAlert(baseInput);
+
+    const line = warn.mock.calls
+      .map((c) => String(c[0]))
+      .find((s) => s.startsWith('[trade-rejected]'));
+    expect(line).toBeDefined();
+    expect(line).toContain('TCS-EQ');
+    expect(line).toContain('stage=execution');
+    expect(line).toContain('side=BUY');
+    expect(line).toMatch(/reason="Auto-execute failed/);
+    warn.mockRestore();
   });
 
   it('returns existing entry on duplicate setupId (idempotent)', async () => {
@@ -392,6 +437,124 @@ describe('WatchService — exits close the linked paper trade', () => {
   it('transitionStopped closes the linked trade so cash is returned', async () => {
     await svc.transitionStopped('w1', 55, 'score-decay');
     expect(mockTrade.closeTrade).toHaveBeenCalledWith('pt-1', expect.anything());
+  });
+});
+
+describe('WatchService.onTick — hard loss-cut', () => {
+  // Reference price ₹2000 → qty = floor(200_000 / 2000) = 100 shares.
+  // So a ₹1,000 loss = ₹10/share adverse move (₹2000 → ₹1990 for a BUY).
+  let svc: WatchService;
+  let repo: any;
+  let feed: any;
+  let gateway: any;
+
+  beforeEach(async () => {
+    repo = {
+      findActiveByToken: jest.fn(),
+      findById: jest.fn().mockResolvedValue({
+        id: 'w1', token: '11536', symbol: 'TCS-EQ', status: 'TRADED',
+        optionsToken: null, paperTradeId: 'pt-1',
+      }),
+      createEvent: jest.fn().mockResolvedValue({ id: 'e1' }),
+      update: jest.fn().mockResolvedValue({}),
+    };
+    feed = { subscribeForWatch: jest.fn(), unsubscribeForWatch: jest.fn() };
+    gateway = { emitTick: jest.fn(), emitEvent: jest.fn(), emitCreated: jest.fn() };
+    mockTrade.closeTrade = jest.fn().mockResolvedValue({});
+    const mod = await Test.createTestingModule({
+      providers: [
+        WatchService,
+        { provide: WatchRepository, useValue: repo },
+        { provide: TargetCalculatorService, useValue: { compute: jest.fn() } },
+        { provide: StrikeSelectorService, useValue: { pick: jest.fn() } },
+        { provide: MarketFeedService, useValue: feed },
+        { provide: LevelBookService, useValue: { getLevels: jest.fn() } },
+        { provide: WatchGateway, useValue: gateway },
+        { provide: TradeExecutionService, useValue: mockTrade },
+      ],
+    }).compile();
+    svc = mod.get(WatchService);
+  });
+
+  function tradedEntry(overrides: Record<string, any> = {}) {
+    return {
+      id: 'w1', token: '11536', symbol: 'TCS-EQ', side: 'BUY', status: 'TRADED',
+      initialPrice: 2000, executedPrice: 2000, profitTarget: 2200,
+      optionsToken: null, optionsLotSize: null, paperTradeId: 'pt-1',
+      partialExitedAt: null, trailingHighWater: null, trailingStopPrice: null,
+      maxFavorable: 2000, maxAdverse: 2000, lastEventPrice: 2000, lastTickAt: null,
+      ...overrides,
+    };
+  }
+
+  it('cuts a TRADED entry whose open loss reaches ₹1,000', async () => {
+    // ref=2000, qty=100. ltp=1990 → loss = -10 * 100 = -₹1,000 (exactly at threshold).
+    repo.findActiveByToken.mockResolvedValue([tradedEntry()]);
+
+    await svc.onTick('11536', 1990, new Date());
+
+    expect(mockTrade.closeTrade).toHaveBeenCalledWith('pt-1', expect.anything());
+    expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
+      status: 'STOPPED', closedReason: 'loss-cut',
+    }));
+    expect(repo.createEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'SL_HIT_PRICE',
+    }));
+  });
+
+  it('does NOT cut when the open loss is just under ₹1,000', async () => {
+    // ltp=1990.5 → loss = -9.5 * 100 = -₹950, below the ₹1,000 threshold.
+    repo.findActiveByToken.mockResolvedValue([tradedEntry()]);
+
+    await svc.onTick('11536', 1990.5, new Date());
+
+    const lossCutUpdate = (repo.update.mock.calls as any[]).find(
+      (call: any[]) => call[1]?.closedReason === 'loss-cut',
+    );
+    expect(lossCutUpdate).toBeUndefined();
+    expect(mockTrade.closeTrade).not.toHaveBeenCalled();
+  });
+
+  it('never loss-cuts a WATCHING entry', async () => {
+    // Same -₹1,000 adverse move but the entry was never traded.
+    repo.findActiveByToken.mockResolvedValue([
+      tradedEntry({ status: 'WATCHING', executedPrice: null, paperTradeId: null }),
+    ]);
+
+    await svc.onTick('11536', 1990, new Date());
+
+    const lossCutUpdate = (repo.update.mock.calls as any[]).find(
+      (call: any[]) => call[1]?.closedReason === 'loss-cut',
+    );
+    expect(lossCutUpdate).toBeUndefined();
+    expect(mockTrade.closeTrade).not.toHaveBeenCalled();
+  });
+
+  it('loss-cuts even within the 10-minute grace window (fresh entry)', async () => {
+    // executedAt = now → entry is brand new, well inside the score-decay
+    // grace window. A price loss is a hard fact and must still cut.
+    repo.findActiveByToken.mockResolvedValue([
+      tradedEntry({ executedAt: new Date() }),
+    ]);
+
+    await svc.onTick('11536', 1985, new Date()); // loss = -15 * 100 = -₹1,500
+
+    expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
+      status: 'STOPPED', closedReason: 'loss-cut',
+    }));
+  });
+
+  it('loss-cuts a SELL entry when price rises against it by ≥ ₹1,000', async () => {
+    // SELL ref=2000, qty=100. ltp=2010 → loss = -(2010-2000)*100 = -₹1,000.
+    repo.findActiveByToken.mockResolvedValue([
+      tradedEntry({ side: 'SELL', profitTarget: 1800 }),
+    ]);
+
+    await svc.onTick('11536', 2010, new Date());
+
+    expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
+      status: 'STOPPED', closedReason: 'loss-cut',
+    }));
   });
 });
 
