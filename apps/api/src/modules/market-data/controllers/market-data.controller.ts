@@ -741,6 +741,55 @@ export class MarketDataController {
    * table (overwriting any existing row at the same instrumentId+timeframe+timestamp,
    * unlike saveCandles' skipDuplicates).
    */
+  // ─── TEMPORARY DIAGNOSTIC — remove once the broker-data issue is resolved ───
+  // Surfaces the RAW Angel One getCandleData response (status / message /
+  // errorcode, and whether `data` is null vs []), which getHistoricalData
+  // otherwise swallows into an empty array. Lets us tell a throttle
+  // (data:null "exceeding access rate") apart from an auth failure
+  // (data:null "Invalid Token") apart from a genuine empty window (data:[]).
+  @Get('debug/angel-raw-candle')
+  async debugAngelRawCandle(
+    @Query('token') token = '2885',
+    @Query('exchange') exchange = 'NSE',
+    @Query('interval') interval = 'ONE_DAY',
+    @Query('from') from = '2026-05-12 09:15',
+    @Query('to') to = '2026-05-15 15:30',
+  ) {
+    const auth = this.angelOneAdapter.authService;
+    const out: Record<string, unknown> = {
+      isAuthenticated: auth.isAuthenticated(),
+      clientId: auth.getClientId(),
+      request: { token, exchange, interval, from, to },
+    };
+    try {
+      const resp: any = await auth.getSmartApi().getCandleData({
+        exchange,
+        symboltoken: token,
+        interval,
+        fromdate: from,
+        todate: to,
+      });
+      out.raw = {
+        status: resp?.status,
+        message: resp?.message ?? null,
+        errorcode: resp?.errorcode ?? null,
+        dataShape:
+          resp?.data === null
+            ? 'null'
+            : Array.isArray(resp?.data)
+              ? `array[${resp.data.length}]`
+              : typeof resp?.data,
+        dataSample: Array.isArray(resp?.data)
+          ? resp.data.slice(0, 2)
+          : resp?.data,
+      };
+    } catch (e) {
+      out.exception =
+        e instanceof Error ? { name: e.name, message: e.message } : String(e);
+    }
+    return out;
+  }
+
   @Post('debug-broker-fetch')
   @HttpCode(HttpStatus.OK)
   async debugBrokerFetch(

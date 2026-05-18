@@ -1,4 +1,4 @@
-import { AngelOneAdapterService } from './angel-one-adapter.service';
+import { AngelOneAdapterService, AngelThrottleError } from './angel-one-adapter.service';
 import { AngelOneAuthService } from './angel-one-auth.service';
 import { AngelOneWebSocketService } from './angel-one-websocket.service';
 
@@ -148,7 +148,14 @@ describe('AngelOneAdapterService — historical cache + throttle detection', () 
       on: jest.fn(),
       removeListener: jest.fn(),
     } as unknown as AngelOneWebSocketService;
-    return new AngelOneAdapterService(fakeAuth, fakeWs);
+    const adapter = new AngelOneAdapterService(fakeAuth, fakeWs);
+    // Stub the internal delay primitive so the historical pacer AND the
+    // throttle-retry backoff resolve instantly — keeps the suite fast and
+    // off real 1-2s timers (a throttled single-shot fetch is retried twice).
+    jest
+      .spyOn(adapter as any, 'sleep')
+      .mockImplementation(() => Promise.resolve());
+    return adapter;
   }
 
   /** One candle row in Angel's array shape: [ts, o, h, l, c, v]. */
@@ -224,10 +231,16 @@ describe('AngelOneAdapterService — historical cache + throttle detection', () 
       // A throttle is contained → returns [] (never thrown to the caller).
       const a = await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
       expect(a).toEqual([]);
-      // A second call must re-hit the broker (nothing cached).
+      const callsAfterFirst = mock.mock.calls.length;
+      // A second call must re-hit the broker (a throttled [] is never cached).
       const b = await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
       expect(b).toEqual([]);
-      expect(mock).toHaveBeenCalledTimes(2);
+      // The single-shot path retries a throttle before giving up, so each
+      // getHistoricalData call issues >1 getCandleData call. The point of this
+      // test is that the SECOND getHistoricalData re-hits the broker (nothing
+      // was cached) — assert the call count strictly grew rather than pinning
+      // an exact number that the retry schedule would make brittle.
+      expect(mock.mock.calls.length).toBeGreaterThan(callsAfterFirst);
     });
 
     it('keys the cache by token:exchange:timeframe — different tokens do not collide', async () => {
@@ -343,5 +356,193 @@ describe('AngelOneAdapterService — historical cache + throttle detection', () 
       const result = await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
       expect(result).toEqual([]);
     });
+  });
+});
+
+/**
+ * Throttle-resilience of getHistoricalData's chunk handling.
+ *
+ * The adapter auto-chunks a wide date range into per-day windows (sub-hour
+ * intervals are capped at 1 day). When a single chunk is throttled by Angel
+ * One (data:null → AngelThrottleError), the multi-chunk loop must NOT discard
+ * the chunks that already succeeded — it retries with backoff, and on a
+ * persistent throttle drops just that one chunk and returns a PARTIAL result.
+ * The single-shot (non-chunked) path also retries; a persistent throttle
+ * there propagates so getHistoricalData's outer catch returns [].
+ */
+describe('AngelOneAdapterService — historical chunk throttle resilience', () => {
+  /**
+   * Build an adapter with a controllable fake smartApi. `getCandleData` is a
+   * jest.fn the test wires up per-call. The internal `sleep` primitive (used
+   * by the chunk pacer, the inter-call gap, AND the retry backoff) is stubbed
+   * to resolve immediately so backoff delays don't slow the suite.
+   */
+  function makeAdapter(getCandleData: jest.Mock) {
+    const fakeAuth = {
+      getSmartApi: () => ({ getCandleData }),
+      isAuthenticated: () => true,
+    } as unknown as AngelOneAuthService;
+    const fakeWs = {
+      on: jest.fn(),
+      removeListener: jest.fn(),
+    } as unknown as AngelOneWebSocketService;
+    const adapter = new AngelOneAdapterService(fakeAuth, fakeWs);
+    jest
+      .spyOn(adapter as any, 'sleep')
+      .mockImplementation(() => Promise.resolve());
+    return adapter;
+  }
+
+  /** A SmartAPI getCandleData success response with one candle row. */
+  function candleResponse(isoTs: string) {
+    return {
+      status: true,
+      message: 'SUCCESS',
+      data: [[isoTs, 100, 110, 90, 105, 1000]],
+    };
+  }
+
+  /** The throttle response shape: HTTP 200 with data:null. */
+  const throttleResponse = {
+    status: true,
+    message: 'Access denied because of exceeding access rate',
+    errorcode: 'AB1004',
+    data: null,
+  };
+
+  // A 7-day range with a 1-day cap (15m interval) → 7 one-day chunks.
+  const FROM = new Date('2026-05-04T00:00:00');
+  const TO = new Date('2026-05-11T00:00:00');
+
+  it('returns the other 6 chunks when one chunk is throttled on every attempt', async () => {
+    // The chunk whose window starts on day 07 throttles on every attempt;
+    // all other chunks succeed. Identify the chunk by its fromdate so the
+    // retries of that same chunk also return the throttle response.
+    const getCandleData = jest.fn().mockImplementation((params: any) => {
+      const day = params.fromdate.slice(8, 10); // "DD"
+      if (day === '07') {
+        return Promise.resolve(throttleResponse);
+      }
+      return Promise.resolve(candleResponse(`2026-05-${day}T09:15:00+05:30`));
+    });
+
+    const adapter = makeAdapter(getCandleData);
+    const result = await adapter.getHistoricalData('12345', 'NSE', '15m', FROM, TO);
+
+    // 7 chunks, one fully throttled → 6 candles survive (PARTIAL, not []).
+    expect(result).toHaveLength(6);
+    const days = result
+      .map((c) => String(c.timestamp.getDate()).padStart(2, '0'))
+      .sort();
+    expect(days).toEqual(['04', '05', '06', '08', '09', '10']);
+    // The throttled chunk was attempted 3 times (1 initial + 2 retries);
+    // the 6 healthy chunks once each → 9 getCandleData calls total.
+    expect(getCandleData).toHaveBeenCalledTimes(9);
+  });
+
+  it('includes a chunk that throttles once then succeeds on retry', async () => {
+    const attemptsByDay: Record<string, number> = {};
+    const getCandleData = jest.fn().mockImplementation((params: any) => {
+      const day = params.fromdate.slice(8, 10);
+      attemptsByDay[day] = (attemptsByDay[day] ?? 0) + 1;
+      // Day 07: first attempt throttles, retry succeeds.
+      if (day === '07' && attemptsByDay[day] === 1) {
+        return Promise.resolve(throttleResponse);
+      }
+      return Promise.resolve(candleResponse(`2026-05-${day}T09:15:00+05:30`));
+    });
+
+    const adapter = makeAdapter(getCandleData);
+    const result = await adapter.getHistoricalData('12345', 'NSE', '15m', FROM, TO);
+
+    // All 7 chunks present — the transient throttle was retried successfully.
+    expect(result).toHaveLength(7);
+    expect(attemptsByDay['07']).toBe(2); // throttled once, retried once
+  });
+
+  it('propagates a genuine non-throttle error without silently retrying it', async () => {
+    const getCandleData = jest.fn().mockImplementation((params: any) => {
+      const day = params.fromdate.slice(8, 10);
+      if (day === '07') {
+        return Promise.reject(new Error('network down'));
+      }
+      return Promise.resolve(candleResponse(`2026-05-${day}T09:15:00+05:30`));
+    });
+
+    const adapter = makeAdapter(getCandleData);
+    // A genuine error is NOT an AngelThrottleError, so the chunk loop does not
+    // swallow it and getHistoricalData's outer catch rethrows it.
+    await expect(
+      adapter.getHistoricalData('12345', 'NSE', '15m', FROM, TO),
+    ).rejects.toThrow(/network down/);
+
+    // The failing chunk is attempted exactly ONCE — no retries on a genuine
+    // error. Chunks 04,05,06 ran once; 07 ran once and threw → 4 calls.
+    expect(getCandleData).toHaveBeenCalledTimes(4);
+  });
+
+  it('still merges, dedupes and sorts a fully-successful multi-chunk fetch (no regression)', async () => {
+    // Each chunk returns two rows in reverse order so the final sort is
+    // exercised; timestamps are unique per chunk.
+    const getCandleData = jest.fn().mockImplementation((params: any) => {
+      const day = params.fromdate.slice(8, 10);
+      return Promise.resolve({
+        status: true,
+        message: 'SUCCESS',
+        data: [
+          [`2026-05-${day}T15:30:00+05:30`, 1, 2, 0.5, 1.5, 50],
+          [`2026-05-${day}T09:15:00+05:30`, 1, 2, 0.5, 1.5, 50],
+        ],
+      });
+    });
+
+    const adapter = makeAdapter(getCandleData);
+    const result = await adapter.getHistoricalData('12345', 'NSE', '15m', FROM, TO);
+
+    // 7 chunks × 2 unique bars = 14.
+    expect(result).toHaveLength(14);
+    for (let i = 1; i < result.length; i++) {
+      expect(result[i].timestamp.getTime()).toBeGreaterThanOrEqual(
+        result[i - 1].timestamp.getTime(),
+      );
+    }
+    const seen = new Set(result.map((c) => c.timestamp.getTime()));
+    expect(seen.size).toBe(result.length); // no duplicate timestamps
+  });
+
+  it('single-shot path: a persistent throttle propagates → getHistoricalData returns []', async () => {
+    // 1d interval has a wide cap (1800d) so a 7-day range is a SINGLE call.
+    // A persistent throttle there is retried then propagates; the outer catch
+    // turns it into [].
+    let calls = 0;
+    const getCandleData = jest.fn().mockImplementation(() => {
+      calls += 1;
+      return Promise.resolve(throttleResponse);
+    });
+    const adapter = makeAdapter(getCandleData);
+    const result = await adapter.getHistoricalData('12345', 'NSE', '1d', FROM, TO);
+
+    expect(result).toEqual([]);
+    expect(calls).toBe(3); // 1 initial + 2 retries
+  });
+
+  it('single-shot path: a transient throttle is retried and recovers', async () => {
+    let calls = 0;
+    const getCandleData = jest.fn().mockImplementation(() => {
+      calls += 1;
+      if (calls === 1) return Promise.resolve(throttleResponse);
+      return Promise.resolve(candleResponse('2026-05-05T09:15:00+05:30'));
+    });
+    const adapter = makeAdapter(getCandleData);
+    const result = await adapter.getHistoricalData('12345', 'NSE', '1d', FROM, TO);
+
+    expect(result).toHaveLength(1);
+    expect(calls).toBe(2);
+  });
+
+  it('exports AngelThrottleError as a named, instanceof-able error', () => {
+    const e = new AngelThrottleError('x');
+    expect(e).toBeInstanceOf(AngelThrottleError);
+    expect(e.name).toBe('AngelThrottleError');
   });
 });

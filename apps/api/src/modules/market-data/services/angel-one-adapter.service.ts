@@ -90,6 +90,17 @@ const HISTORICAL_CHUNK_PACE_MS = 350;
 const HISTORICAL_MIN_GAP_MS = 350;
 
 /**
+ * Backoff schedule for retrying a throttled (`AngelThrottleError`) historical
+ * chunk. The array length is the retry count; each entry is the delay BEFORE
+ * that retry. `[1000, 2000]` → after a throttle, wait ~1s and retry; if that
+ * also throttles, wait ~2s and retry once more. A throttle still standing
+ * after the last retry is treated as terminal for that chunk (the multi-chunk
+ * loop then drops the chunk and keeps the rest; the single-shot path lets it
+ * propagate). Non-throttle errors are never retried.
+ */
+const HISTORICAL_THROTTLE_RETRY_DELAYS_MS = [1000, 2000];
+
+/**
  * Per-timeframe TTL for the in-memory historical-candle cache (see
  * `historicalCache`). Sized so that within one re-scoring pass of ~100
  * watch entries, shared tokens (NIFTY, sector indices) and recently-
@@ -721,8 +732,12 @@ export class AngelOneAdapterService implements BrokerAdapter {
     const totalRangeMs = to.getTime() - from.getTime();
 
     // Single-shot path — range fits within Angel's limit, no chunking needed.
+    // Still routed through fetchChunkWithRetry so a TRANSIENT throttle gets
+    // retried with backoff. A throttle still standing after the retries is
+    // re-thrown as AngelThrottleError — getHistoricalData's outer catch turns
+    // that into [] (one window, nothing partial to salvage).
     if (totalRangeMs <= maxRangeMs) {
-      return this.fetchHistoricalChunk(token, exchange, interval, from, to);
+      return this.fetchChunkWithRetry(token, exchange, interval, from, to);
     }
 
     // Multi-chunk path — slice into [maxDays]-wide windows.
@@ -735,15 +750,39 @@ export class AngelOneAdapterService implements BrokerAdapter {
     const seenTs = new Set<number>();
     let cursor = from.getTime();
     let chunkIndex = 0;
+    let droppedChunks = 0;
     while (cursor < to.getTime()) {
       const chunkEnd = Math.min(cursor + maxRangeMs, to.getTime());
-      const chunk = await this.fetchHistoricalChunk(
-        token,
-        exchange,
-        interval,
-        new Date(cursor),
-        new Date(chunkEnd),
-      );
+      // Resilient chunk fetch: fetchChunkWithRetry retries a throttled chunk
+      // with backoff. If it STILL throttles after the retries, we catch the
+      // AngelThrottleError here, log a warning naming the dropped window, and
+      // continue with an empty chunk — so one throttled day no longer aborts
+      // the whole fetch and discards the days that already succeeded. The
+      // result is a PARTIAL (e.g. 6-of-7) candle set instead of []. Genuine
+      // (non-throttle) errors are NOT caught here — they propagate.
+      let chunk: any[];
+      try {
+        chunk = await this.fetchChunkWithRetry(
+          token,
+          exchange,
+          interval,
+          new Date(cursor),
+          new Date(chunkEnd),
+        );
+      } catch (err) {
+        if (err instanceof AngelThrottleError) {
+          droppedChunks++;
+          this.logger.warn(
+            `Auto-chunk: dropping throttled chunk for token=${token} ` +
+              `interval=${interval} window=${this.formatDateTime(new Date(cursor))} ` +
+              `→ ${this.formatDateTime(new Date(chunkEnd))} after retries — ` +
+              `keeping the other chunks (partial result): ${err.message}`,
+          );
+          chunk = [];
+        } else {
+          throw err;
+        }
+      }
       for (const c of chunk) {
         const ts = c.timestamp.getTime();
         if (!seenTs.has(ts)) {
@@ -754,9 +793,16 @@ export class AngelOneAdapterService implements BrokerAdapter {
       chunkIndex++;
       // Pacer between chunks — only sleep when there's another chunk to fetch.
       if (chunkEnd < to.getTime()) {
-        await new Promise((resolve) => setTimeout(resolve, HISTORICAL_CHUNK_PACE_MS));
+        await this.sleep(HISTORICAL_CHUNK_PACE_MS);
       }
       cursor = chunkEnd;
+    }
+
+    if (droppedChunks > 0) {
+      this.logger.warn(
+        `Auto-chunked fetch for token=${token} interval=${interval} returned a ` +
+          `PARTIAL result: ${droppedChunks}/${chunkIndex} chunk(s) dropped to throttling.`,
+      );
     }
 
     this.logger.log(
@@ -846,6 +892,55 @@ export class AngelOneAdapterService implements BrokerAdapter {
       const msg = error instanceof Error ? error.message : String(error);
       this.logger.error(`Failed to fetch historical data: ${msg}`);
       throw new Error(`Get historical data failed: ${msg}`);
+    }
+  }
+
+  /**
+   * Throttle-resilient wrapper around `fetchHistoricalChunk`.
+   *
+   * Calls `fetchHistoricalChunk`; on an `AngelThrottleError` it retries with
+   * backoff per `HISTORICAL_THROTTLE_RETRY_DELAYS_MS` (≈1s then ≈2s). A
+   * throttle still standing after the final retry is re-thrown as
+   * `AngelThrottleError` for the caller to handle:
+   *   - the multi-chunk loop catches it, drops just that chunk, and keeps
+   *     the rest (PARTIAL result instead of all-or-nothing);
+   *   - the single-shot path lets it propagate to `getHistoricalData`'s
+   *     outer catch, which returns [].
+   *
+   * A NON-throttle error (network failure, parse error, …) is a genuine
+   * fault, not a transient rate-limit — it is re-thrown immediately and
+   * never retried.
+   */
+  private async fetchChunkWithRetry(
+    token: string,
+    exchange: string,
+    interval: string,
+    from: Date,
+    to: Date,
+  ): Promise<any[]> {
+    // attempt 0 = initial call; attempts 1..N = retries (one per backoff entry).
+    const maxRetries = HISTORICAL_THROTTLE_RETRY_DELAYS_MS.length;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.fetchHistoricalChunk(token, exchange, interval, from, to);
+      } catch (err) {
+        // Only throttles are transient — retry those. Anything else is a
+        // genuine error: rethrow at once, do not retry.
+        if (!(err instanceof AngelThrottleError)) {
+          throw err;
+        }
+        if (attempt >= maxRetries) {
+          // Retries exhausted — surface the throttle for the caller to handle.
+          throw err;
+        }
+        const delayMs = HISTORICAL_THROTTLE_RETRY_DELAYS_MS[attempt];
+        this.logger.warn(
+          `Historical chunk throttled (token=${token} interval=${interval} ` +
+            `${this.formatDateTime(from)} → ${this.formatDateTime(to)}) — ` +
+            `retry ${attempt + 1}/${maxRetries} in ${delayMs}ms`,
+        );
+        await this.sleep(delayMs);
+      }
     }
   }
 
@@ -1253,7 +1348,7 @@ export class AngelOneAdapterService implements BrokerAdapter {
     const next = this.historicalChain.then(async () => {
       const elapsed = Date.now() - this.lastHistoricalCallAt;
       const wait = Math.max(0, HISTORICAL_MIN_GAP_MS - elapsed);
-      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+      if (wait > 0) await this.sleep(wait);
       this.lastHistoricalCallAt = Date.now();
       return fn();
     });
@@ -1261,6 +1356,16 @@ export class AngelOneAdapterService implements BrokerAdapter {
     // permanently block subsequent ones.
     this.historicalChain = next.catch(() => undefined);
     return next;
+  }
+
+  /**
+   * Promise-based delay. The single sleep primitive used by the historical
+   * pacing (inter-call gap + chunk pacer) and the throttle retry backoff.
+   * Centralised so unit tests can stub it to resolve instantly instead of
+   * waiting out real 1-2s backoff delays.
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private formatDateTime(date: Date): string {
