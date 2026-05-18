@@ -37,6 +37,7 @@ import {
   BacktestInput,
   BacktestResult,
   BacktestTrade,
+  BacktestBarLog,
 } from '../../../common/interfaces/trading-strategy.interface';
 import { ChartinkScoringService } from '../../chartink/services/chartink-scoring.service';
 
@@ -121,9 +122,24 @@ export class ChartinkGatedStrategy implements TradingStrategy {
     const graceMs = graceMinutes * 60_000;
 
     const trades: BacktestTrade[] = [];
+    // Pure observability: one record per entry-scanned bar. Never read by the
+    // trading logic — recording it cannot change any trade/metric.
+    const barLog: BacktestBarLog[] = [];
     let capital = initialCapital;
     let peakCapital = initialCapital;
     let maxDrawdown = 0;
+
+    // Fetch every historical series ONCE up front. Each score() call below is
+    // served from this in-memory source instead of re-hitting the broker per
+    // bar — a ~9-min backtest collapses to ~1 min. Purely a fetch optimization:
+    // trades / P&L / barLog stay byte-identical.
+    const candleSource = await this.scoring.prefetch(
+      token,
+      symbol,
+      exchange,
+      input.startDate ?? candles[0].timestamp,
+      input.endDate ?? candles[candles.length - 1].timestamp,
+    );
 
     let i = 0;
     while (i < candles.length) {
@@ -138,18 +154,59 @@ export class ChartinkGatedStrategy implements TradingStrategy {
         entryPrice: entryCandle.close,
         setupContext: null,
         asOf: entryCandle.timestamp,
+        candleSource,
       });
+
+      const macd5m = entryScore.checks.some(
+        (c) => c.name === MACD_5M_CHECK && c.passed,
+      );
+      const supertrend = entryScore.checks.some(
+        (c) => c.name === SUPERTREND_CHECK && c.passed,
+      );
 
       // Data-starved scores are unreliable — skip the bar entirely.
       if (entryScore.dataStarved) {
+        barLog.push({
+          time: entryCandle.timestamp.toISOString(),
+          score: entryScore.score,
+          dataStarved: true,
+          macd5m,
+          supertrend,
+          decision: 'skipped',
+          reason: 'data-starved',
+        });
         i++;
         continue;
       }
 
       if (!this.passesEntryGates(entryScore, scoreThreshold)) {
+        const reason =
+          entryScore.score < scoreThreshold
+            ? `score ${entryScore.score} below threshold ${scoreThreshold}`
+            : 'MACD-5m / SuperTrend gate failed';
+        barLog.push({
+          time: entryCandle.timestamp.toISOString(),
+          score: entryScore.score,
+          dataStarved: false,
+          macd5m,
+          supertrend,
+          decision: 'skipped',
+          reason,
+        });
         i++;
         continue;
       }
+
+      // Passes all gates — record the entry decision.
+      barLog.push({
+        time: entryCandle.timestamp.toISOString(),
+        score: entryScore.score,
+        dataStarved: false,
+        macd5m,
+        supertrend,
+        decision: 'entered',
+        reason: '',
+      });
 
       // ── Trade is open ──────────────────────────────────────────────────
       const entryPrice = entryCandle.close;
@@ -193,6 +250,7 @@ export class ChartinkGatedStrategy implements TradingStrategy {
             entryPrice,
             setupContext: null,
             asOf: bar.timestamp,
+            candleSource,
           });
           // A data-starved re-score is NOT a real score crater — ignore it.
           if (!reScore.dataStarved && reScore.score < scoreDecaySL) {
@@ -262,6 +320,7 @@ export class ChartinkGatedStrategy implements TradingStrategy {
       maxDrawdown: Math.round(maxDrawdown * 100) / 100,
       sharpeRatio: Math.round(sharpeRatio * 100) / 100,
       trades,
+      barLog,
     };
   }
 

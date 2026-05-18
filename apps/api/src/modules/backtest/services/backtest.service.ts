@@ -58,8 +58,7 @@ export class BacktestService {
       );
     }
 
-    // 2. Resolve instrument token and exchange for data fetching
-    let instrumentId: string | null = null;
+    // 2. Resolve instrument token + exchange for the Angel One fetch.
     let token: string = config.symbol;
     let exchange: string = config.exchange;
 
@@ -70,7 +69,6 @@ export class BacktestService {
 
     if (instruments.length > 0) {
       const instrument = instruments[0];
-      instrumentId = instrument.id;
       token = instrument.token ?? token;
       exchange = instrument.exchange ?? exchange;
     } else {
@@ -89,64 +87,41 @@ export class BacktestService {
       }
     }
 
-    // 3. Fetch historical candles — try local DB first, fall back to Angel One
+    // 3. Fetch historical candles straight from Angel One.
+    // The local `candles` table is NOT a backtest-grade historical store — it
+    // holds only stray live-aggregation candles. A "local DB first" path let a
+    // single stray candle suppress the broker fetch and silently starve the
+    // backtest, so backtests always pull the full range from the broker.
     let candles: CandleData[] = [];
-
-    if (instrumentId) {
-      const rawCandles = await this.marketDataRepo.getCandles(
-        instrumentId,
+    try {
+      const angelCandles = await this.angelOneAdapter.getHistoricalData(
+        token,
+        exchange,
         config.timeframe,
         config.startDate,
         config.endDate,
       );
 
-      candles = rawCandles.map((c) => ({
-        timestamp: c.timestamp,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
+      candles = angelCandles.map((c) => ({
+        timestamp: c.timestamp instanceof Date ? c.timestamp : new Date(c.timestamp),
+        open: Number(c.open),
+        high: Number(c.high),
+        low: Number(c.low),
+        close: Number(c.close),
         volume: Number(c.volume),
       }));
-    }
 
-    // Fall back to Angel One API when local DB has no data
-    if (candles.length === 0) {
       this.logger.log(
-        `No local candle data for ${config.symbol}, fetching from Angel One (token=${token}, exchange=${exchange})`,
+        `Fetched ${candles.length} candles from Angel One for ${config.symbol} (token=${token}, exchange=${exchange})`,
       );
-
-      try {
-        const angelCandles = await this.angelOneAdapter.getHistoricalData(
-          token,
-          exchange,
-          config.timeframe,
-          config.startDate,
-          config.endDate,
-        );
-
-        candles = angelCandles.map((c) => ({
-          timestamp: c.timestamp instanceof Date ? c.timestamp : new Date(c.timestamp),
-          open: Number(c.open),
-          high: Number(c.high),
-          low: Number(c.low),
-          close: Number(c.close),
-          volume: Number(c.volume),
-        }));
-
-        this.logger.log(
-          `Fetched ${candles.length} candles from Angel One for ${config.symbol}`,
-        );
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        this.logger.error(`Angel One historical data fetch failed: ${msg}`);
-      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Angel One historical data fetch failed: ${msg}`);
     }
 
     if (candles.length === 0) {
       throw new BadRequestException(
-        `No candle data available for ${config.symbol} (${config.timeframe}) between ${config.startDate.toISOString()} and ${config.endDate.toISOString()}. ` +
-        `Checked local DB${instrumentId ? ` (instrumentId=${instrumentId})` : ''} and Angel One API (token=${token}).`,
+        `No candle data available for ${config.symbol} (${config.timeframe}) between ${config.startDate.toISOString()} and ${config.endDate.toISOString()} (Angel One token=${token}).`,
       );
     }
 

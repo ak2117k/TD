@@ -65,6 +65,28 @@ export interface BacktestInput {
   endDate?: Date;
 }
 
+/**
+ * Per-bar diagnostic record for a backtest entry-scan iteration.
+ *
+ * Pure observability — records the score/gate values the strategy already
+ * computed at a bar and the entry decision it made. Strategies that don't
+ * produce one simply leave `BacktestResult.barLog` absent.
+ */
+export interface BacktestBarLog {
+  /** ISO timestamp of the bar that was scanned for entry. */
+  time: string;
+  /** The 0-100 chartink score computed as-of that bar. */
+  score: number;
+  dataStarved: boolean;
+  /** Did the 'MACD on 5m' check pass. */
+  macd5m: boolean;
+  /** Did the 'SuperTrend match' check pass. */
+  supertrend: boolean;
+  decision: 'entered' | 'skipped';
+  /** '' when entered; else why the bar was skipped. */
+  reason: string;
+}
+
 export interface BacktestResult {
   totalTrades: number;
   winRate: number;
@@ -73,6 +95,12 @@ export interface BacktestResult {
   maxDrawdown: number;
   sharpeRatio: number;
   trades: BacktestTrade[];
+  /**
+   * Optional per-bar entry-decision diagnostics. Only strategies that opt in
+   * (currently `chartink-gated`) populate this; all other strategies and the
+   * backtest service are unaffected by its absence.
+   */
+  barLog?: BacktestBarLog[];
 }
 
 export interface BacktestTrade {

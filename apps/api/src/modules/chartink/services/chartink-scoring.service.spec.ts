@@ -1,6 +1,6 @@
 // apps/api/src/modules/chartink/services/chartink-scoring.service.spec.ts
 import { Test, type TestingModule } from '@nestjs/testing';
-import { ChartinkScoringService, type ScoringInput } from './chartink-scoring.service';
+import { ChartinkScoringService, type ScoringInput, type ScoringCandleSource } from './chartink-scoring.service';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { NseSectorIndexService } from '../../market-data/services/nse-sector-index.service';
 import { macd } from '../../signal-generator/strategies/indicators';
@@ -74,8 +74,8 @@ describe('ChartinkScoringService', () => {
       mockAdapter.getHistoricalData.mockResolvedValue(rising(60, 100, 0.5));
       const result = await service.score(baseInput);
       // With identical stock+sector data: Sector passes (10), RS fails — RS=0 doesn't satisfy
-      // strict > 0 (0). Index passes (20), MACDs (10+7+8=25), Price vs EMA UP (10), ST UP (10),
-      // S/R fails — no level book (0), Vol passes (5). Empirical total = 55.
+      // strict > 0 (0). Index passes (20), MACDs (5+10+10=25), Price vs EMA9>EMA20 (10),
+      // ST UP (10), S/R fails — no level book (0), Vol passes (5). Empirical total = 55.
       expect(result.score).toBeGreaterThanOrEqual(50);
       expect(result.lotCount).toBeGreaterThanOrEqual(1);
       expect(result.checks.length).toBe(10);
@@ -181,7 +181,7 @@ describe('ChartinkScoringService', () => {
     });
   });
 
-  describe('classifyTrend (via Price vs 20-EMA check)', () => {
+  describe('Price vs 20-EMA check (9-EMA / 20-EMA comparison)', () => {
     const buyInput: ScoringInput = {
       token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
       entryPrice: 2880, setupContext: null,
@@ -202,44 +202,57 @@ describe('ChartinkScoringService', () => {
         close: start - i * step - 0.25, volume: 1000 + i * 50,
       }));
     }
-    function flat(n: number, price: number) {
-      return Array.from({ length: n }, (_, i) => ({
-        timestamp: new Date(Date.UTC(2026, 4, 12, 0, i * 5)),
-        open: price, high: price + 0.1, low: price - 0.1,
-        close: price, volume: 1000,
-      }));
-    }
 
-    it('rising closes → UP → Price vs 20-EMA passes for BUY', async () => {
+    it('rising closes → EMA9 > EMA20 → BUY passes (10 pts), SELL fails', async () => {
+      // On a rising series the shorter 9-EMA lags less than the 20-EMA,
+      // so EMA9 sits above EMA20 → BUY passes, SELL fails.
+      mockAdapter.getHistoricalData.mockResolvedValue(rising(60, 100, 0.5));
+      const buyResult = await service.score(buyInput);
+      const buyCheck = buyResult.checks.find((c) => c.name === 'Price vs 20-EMA');
+      expect(buyCheck?.passed).toBe(true);
+      expect(buyCheck?.points).toBe(10);
+      expect(buyCheck?.pointsPossible).toBe(10);
+      expect(buyCheck?.detail?.ema9 as number).toBeGreaterThan(buyCheck?.detail?.ema20 as number);
+
+      const sellResult = await service.score(sellInput);
+      const sellCheck = sellResult.checks.find((c) => c.name === 'Price vs 20-EMA');
+      expect(sellCheck?.passed).toBe(false);
+      expect(sellCheck?.points).toBe(0);
+    });
+
+    it('falling closes → EMA9 < EMA20 → SELL passes (10 pts), BUY fails', async () => {
+      // On a falling series the 9-EMA tracks the drop faster than the
+      // 20-EMA, so EMA9 sits below EMA20 → SELL passes, BUY fails.
+      mockAdapter.getHistoricalData.mockResolvedValue(falling(60, 100, 0.5));
+      const sellResult = await service.score(sellInput);
+      const sellCheck = sellResult.checks.find((c) => c.name === 'Price vs 20-EMA');
+      expect(sellCheck?.passed).toBe(true);
+      expect(sellCheck?.points).toBe(10);
+      expect(sellCheck?.detail?.ema9 as number).toBeLessThan(sellCheck?.detail?.ema20 as number);
+
+      const buyResult = await service.score(buyInput);
+      const buyCheck = buyResult.checks.find((c) => c.name === 'Price vs 20-EMA');
+      expect(buyCheck?.passed).toBe(false);
+      expect(buyCheck?.points).toBe(0);
+    });
+
+    it('insufficient candles → fails with reason "insufficient candles"', async () => {
+      // 15 candles → after the closed-only forming-bar drop only 14 closes
+      // remain → ema(closes, 20) returns null → insufficient candles.
+      mockAdapter.getHistoricalData.mockResolvedValue(rising(15, 100, 0.5));
+      const result = await service.score(buyInput);
+      const check = result.checks.find((c) => c.name === 'Price vs 20-EMA');
+      expect(check?.passed).toBe(false);
+      expect(check?.points).toBe(0);
+      expect(check?.detail?.reason).toBe('insufficient candles');
+    });
+
+    it('keeps the factor name "Price vs 20-EMA" and pointsPossible 10', async () => {
       mockAdapter.getHistoricalData.mockResolvedValue(rising(60, 100, 0.5));
       const result = await service.score(buyInput);
       const check = result.checks.find((c) => c.name === 'Price vs 20-EMA');
-      expect(check?.passed).toBe(true);
-      expect(check?.detail?.trend).toBe('UP');
-    });
-
-    it('falling closes → DOWN → Price vs 20-EMA passes for SELL', async () => {
-      mockAdapter.getHistoricalData.mockResolvedValue(falling(60, 100, 0.5));
-      const result = await service.score(sellInput);
-      const check = result.checks.find((c) => c.name === 'Price vs 20-EMA');
-      expect(check?.passed).toBe(true);
-      expect(check?.detail?.trend).toBe('DOWN');
-    });
-
-    it('flat closes (EMA flat, price hovering) → INDETERMINATE → fails for BUY', async () => {
-      mockAdapter.getHistoricalData.mockResolvedValue(flat(60, 100));
-      const result = await service.score(buyInput);
-      const check = result.checks.find((c) => c.name === 'Price vs 20-EMA');
-      expect(check?.passed).toBe(false);
-      expect(check?.detail?.trend).toBe('INDETERMINATE');
-    });
-
-    it('flat closes → INDETERMINATE → fails for SELL too', async () => {
-      mockAdapter.getHistoricalData.mockResolvedValue(flat(60, 100));
-      const result = await service.score(sellInput);
-      const check = result.checks.find((c) => c.name === 'Price vs 20-EMA');
-      expect(check?.passed).toBe(false);
-      expect(check?.detail?.trend).toBe('INDETERMINATE');
+      expect(check).toBeDefined();
+      expect(check?.pointsPossible).toBe(10);
     });
   });
 
@@ -335,22 +348,24 @@ describe('ChartinkScoringService', () => {
       const macdDaily = result.checks.find((c) => c.name === 'MACD on 1d')!;
       expect(macdDaily.passed).toBe(true);
       expect(macdDaily.detail?.aboveZero).toBe(true);
-      expect(macdDaily.points).toBe(10);
+      expect(macdDaily.points).toBe(5);
     });
 
     it('BUY fails when MACD green but BELOW zero (recovering downtrend)', async () => {
       // Long downtrend then a short up-tick: macd > signal (green) but the
-      // MACD line is still negative. Exactly 250 bars so fetchCandles'
-      // tail-slice is a no-op and the check sees this same series.
-      const downBars = strongDown(250 - 12);
+      // MACD line is still negative. 251 bars so that after the closed-only
+      // policy drops the forming candle the check still sees 250 closed bars.
+      // The check computes on closes.slice(0, -1), so the sanity macd() must
+      // use the SAME closed-only set.
+      const downBars = strongDown(251 - 12);
       const last = downBars[downBars.length - 1];
       const upTail = Array.from({ length: 12 }, (_, i) => last + (i + 1) * 2);
       const closes = [...downBars, ...upTail];
       mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(closes));
       const result = await service.score(buyInput);
       const macdDaily = result.checks.find((c) => c.name === 'MACD on 1d')!;
-      const m = macd(closes)!;
-      // Sanity: this fixture really is green-but-below-zero.
+      const m = macd(closes.slice(0, -1))!;
+      // Sanity: this fixture really is green-but-below-zero (closed-only set).
       expect(m.macd).toBeGreaterThan(m.signal);
       expect(m.macd).toBeLessThan(0);
       expect(macdDaily.passed).toBe(false);
@@ -363,30 +378,45 @@ describe('ChartinkScoringService', () => {
       const macdDaily = result.checks.find((c) => c.name === 'MACD on 1d')!;
       expect(macdDaily.passed).toBe(true);
       expect(macdDaily.detail?.belowZero).toBe(true);
-      expect(macdDaily.points).toBe(10);
+      expect(macdDaily.points).toBe(5);
     });
 
     it('SELL fails when MACD red but ABOVE zero (cooling uptrend)', async () => {
       // Long uptrend then a short down-tick: macd < signal (red) but the
-      // MACD line is still positive. Exactly 250 bars.
-      const upBars = strongUp(250 - 12);
+      // MACD line is still positive. 251 bars so that after the closed-only
+      // policy drops the forming candle the check still sees 250 closed bars.
+      // The check computes on closes.slice(0, -1), so the sanity macd() must
+      // use the SAME closed-only set.
+      const upBars = strongUp(251 - 12);
       const last = upBars[upBars.length - 1];
       const downTail = Array.from({ length: 12 }, (_, i) => last - (i + 1) * 2);
       const closes = [...upBars, ...downTail];
       mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(closes));
       const result = await service.score(sellInput);
       const macdDaily = result.checks.find((c) => c.name === 'MACD on 1d')!;
-      const m = macd(closes)!;
+      const m = macd(closes.slice(0, -1))!;
       expect(m.macd).toBeLessThan(m.signal);
       expect(m.macd).toBeGreaterThan(0);
       expect(macdDaily.passed).toBe(false);
       expect(macdDaily.detail?.belowZero).toBe(false);
     });
 
-    it('all three MACD checks request 250 bars worth of history', async () => {
+    it('MACD factor weights: 1d→5, 5m→10, 1m→10 pointsPossible', async () => {
+      mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(strongUp(400)));
+      const result = await service.score(buyInput);
+      const macd1d = result.checks.find((c) => c.name === 'MACD on 1d');
+      const macd5m = result.checks.find((c) => c.name === 'MACD on 5m');
+      const macd1m = result.checks.find((c) => c.name === 'MACD on 1m');
+      expect(macd1d?.pointsPossible).toBe(5);
+      expect(macd5m?.pointsPossible).toBe(10);
+      expect(macd1m?.pointsPossible).toBe(10);
+    });
+
+    it('all three MACD checks request the longer warmup window worth of history', async () => {
       // fetchCandles sizes the date window from lookbackMsForTf(tf, lookback).
-      // With lookback=250, the 1d window must span >= 250*2+30 calendar days.
-      mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(strongUp(300)));
+      // With the longer MACD warmup (1d→300), the 1d window must span
+      // >= 300*2+30 calendar days.
+      mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(strongUp(400)));
       await service.score(buyInput);
       const dailyCall = mockAdapter.getHistoricalData.mock.calls.find(
         (c: unknown[]) => c[2] === '1d',
@@ -395,8 +425,47 @@ describe('ChartinkScoringService', () => {
       const from = dailyCall![3] as Date;
       const to = dailyCall![4] as Date;
       const spanDays = (to.getTime() - from.getTime()) / (24 * 60 * 60 * 1000);
-      // 250*2+30 = 530 calendar days minimum for a 250-bar 1d request.
-      expect(spanDays).toBeGreaterThanOrEqual(530);
+      // 300*2+30 = 630 calendar days minimum for a 300-bar 1d request.
+      expect(spanDays).toBeGreaterThanOrEqual(630);
+    });
+  });
+
+  // ─── Closed-only candle policy ──────────────────────────────────────────
+  describe('fetchCandles closed-only policy — drops the forming (last) candle', () => {
+    const buyInput: ScoringInput = {
+      token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
+      entryPrice: 2880, setupContext: null,
+    };
+
+    function candlesFromCloses(closes: number[]) {
+      return closes.map((c, i) => ({
+        timestamp: new Date(Date.UTC(2026, 4, 12, 0, i)),
+        open: c, high: c + 0.5, low: c - 0.5, close: c, volume: 1000,
+      }));
+    }
+
+    it('a huge spike on ONLY the last (forming) candle is excluded from the MACD check', async () => {
+      // 300 perfectly flat closes → MACD line is exactly 0, histogram 0 →
+      // neither green nor above zero → the BUY MACD check FAILS. The very
+      // last candle carries a massive upward spike. If the forming candle
+      // were included, that spike would drag the fast EMA up, turn the
+      // histogram green AND push the MACD line above zero → the check would
+      // PASS. Closed-only policy drops that bar, so the check still sees a
+      // flat series and FAILS. This is the load-bearing assertion.
+      const flatCloses = Array.from({ length: 300 }, () => 100);
+      const spiked = [...flatCloses, 100000]; // forming candle: 1000x spike
+      mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(spiked));
+
+      const result = await service.score(buyInput);
+      const macdDaily = result.checks.find((c) => c.name === 'MACD on 1d')!;
+
+      // Spike excluded → flat series → MACD line at zero → NOT green, NOT
+      // above zero → check fails. Would be green+aboveZero (passed) if the
+      // forming candle leaked in.
+      expect(macdDaily.passed).toBe(false);
+      expect(macdDaily.detail?.aboveZero).toBe(false);
+      // The check computed on the flat run only: macd line is ~0.
+      expect(Math.abs(macdDaily.detail?.macd as number)).toBeLessThan(1e-6);
     });
   });
 
@@ -509,6 +578,143 @@ describe('ChartinkScoringService', () => {
         expect(to.getTime()).toBeGreaterThanOrEqual(before);
         expect(to.getTime()).toBeLessThanOrEqual(after + 1000);
       }
+    });
+  });
+
+  // ─── Candle prefetch / ScoringCandleSource ──────────────────────────────
+  describe('prefetch + candleSource — pre-fetched in-memory candle store', () => {
+    const buyInput: ScoringInput = {
+      token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
+      entryPrice: 2880, setupContext: null,
+    };
+
+    // Long deterministic minute-bar series with timestamps spaced 1 minute
+    // apart, ascending. `count` bars ending at `end`.
+    function seriesEndingAt(end: Date, count: number) {
+      return Array.from({ length: count }, (_, i) => {
+        const ts = new Date(end.getTime() - (count - 1 - i) * 60_000);
+        return {
+          timestamp: ts,
+          open: 100 + i * 0.1, high: 100 + i * 0.1 + 0.5, low: 100 + i * 0.1 - 0.5,
+          close: 100 + i * 0.1 + 0.25, volume: 1000 + i,
+        };
+      });
+    }
+
+    it('prefetch returns a ScoringCandleSource with a getCandles method', async () => {
+      mockAdapter.getHistoricalData.mockResolvedValue(seriesEndingAt(new Date(Date.UTC(2026, 4, 1)), 800));
+      const from = new Date(Date.UTC(2026, 3, 1));
+      const to = new Date(Date.UTC(2026, 4, 1));
+      const source = await service.prefetch('2885', 'RELIANCE', 'NSE', from, to);
+      expect(source).toBeDefined();
+      expect(typeof source.getCandles).toBe('function');
+    });
+
+    it('getCandles slices the series by asOf — candles after asOf are excluded', async () => {
+      const end = new Date(Date.UTC(2026, 4, 1, 12, 0));
+      const series = seriesEndingAt(end, 600);
+      mockAdapter.getHistoricalData.mockResolvedValue(series);
+      const from = new Date(Date.UTC(2026, 3, 1));
+      const to = end;
+      const source = await service.prefetch('2885', 'RELIANCE', 'NSE', from, to);
+
+      // asOf in the MIDDLE of the series — pick the timestamp of bar index 200.
+      const asOf = series[200].timestamp;
+      // 15m is one of the prefetched series; query whatever tf the source holds.
+      const got = source.getCandles('2885', 'NSE', '1m', asOf);
+      // Every returned candle must be <= asOf.
+      expect(got.length).toBeGreaterThan(0);
+      for (const c of got) {
+        expect(c.timestamp.getTime()).toBeLessThanOrEqual(asOf.getTime());
+      }
+      // The bar AFTER asOf must not be present.
+      const lastTs = got[got.length - 1].timestamp.getTime();
+      expect(lastTs).toBeLessThanOrEqual(asOf.getTime());
+      expect(series[201].timestamp.getTime()).toBeGreaterThan(asOf.getTime());
+    });
+
+    it('getCandles returns chronological candles', async () => {
+      const end = new Date(Date.UTC(2026, 4, 1, 12, 0));
+      mockAdapter.getHistoricalData.mockResolvedValue(seriesEndingAt(end, 600));
+      const source = await service.prefetch('2885', 'RELIANCE', 'NSE', new Date(Date.UTC(2026, 3, 1)), end);
+      const got = source.getCandles('2885', 'NSE', '1m', end);
+      for (let i = 1; i < got.length; i++) {
+        expect(got[i].timestamp.getTime()).toBeGreaterThanOrEqual(got[i - 1].timestamp.getTime());
+      }
+    });
+
+    it('getCandles returns [] for a series the source holds nothing for', async () => {
+      mockAdapter.getHistoricalData.mockResolvedValue(seriesEndingAt(new Date(Date.UTC(2026, 4, 1)), 600));
+      const source = await service.prefetch('2885', 'RELIANCE', 'NSE', new Date(Date.UTC(2026, 3, 1)), new Date(Date.UTC(2026, 4, 1)));
+      // A token/exchange/tf combination that was never prefetched.
+      expect(source.getCandles('UNKNOWN-TOKEN', 'NSE', '1m', new Date(Date.UTC(2026, 4, 1)))).toEqual([]);
+      expect(source.getCandles('2885', 'BSE', '1m', new Date(Date.UTC(2026, 4, 1)))).toEqual([]);
+    });
+
+    it('score() with candleSource does NOT call the adapter getHistoricalData at all', async () => {
+      const end = new Date(Date.UTC(2026, 4, 1, 12, 0));
+      mockAdapter.getHistoricalData.mockResolvedValue(seriesEndingAt(end, 800));
+      const source = await service.prefetch('2885', 'RELIANCE', 'NSE', new Date(Date.UTC(2026, 3, 1)), end);
+
+      mockAdapter.getHistoricalData.mockClear();
+      await service.score({ ...buyInput, asOf: end, candleSource: source });
+      expect(mockAdapter.getHistoricalData).not.toHaveBeenCalled();
+    });
+
+    it('result-neutral: score() served from candleSource === score() fetched live (same series)', async () => {
+      const end = new Date(Date.UTC(2026, 4, 1, 12, 0));
+      // One big rising series used for BOTH the live fetch and the prefetch.
+      const series = seriesEndingAt(end, 900);
+      mockAdapter.getHistoricalData.mockResolvedValue(series);
+
+      // Build the prefetched source (this consumes adapter calls).
+      const source = await service.prefetch('2885', 'RELIANCE', 'NSE', new Date(Date.UTC(2026, 3, 1)), end);
+
+      // Live score: adapter returns the SAME series for every fetch.
+      const live = await service.score({ ...buyInput, asOf: end });
+      // Sourced score: served from the in-memory store, adapter not touched.
+      mockAdapter.getHistoricalData.mockClear();
+      const sourced = await service.score({ ...buyInput, asOf: end, candleSource: source });
+
+      expect(mockAdapter.getHistoricalData).not.toHaveBeenCalled();
+      expect(sourced.score).toBe(live.score);
+      expect(sourced.dataStarved).toBe(live.dataStarved);
+      expect(sourced.checks.map((c) => [c.name, c.points, c.passed]))
+        .toEqual(live.checks.map((c) => [c.name, c.points, c.passed]));
+    });
+
+    it('candleSource absent → behaviour unchanged (adapter still used)', async () => {
+      mockAdapter.getHistoricalData.mockResolvedValue(seriesEndingAt(new Date(Date.UTC(2026, 4, 1)), 300));
+      await service.score(buyInput);
+      expect(mockAdapter.getHistoricalData).toHaveBeenCalled();
+    });
+
+    it('prefetch fetches the stock 1m/5m/15m/1d, NIFTY 15m, and sector 15m', async () => {
+      const end = new Date(Date.UTC(2026, 4, 1, 12, 0));
+      mockAdapter.getHistoricalData.mockResolvedValue(seriesEndingAt(end, 800));
+      await service.prefetch('2885', 'RELIANCE', 'NSE', new Date(Date.UTC(2026, 3, 1)), end);
+      const calls = mockAdapter.getHistoricalData.mock.calls;
+      // (token, exchange, tf) tuples requested.
+      const tuples = calls.map((c: unknown[]) => `${c[0]}:${c[1]}:${c[2]}`);
+      expect(tuples).toContain('2885:NSE:1m');
+      expect(tuples).toContain('2885:NSE:5m');
+      expect(tuples).toContain('2885:NSE:15m');
+      expect(tuples).toContain('2885:NSE:1d');
+      expect(tuples).toContain('99926000:NSE:15m'); // NIFTY 15m
+      expect(tuples).toContain('99926019:NSE:15m'); // RELIANCE sector index 15m
+    });
+
+    it('prefetch skips the sector series when the symbol has no sector mapping', async () => {
+      const end = new Date(Date.UTC(2026, 4, 1, 12, 0));
+      mockAdapter.getHistoricalData.mockResolvedValue(seriesEndingAt(end, 800));
+      await service.prefetch('9999', 'UNKNOWNSTOCK', 'NSE', new Date(Date.UTC(2026, 3, 1)), end);
+      const calls = mockAdapter.getHistoricalData.mock.calls;
+      const tuples = calls.map((c: unknown[]) => `${c[0]}:${c[1]}:${c[2]}`);
+      // No sector token — only the stock's 4 tfs + NIFTY 15m.
+      expect(tuples).toContain('9999:NSE:1m');
+      expect(tuples).toContain('99926000:NSE:15m');
+      // No mapping was resolvable, so nothing other than NIFTY on a non-stock token.
+      expect(tuples.filter((t: string) => t.startsWith('999260') && t !== '99926000:NSE:15m')).toEqual([]);
     });
   });
 });
