@@ -447,8 +447,17 @@ export class ChartinkScoringService {
     const name = 'SuperTrend match';
     const pointsPossible = 10;
     try {
-      const candles = await this.fetch15mCandles(input.token, input.exchange, 50, input.asOf, input.candleSource);
-      if (candles.length < 11) {
+      // SuperTrend is a recursive carrying-band indicator — its finalUpper/
+      // finalLower bands and direction carry forward bar by bar, so a short
+      // window starts cold and resolves the wrong direction on slow/quiet
+      // trends (same warm-up class as the MACD-5m fix). Compute it on the 5m
+      // timeframe with a 350-bar warm-up so the bands fully converge — the
+      // same fetch shape checkMacdFiveMin uses.
+      const candles = await this.fetchCandles(input.token, input.exchange, '5m', 350, input.asOf, input.candleSource);
+      // supertrend(…, 10, 3) needs period+1 = 11 bars at the bare minimum,
+      // but a cold short window gives the wrong direction. Require a real
+      // warm-up — 120 bars decays the recursive bands to a stable answer.
+      if (candles.length < 120) {
         return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient candles' } };
       }
       const highs = candles.map((c) => c.high);

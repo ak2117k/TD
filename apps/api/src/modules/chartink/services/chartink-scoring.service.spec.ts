@@ -71,11 +71,15 @@ describe('ChartinkScoringService', () => {
     }
 
     it('all checks rising → strong score with 10 checks (RELIANCE has sector mapping)', async () => {
-      mockAdapter.getHistoricalData.mockResolvedValue(rising(60, 100, 0.5));
+      // 400 bars: enough warm-up for the MACD checks (>=120) and the 5m
+      // SuperTrend check (>=120) to converge on this fixture.
+      mockAdapter.getHistoricalData.mockResolvedValue(rising(400, 100, 0.5));
       const result = await service.score(baseInput);
-      // With identical stock+sector data: Sector passes (10), RS fails — RS=0 doesn't satisfy
-      // strict > 0 (0). Index passes (20), MACDs (5+10+10=25), Price vs EMA9>EMA20 (10),
-      // ST UP (10), S/R fails — no level book (0), Vol passes (5). Empirical total = 55.
+      // With identical stock+sector data: Sector passes (10), RS fails — RS=0
+      // doesn't satisfy strict > 0 (0). Index passes (20), Price vs EMA9>EMA20
+      // (10), ST UP (10), S/R fails — no level book (0), Vol passes (5). The
+      // MACD checks resolve on a constant-slope ramp where macd === signal
+      // (flat histogram → neither green nor red, strict comparison fails).
       expect(result.score).toBeGreaterThanOrEqual(50);
       expect(result.lotCount).toBeGreaterThanOrEqual(1);
       expect(result.checks.length).toBe(10);
@@ -427,6 +431,100 @@ describe('ChartinkScoringService', () => {
       const spanDays = (to.getTime() - from.getTime()) / (24 * 60 * 60 * 1000);
       // 300*2+30 = 630 calendar days minimum for a 300-bar 1d request.
       expect(spanDays).toBeGreaterThanOrEqual(630);
+    });
+  });
+
+  // ─── SuperTrend check — computed on the 5m timeframe with warm-up ───────
+  describe('checkSupertrend — 5m series + 350-bar warm-up window', () => {
+    const buyInput: ScoringInput = {
+      token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
+      entryPrice: 2880, setupContext: null,
+    };
+    const sellInput: ScoringInput = { ...buyInput, side: 'SELL' };
+
+    function candlesFromCloses(closes: number[]) {
+      return closes.map((c, i) => ({
+        timestamp: new Date(Date.UTC(2026, 4, 12, 0, i)),
+        open: c, high: c + 0.5, low: c - 0.5, close: c, volume: 1000,
+      }));
+    }
+    // Steady uptrend — SuperTrend direction resolves to UP.
+    function upCloses(n: number): number[] {
+      return Array.from({ length: n }, (_, i) => 100 + i * 0.5);
+    }
+    // Steady downtrend — SuperTrend direction resolves to DOWN.
+    function downCloses(n: number): number[] {
+      return Array.from({ length: n }, (_, i) => 4000 - i * 0.5);
+    }
+
+    it('fetches the 5m timeframe (not 15m) for the SuperTrend check', async () => {
+      mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(upCloses(400)));
+      await service.score(buyInput);
+      // The 5m series must have been requested for the stock token.
+      const fiveMinCall = mockAdapter.getHistoricalData.mock.calls.find(
+        (c: unknown[]) => c[0] === '2885' && c[2] === '5m',
+      );
+      expect(fiveMinCall).toBeDefined();
+    });
+
+    it('requests a 350-bar warm-up window worth of 5m history', async () => {
+      // fetchCandles sizes the date window from lookbackMsForTf('5m', 350).
+      // calendarDays['5m'] = ceil(350/75)*2+1 = 5*2+1 = 11 calendar days.
+      mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(upCloses(400)));
+      await service.score(buyInput);
+      const fiveMinCall = mockAdapter.getHistoricalData.mock.calls.find(
+        (c: unknown[]) => c[0] === '2885' && c[2] === '5m',
+      );
+      expect(fiveMinCall).toBeDefined();
+      const from = fiveMinCall![3] as Date;
+      const to = fiveMinCall![4] as Date;
+      const spanDays = (to.getTime() - from.getTime()) / (24 * 60 * 60 * 1000);
+      expect(spanDays).toBeGreaterThanOrEqual(11);
+    });
+
+    it('BUY passes when 5m SuperTrend direction is UP (10 pts)', async () => {
+      mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(upCloses(400)));
+      const result = await service.score(buyInput);
+      const st = result.checks.find((c) => c.name === 'SuperTrend match')!;
+      expect(st.detail?.direction).toBe('UP');
+      expect(st.passed).toBe(true);
+      expect(st.points).toBe(10);
+    });
+
+    it('SELL passes when 5m SuperTrend direction is DOWN (10 pts)', async () => {
+      mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(downCloses(400)));
+      const result = await service.score(sellInput);
+      const st = result.checks.find((c) => c.name === 'SuperTrend match')!;
+      expect(st.detail?.direction).toBe('DOWN');
+      expect(st.passed).toBe(true);
+      expect(st.points).toBe(10);
+    });
+
+    it('SuperTrend reads the 5m series — uses 5m direction even when 15m disagrees', async () => {
+      // Per-timeframe fixtures: the 15m series trends DOWN, the 5m series
+      // trends UP. A correct (post-fix) SuperTrend check reads the 5m series
+      // → direction UP → BUY passes. The old 15m-based check would read the
+      // DOWN 15m series → BUY fails. This is the load-bearing assertion.
+      mockAdapter.getHistoricalData.mockImplementation(
+        (_token: string, _ex: string, tf: string) =>
+          Promise.resolve(candlesFromCloses(tf === '5m' ? upCloses(400) : downCloses(400))),
+      );
+      const result = await service.score(buyInput);
+      const st = result.checks.find((c) => c.name === 'SuperTrend match')!;
+      expect(st.detail?.direction).toBe('UP');
+      expect(st.passed).toBe(true);
+      expect(st.points).toBe(10);
+    });
+
+    it('insufficient 5m candles → fails with reason "insufficient candles"', async () => {
+      // 100 candles → after the closed-only forming-bar drop only 99 remain →
+      // below the 120-bar warm-up floor → insufficient candles. The recursive
+      // SuperTrend bands have not converged on a window this short.
+      mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(upCloses(100)));
+      const result = await service.score(buyInput);
+      const st = result.checks.find((c) => c.name === 'SuperTrend match')!;
+      expect(st.passed).toBe(false);
+      expect(st.detail?.reason).toBe('insufficient candles');
     });
   });
 
