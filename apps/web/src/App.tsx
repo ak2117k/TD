@@ -7,6 +7,7 @@ import ChartsPage from '@/pages/charts/ChartsPage';
 import MarketPage from '@/pages/market/MarketPage';
 import OptionsPage from '@/pages/options/OptionsPage';
 import SignalsPage from '@/pages/signals/SignalsPage';
+import RejectionsPage from '@/pages/signals/RejectionsPage';
 import ChartinkPage from '@/pages/chartink/ChartinkPage';
 import AutoTradePage from '@/pages/auto-trade/AutoTradePage';
 import PositionsPage from '@/pages/positions/PositionsPage';
@@ -38,6 +39,7 @@ export default function App() {
         <Route path="market" element={<MarketPage />} />
         <Route path="options" element={<OptionsPage />} />
         <Route path="signals" element={<SignalsPage />} />
+        <Route path="rejections" element={<RejectionsPage />} />
         <Route path="chartink" element={<ChartinkPage />} />
         <Route path="watch" element={<WatchPage />} />
         <Route path="auto-trade" element={<AutoTradePage />} />

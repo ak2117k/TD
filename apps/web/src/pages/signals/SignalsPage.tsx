@@ -33,8 +33,16 @@ import {
 import AutoTradeDiagnostic from '@/components/trading/AutoTradeDiagnostic';
 import { useSignals } from '@/hooks/useSignals';
 import { useSignalStore } from '@/stores/signal-store';
+import AsymmetricEdgeTab from './AsymmetricEdgeTab';
 
 type ViewMode = 'grid' | 'table';
+
+type SignalsTab = 'signals' | 'asymmetric';
+
+const SIGNALS_TABS: { key: SignalsTab; label: string }[] = [
+  { key: 'signals', label: 'Signals' },
+  { key: 'asymmetric', label: 'Asymmetric Edge' },
+];
 
 export default function SignalsPage() {
   const { signals, activeCount, avgConfidence, isLoading, isScanRunning, triggerScan } =
@@ -45,6 +53,7 @@ export default function SignalsPage() {
   const newSignalIds = useSignalStore((s) => s.newSignalIds);
 
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
+  const [activeTab, setActiveTab] = useState<SignalsTab>('signals');
   const [detailSignal, setDetailSignal] = useState<TradeSignal | null>(null);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
 
@@ -221,106 +230,132 @@ export default function SignalsPage() {
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
-          {/* View mode toggle */}
-          <div className="flex rounded-lg border border-gray-700/60 overflow-hidden">
+        {activeTab === 'signals' && (
+          <div className="flex items-center gap-3">
+            {/* View mode toggle */}
+            <div className="flex rounded-lg border border-gray-700/60 overflow-hidden">
+              <button
+                onClick={() => setViewMode('grid')}
+                className={cn(
+                  'p-1.5 transition-colors',
+                  viewMode === 'grid'
+                    ? 'bg-gray-700 text-gray-100'
+                    : 'text-gray-500 hover:text-gray-300',
+                )}
+              >
+                <LayoutGrid size={16} />
+              </button>
+              <button
+                onClick={() => setViewMode('table')}
+                className={cn(
+                  'p-1.5 transition-colors',
+                  viewMode === 'table'
+                    ? 'bg-gray-700 text-gray-100'
+                    : 'text-gray-500 hover:text-gray-300',
+                )}
+              >
+                <List size={16} />
+              </button>
+            </div>
+
+            {/* Scan button */}
             <button
-              onClick={() => setViewMode('grid')}
+              onClick={triggerScan}
+              disabled={isScanRunning}
               className={cn(
-                'p-1.5 transition-colors',
-                viewMode === 'grid'
-                  ? 'bg-gray-700 text-gray-100'
-                  : 'text-gray-500 hover:text-gray-300',
+                'flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold transition-all',
+                isScanRunning
+                  ? 'bg-amber-500/20 text-amber-400 cursor-wait'
+                  : 'bg-amber-500 text-gray-900 hover:bg-amber-400 shadow-[0_0_12px_rgba(245,158,11,0.25)]',
               )}
             >
-              <LayoutGrid size={16} />
-            </button>
-            <button
-              onClick={() => setViewMode('table')}
-              className={cn(
-                'p-1.5 transition-colors',
-                viewMode === 'table'
-                  ? 'bg-gray-700 text-gray-100'
-                  : 'text-gray-500 hover:text-gray-300',
+              {isScanRunning ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Zap size={14} />
               )}
-            >
-              <List size={16} />
+              {isScanRunning ? 'Scanning...' : 'Scan Now'}
             </button>
           </div>
+        )}
+      </div>
 
-          {/* Scan button */}
+      {/* Tabs */}
+      <div className="flex gap-0 border-b border-gray-700/60">
+        {SIGNALS_TABS.map((tab) => (
           <button
-            onClick={triggerScan}
-            disabled={isScanRunning}
+            key={tab.key}
+            onClick={() => setActiveTab(tab.key)}
             className={cn(
-              'flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold transition-all',
-              isScanRunning
-                ? 'bg-amber-500/20 text-amber-400 cursor-wait'
-                : 'bg-amber-500 text-gray-900 hover:bg-amber-400 shadow-[0_0_12px_rgba(245,158,11,0.25)]',
+              'px-4 py-2.5 text-xs font-semibold transition-colors',
+              activeTab === tab.key
+                ? 'border-b-2 border-amber-500 text-amber-400'
+                : 'text-gray-500 hover:text-gray-300',
             )}
           >
-            {isScanRunning ? (
-              <Loader2 size={14} className="animate-spin" />
-            ) : (
-              <Zap size={14} />
-            )}
-            {isScanRunning ? 'Scanning...' : 'Scan Now'}
+            {tab.label}
           </button>
-        </div>
+        ))}
       </div>
 
-      {/* Stats bar */}
-      <div className="grid grid-cols-3 gap-4">
-        <StatCard
-          title="Active Signals"
-          value={activeCount}
-          icon={<Target size={16} />}
-        />
-        <StatCard
-          title="Avg Confidence"
-          value={`${avgConfidence}%`}
-          icon={<Shield size={16} />}
-        />
-        <StatCard
-          title="Today's Signals"
-          value={todayCount}
-          icon={<Zap size={16} />}
-        />
-      </div>
+      {activeTab === 'asymmetric' && <AsymmetricEdgeTab />}
 
-      {/* Filters */}
-      <SignalFilters filters={filters} onFilterChange={updateFilters} />
-
-      {/* Content */}
-      {isLoading ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          <LoadingSkeleton variant="card" count={6} />
-        </div>
-      ) : signals.length === 0 ? (
-        <EmptyState
-          icon={<Zap size={48} />}
-          title="No signals yet"
-          description="No trade signals have been generated. Click 'Scan Now' to run strategies against live market data, or check Settings to ensure at least one strategy is active."
-          action={{ label: 'Scan Now', onClick: triggerScan }}
-        />
-      ) : viewMode === 'grid' ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {signals.map((signal) => (
-            <SignalCard
-              key={signal.id}
-              signal={signal}
-              onViewDetail={openDetail}
-              isNew={newSignalIds.has(signal.id)}
+      {activeTab === 'signals' && (
+        <>
+          {/* Stats bar */}
+          <div className="grid grid-cols-3 gap-4">
+            <StatCard
+              title="Active Signals"
+              value={activeCount}
+              icon={<Target size={16} />}
             />
-          ))}
-        </div>
-      ) : (
-        <DataTable
-          columns={columns}
-          data={signals as (TradeSignal & Record<string, unknown>)[]}
-          sortable
-          onRowClick={(row) => openDetail(row as unknown as TradeSignal)}
-        />
+            <StatCard
+              title="Avg Confidence"
+              value={`${avgConfidence}%`}
+              icon={<Shield size={16} />}
+            />
+            <StatCard
+              title="Today's Signals"
+              value={todayCount}
+              icon={<Zap size={16} />}
+            />
+          </div>
+
+          {/* Filters */}
+          <SignalFilters filters={filters} onFilterChange={updateFilters} />
+
+          {/* Content */}
+          {isLoading ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <LoadingSkeleton variant="card" count={6} />
+            </div>
+          ) : signals.length === 0 ? (
+            <EmptyState
+              icon={<Zap size={48} />}
+              title="No signals yet"
+              description="No trade signals have been generated. Click 'Scan Now' to run strategies against live market data, or check Settings to ensure at least one strategy is active."
+              action={{ label: 'Scan Now', onClick: triggerScan }}
+            />
+          ) : viewMode === 'grid' ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+              {signals.map((signal) => (
+                <SignalCard
+                  key={signal.id}
+                  signal={signal}
+                  onViewDetail={openDetail}
+                  isNew={newSignalIds.has(signal.id)}
+                />
+              ))}
+            </div>
+          ) : (
+            <DataTable
+              columns={columns}
+              data={signals as (TradeSignal & Record<string, unknown>)[]}
+              sortable
+              onRowClick={(row) => openDetail(row as unknown as TradeSignal)}
+            />
+          )}
+        </>
       )}
 
       {/* Detail modal */}
