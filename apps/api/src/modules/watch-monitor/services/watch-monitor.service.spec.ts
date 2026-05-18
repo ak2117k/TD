@@ -56,6 +56,19 @@ describe('WatchMonitorService', () => {
     }));
   });
 
+  it('persists currentBreakdown equal to result.checks on a successful rescore', async () => {
+    const checks = [{ name: 'sector', passed: true, points: 10, detail: 'ok' }];
+    scoring.score.mockResolvedValue({ score: 75, lotCount: 2, checks });
+    await svc.rescoreOne({
+      id: 'w1', symbol: 'TCS-EQ', token: '11536', exchange: 'NSE', side: 'BUY',
+      initialPrice: 4000, currentPrice: 4010, currentScore: 72, stopLossScore: 50,
+      createdAt: wellPastGrace(),
+    } as any);
+    expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
+      currentScore: 75, currentBreakdown: checks,
+    }));
+  });
+
   it('does NOT write event when score unchanged', async () => {
     scoring.score.mockResolvedValue({
       score: 72, lotCount: 2,
@@ -157,6 +170,21 @@ describe('WatchMonitorService', () => {
         currentScore: expect.anything(),
       }));
       expect(watch.transitionStopped).not.toHaveBeenCalled();
+    });
+
+    it('does NOT touch currentBreakdown on a data-starved rescore', async () => {
+      scoring.score.mockResolvedValue({
+        score: 20, lotCount: 0, dataStarved: true,
+        checks: [{ name: 'sector', passed: false, points: 0, detail: 'no data' }],
+      });
+      await svc.rescoreOne({
+        id: 'w1', symbol: 'TCS-EQ', token: '11536', exchange: 'NSE', side: 'BUY',
+        initialPrice: 4000, currentPrice: 4010, currentScore: 72, stopLossScore: 50,
+        createdAt: wellPastGrace(),
+      } as any);
+      expect(repo.update).not.toHaveBeenCalledWith('w1', expect.objectContaining({
+        currentBreakdown: expect.anything(),
+      }));
     });
 
     it('NEVER stops an entry on a data-starved score (even outside grace, score < stop)', async () => {

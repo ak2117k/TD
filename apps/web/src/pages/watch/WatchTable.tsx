@@ -2,6 +2,7 @@ import { Fragment } from 'react';
 import type { WatchEntry } from '../../types/watch.types';
 import { profitView, isClosed } from '../../utils/watchPnl';
 import { WatchDetailPanel } from './WatchDetailPanel';
+import { factorCell, type FactorCellState } from './factorCell';
 
 interface Props {
   entries: WatchEntry[];
@@ -62,11 +63,18 @@ const FACTOR_COLUMNS: ReadonlyArray<{ name: string; short: string }> = [
   { name: 'Volume confirmation', short: 'Vol' },
 ];
 
-/** The scoring checks captured on the entry at creation time (or []). */
-function entryChecks(entry: WatchEntry): Array<{ name: string; passed: boolean }> {
-  const bd = entry.initialBreakdown as { checks?: Array<{ name: string; passed: boolean }> } | null;
+/** Extract the per-check results from a breakdown value (or [] if absent/malformed). */
+function breakdownChecks(breakdown: unknown): Array<{ name: string; passed: boolean }> {
+  const bd = breakdown as { checks?: Array<{ name: string; passed: boolean }> } | null;
   return Array.isArray(bd?.checks) ? bd!.checks : [];
 }
+
+/** Tailwind class for a factor cell, keyed by its transition state. */
+const FACTOR_STATE_CLASS: Record<FactorCellState, string> = {
+  same: '',
+  decayed: 'text-red-400 font-medium bg-red-500/10 rounded',
+  improved: 'text-emerald-300 font-medium bg-emerald-500/10 rounded',
+};
 
 export function WatchTable({ entries, onSelect, selectedId }: Props) {
   if (entries.length === 0) {
@@ -105,7 +113,11 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
           <th className="py-2 px-3 text-right" title="Position close / alert stop time (IST)">Sell Time</th>
           <th className="py-2 px-3 text-right">Score</th>
           {FACTOR_COLUMNS.map((f) => (
-            <th key={f.name} className="py-2 px-2 text-center font-medium" title={`${f.name} — aligned at entry`}>
+            <th
+              key={f.name}
+              className="py-2 px-2 text-center font-medium"
+              title={`${f.name} — live value; ✓→✗ decayed / ✗→✓ improved since entry`}
+            >
               {f.short}
             </th>
           ))}
@@ -114,7 +126,14 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
       <tbody>
         {entries.map((e) => {
           const p = profitView(e);
-          const passedByName = new Map(entryChecks(e).map((c) => [c.name, c.passed]));
+          // Buy-time pass/fail per factor.
+          const initialByName = new Map(
+            breakdownChecks(e.initialBreakdown).map((c) => [c.name, c.passed]),
+          );
+          // Live pass/fail per factor — falls back to buy-time when never rescored.
+          const currentByName = new Map(
+            breakdownChecks(e.currentBreakdown ?? e.initialBreakdown).map((c) => [c.name, c.passed]),
+          );
           return (
             <Fragment key={e.id}>
             <tr
@@ -217,16 +236,35 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
                 ) : null}
               </td>
               {FACTOR_COLUMNS.map((f) => {
-                const passed = passedByName.get(f.name);
-                return (
-                  <td key={f.name} className="py-2 px-2 text-center">
-                    {passed === true ? (
-                      <span className="text-emerald-400">✓</span>
-                    ) : passed === false ? (
-                      <span className="text-red-400/60">✗</span>
-                    ) : (
+                const initial = initialByName.get(f.name);
+                const current = currentByName.get(f.name);
+                // No data for this factor at all → render the neutral dot.
+                if (initial === undefined || current === undefined) {
+                  return (
+                    <td key={f.name} className="py-2 px-2 text-center">
                       <span className="text-[var(--color-text-muted)]">·</span>
-                    )}
+                    </td>
+                  );
+                }
+                const cell = factorCell(initial, current);
+                const title =
+                  cell.state === 'decayed'
+                    ? `${f.name} — passed at entry, now failing`
+                    : cell.state === 'improved'
+                    ? `${f.name} — failed at entry, now passing`
+                    : `${f.name} — ${current ? 'aligned' : 'not aligned'}`;
+                const sameClass = current ? 'text-emerald-400' : 'text-red-400/60';
+                return (
+                  <td key={f.name} className="py-2 px-2 text-center" title={title}>
+                    <span
+                      className={
+                        cell.state === 'same'
+                          ? sameClass
+                          : `px-1 py-0.5 ${FACTOR_STATE_CLASS[cell.state]}`
+                      }
+                    >
+                      {cell.text}
+                    </span>
                   </td>
                 );
               })}

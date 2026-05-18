@@ -545,6 +545,7 @@ model WatchEntry {
   status                WatchStatus @default(WATCHING)
   currentPrice          Float?
   currentScore          Int?
+  currentBreakdown      Json?
   maxFavorable          Float?
   maxAdverse            Float?
   lastTickAt            DateTime?

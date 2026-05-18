@@ -17,6 +17,11 @@ export interface WatchEntry {
   initialPrice: number;
   initialScore: number;
   initialBreakdown: unknown;
+  /**
+   * Latest rescored breakdown — same shape as `initialBreakdown`, or `null`
+   * if the entry has never been rescored. Server-enriched.
+   */
+  currentBreakdown: unknown;
   initialAt: string;
   profitTarget: number;
   profitTargetSource: 'indicator-sr' | 'fallback-2pct';

@@ -101,6 +101,7 @@ export class WatchMonitorService {
     await this.repo.update(entry.id, {
       currentScore: newScore,
       lastRescoreAt: now,
+      currentBreakdown: result.checks as unknown as Prisma.InputJsonValue,
     });
 
     // Task 4: 10-minute grace period. The score-decay stop is suppressed for

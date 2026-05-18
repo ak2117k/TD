@@ -6,7 +6,8 @@ function entry(o: Partial<WatchEntry>): WatchEntry {
   return {
     id: 'w', alertId: null, setupId: null, symbol: 'X', token: '1', exchange: 'NSE',
     side: 'BUY', initialPrice: 100, initialScore: 60, initialBreakdown: null,
-    initialAt: '', profitTarget: 110, profitTargetSource: 'fallback-2pct',
+    currentBreakdown: null, initialAt: '', profitTarget: 110,
+    profitTargetSource: 'fallback-2pct',
     stopLossScore: 60, status: 'WATCHING', currentPrice: null, currentScore: null,
     maxFavorable: null, maxAdverse: null, lastTickAt: null, lastRescoreAt: null,
     optionsToken: null, optionsType: null, optionsExpiry: null, optionsStrike: null,
