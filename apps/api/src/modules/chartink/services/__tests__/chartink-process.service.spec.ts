@@ -42,6 +42,9 @@ describe('ChartinkProcessService', () => {
   const UP_CANDLES = makeTrendingCloses('UP', 50).map((close) => ({ close, timestamp: new Date(), open: close, high: close, low: close, volume: 1000 }));
 
   beforeEach(async () => {
+    // R3: freeze the clock to 10:00 IST - outside the 11:45-14:00 strict
+    // window - so the default score-70 mock is admitted deterministically.
+    jest.useFakeTimers({ now: new Date('2026-05-19T04:30:00Z') });
     // Default: every test runs as if INSIDE the 09:15-15:00 IST entry window
     // so the pipeline is exercised. The dedicated cutoff describe-block below
     // overrides this with its own spy to test the closed-market path.
@@ -86,6 +89,7 @@ describe('ChartinkProcessService', () => {
 
   afterEach(() => {
     jest.restoreAllMocks();
+    jest.useRealTimers();
   });
 
   // ─── Step 1: Symbol resolution ─────────────────────────────────────────────
@@ -453,6 +457,29 @@ describe('ChartinkProcessService', () => {
       const kinds = repo.createAlertSetup.mock.calls.map((c) => c[0].kind);
       expect(kinds).not.toContain('macd-misaligned');
       expect(kinds).not.toContain('supertrend-misaligned');
+    });
+
+    it('rejects a score-70 setup inside the 11:45-14:00 IST window (R3 needs >=75)', async () => {
+      jest.setSystemTime(new Date('2026-05-19T06:30:00Z')); // 12:00 IST
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [] });
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'scored-low',
+        rejectReason: expect.stringContaining('11:45-14:00'),
+      }));
+    });
+
+    it('still admits a score-80 setup inside the 11:45-14:00 IST window', async () => {
+      jest.setSystemTime(new Date('2026-05-19T06:30:00Z')); // 12:00 IST
+      scoring.score.mockResolvedValue({ score: 80, lotCount: 3, checks: [] });
+
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({ kind: 'setup' }));
+      expect(watchSvc.createFromAlert).toHaveBeenCalled();
     });
   });
 

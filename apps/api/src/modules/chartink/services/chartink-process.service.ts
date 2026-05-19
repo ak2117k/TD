@@ -7,6 +7,7 @@ import { NseSectorIndexService } from '../../market-data/services/nse-sector-ind
 import { WatchService, WatchCapExceededError } from '../../watch-monitor/services/watch.service';
 import { formatTradeRejection } from '../../../common/utils/trade-rejection-log';
 import { isWithinEntryWindow } from '../../../common/utils/market-hours';
+import { evaluateTradePolicy } from '../../watch-monitor/services/trade-policy';
 
 interface Hit {
   symbol: string;
@@ -267,11 +268,10 @@ export class ChartinkProcessService {
     }
 
     // === 4. Persist + Stage 2 trigger ===
-    // Pure score-based gate: score >= 60 → setup, score < 60 → scored-low.
-    // The 5m-MACD and SuperTrend checks remain SCORED factors inside
-    // ChartinkScoringService (they contribute points); they no longer veto
-    // an entry on their own — misalignment only lowers the total score.
-    if (scoringResult.score >= 60) {
+    // R3: admission is delegated to the trade policy - score >= 60 normally,
+    // but score >= 75 inside the 11:45-14:00 IST window.
+    const policy = evaluateTradePolicy({ score: scoringResult.score, at: new Date() });
+    if (policy.admitted) {
       const persistedSetup = await this.repo.createAlertSetup({
         alertId,
         symbol: hit.symbol,
@@ -316,7 +316,7 @@ export class ChartinkProcessService {
           hitPrice: hit.hitPrice,
           kind: 'scored-low',
           setupId: null,
-          rejectReason: `score ${scoringResult.score} below 60`,
+          rejectReason: policy.reason ?? `score ${scoringResult.score} below ${policy.minScore}`,
           score: scoringResult.score,
           lotCount: scoringResult.lotCount,
           scoreBreakdown: scoringResult.checks,
