@@ -44,13 +44,21 @@ export function computeOrderCharges(input: OrderChargeInput): OrderCharges {
   const stampDuty = isBuy ? turnover * STAMP_DUTY_BUY_RATE : 0;
   const gst = (brokerage + exchangeTxn) * GST_RATE;
 
+  const brokerageR = round2(brokerage);
+  const sttR = round2(stt);
+  const exchangeTxnR = round2(exchangeTxn);
+  const sebiFeeR = round2(sebiFee);
+  const stampDutyR = round2(stampDuty);
+  const gstR = round2(gst);
+
   return {
-    brokerage: round2(brokerage),
-    stt: round2(stt),
-    exchangeTxn: round2(exchangeTxn),
-    sebiFee: round2(sebiFee),
-    stampDuty: round2(stampDuty),
-    gst: round2(gst),
-    total: round2(brokerage + stt + exchangeTxn + sebiFee + stampDuty + gst),
+    brokerage: brokerageR,
+    stt: sttR,
+    exchangeTxn: exchangeTxnR,
+    sebiFee: sebiFeeR,
+    stampDuty: stampDutyR,
+    gst: gstR,
+    // total is the sum of the rounded fields, so total === sum(fields) exactly.
+    total: round2(brokerageR + sttR + exchangeTxnR + sebiFeeR + stampDutyR + gstR),
   };
 }

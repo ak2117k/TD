@@ -10,7 +10,9 @@ describe('computeOrderCharges - Indian equity intraday', () => {
     expect(c.exchangeTxn).toBeCloseTo(2.97, 2);     // 0.00297%
     expect(c.sebiFee).toBeCloseTo(0.1, 2);          // 10 per crore
     expect(c.gst).toBeCloseTo((20 + 2.97) * 0.18, 2);
-    expect(c.total).toBeGreaterThan(0);
+    expect(c.total).toBeCloseTo(
+      c.brokerage + c.stt + c.exchangeTxn + c.sebiFee + c.stampDuty + c.gst, 2,
+    );
   });
 
   it('a SELL order: STT present, stamp duty absent', () => {
