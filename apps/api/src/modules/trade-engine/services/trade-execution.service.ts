@@ -28,6 +28,7 @@ import {
   ExitReasonTag,
 } from '../dto/trade.dto';
 import { Trade, Prisma } from '@prisma/client';
+import { computeOrderCharges } from './trade-charges';
 
 /**
  * Strip an option/futures suffix to recover the underlying symbol.
@@ -242,6 +243,19 @@ export class TradeExecutionService {
       });
     }
 
+    // R6: charge the paper ENTRY order and record it on the trade row so the
+    // startup balance replay can reconstruct it.
+    if (isPaperTrade && initialStatus === 'OPEN' && entryPrice) {
+      const entryCharges = computeOrderCharges({
+        side: request.side as 'BUY' | 'SELL',
+        price: entryPrice,
+        quantity: request.quantity,
+        exchange: request.exchange,
+      });
+      this.paperTradeService.applyEntryCharge(entryCharges.total);
+      await this.tradeRepository.updateTrade(trade.id, { fees: entryCharges.total });
+    }
+
     // ---- STEP 7: Emit trade event via WebSocket ----
     this.tradeGateway.emitTradeUpdate(trade);
 
@@ -394,14 +408,18 @@ export class TradeExecutionService {
         ? (multiplier * (exitPrice - entryPrice) / entryPrice) * 100
         : 0;
 
-    // Paper exits incur a flat brokerage and defer any winning profit to
-    // the 18:00 settlement. applyExitAccounting books both against the
-    // virtual balance and returns the charge, which we persist on the
-    // trade's `fees` field so the startup balance replay reads it back.
-    // Live trades are billed by the real broker — never charged here.
-    const brokerCharge = trade.isPaperTrade
-      ? this.paperTradeService.applyExitAccounting(slicePnl)
-      : 0;
+    // R6: real per-order charges on the SELL exit leg, applied to the paper
+    // account and accumulated onto the trade's `fees`.
+    const exitCharges = computeOrderCharges({
+      side: exitSide as 'BUY' | 'SELL',
+      price: exitPrice,
+      quantity: closeQty,
+      exchange: instrument?.exchange ?? 'NSE',
+    });
+    if (trade.isPaperTrade) {
+      this.paperTradeService.applyExitAccounting(slicePnl, exitCharges.total);
+    }
+    const brokerCharge = trade.isPaperTrade ? exitCharges.total : 0;
     const totalFees = (trade.fees ?? 0) + brokerCharge;
 
     // Pick the human-readable note: prefer structured exitNotes, fall back

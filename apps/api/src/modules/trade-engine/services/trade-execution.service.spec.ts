@@ -168,7 +168,7 @@ describe('TradeExecutionService.executeTrade — paper-trade entry price', () =>
   let module: TestingModule;
   let service: TradeExecutionService;
   let repo: ReturnType<typeof buildMockRepo>;
-  let paperService: { simulateOrder: jest.Mock; simulateTick: jest.Mock };
+  let paperService: { simulateOrder: jest.Mock; simulateTick: jest.Mock; applyEntryCharge: jest.Mock };
   let positionManager: {
     addPosition: jest.Mock;
     removePosition: jest.Mock;
@@ -185,6 +185,7 @@ describe('TradeExecutionService.executeTrade — paper-trade entry price', () =>
         fillPrice: 127.43,
       })),
       simulateTick: jest.fn(),
+      applyEntryCharge: jest.fn(),
     };
     positionManager = {
       addPosition: jest.fn(),
@@ -302,6 +303,21 @@ describe('TradeExecutionService.executeTrade — paper-trade entry price', () =>
     } as any);
 
     expect(trade.entryPrice).toBe(99.5);
+  });
+
+  it('charges the entry order and records it on the trade fees (R6)', async () => {
+    const trade = await service.executeTrade({
+      symbol: 'NIFTY24MAY22500CE', token: '99926000', exchange: 'NFO',
+      side: 'BUY' as any, orderType: 'MARKET' as any, quantity: 50,
+      positionType: 'INTRADAY' as any,
+    } as any);
+
+    expect(paperService.applyEntryCharge).toHaveBeenCalledTimes(1);
+    expect(repo.updateTrade).toHaveBeenCalledWith(
+      trade.id, expect.objectContaining({ fees: expect.any(Number) }),
+    );
+    const fees = (repo.updateTrade as jest.Mock).mock.calls[0][1].fees;
+    expect(fees).toBeGreaterThan(0);
   });
 });
 
@@ -622,34 +638,34 @@ describe('TradeExecutionService.closeTrade — broker charge', () => {
     service = module.get(TradeExecutionService);
   });
 
-  it('routes a paper exit through applyExitAccounting with the slice P&L', async () => {
-    await service.closeTrade('trade_1', {
-      exitReasonTag: ExitReasonTag.HIT_TARGET,
-    });
+  it('routes a paper exit through applyExitAccounting with the slice P&L and a charge', async () => {
+    await service.closeTrade('trade_1', { exitReasonTag: ExitReasonTag.HIT_TARGET });
 
     // slice P&L = (130.5 - 100) * 50 = 1525
     expect(paperService.applyExitAccounting).toHaveBeenCalledTimes(1);
-    expect(paperService.applyExitAccounting).toHaveBeenCalledWith(1525);
+    expect(paperService.applyExitAccounting).toHaveBeenCalledWith(1525, expect.any(Number));
   });
 
-  it('records the broker charge on the trade row fees field (full close)', async () => {
+  it('records the real exit charge on the trade fees field (full close)', async () => {
     const trade = await service.closeTrade('trade_1');
-    expect(trade.fees).toBe(100); // 0 existing + ₹100 this exit
+    // Real SEBI charges on a ~6,525 turnover are a few rupees, not a flat 100.
+    expect(trade.fees).toBeGreaterThan(0);
+    expect(trade.fees).toBeLessThan(100);
   });
 
-  it('charges a partial close too — slice P&L and fees both reflect the slice', async () => {
+  it('charges a partial close too - slice P&L and fees both reflect the slice', async () => {
     const trade = await service.closeTrade('trade_1', { quantity: 20 });
 
     // slice P&L = (130.5 - 100) * 20 = 610
-    expect(paperService.applyExitAccounting).toHaveBeenCalledWith(610);
+    expect(paperService.applyExitAccounting).toHaveBeenCalledWith(610, expect.any(Number));
     expect(trade.status).toBe('PARTIALLY_FILLED');
-    expect(trade.fees).toBe(100);
+    expect(trade.fees).toBeGreaterThan(0);
   });
 
-  it('accumulates fees across exits — a second close on the same trade adds ₹100', async () => {
-    repo._trades['trade_1'].fees = 100; // an earlier partial already charged ₹100
+  it('accumulates fees across exits - a second close adds another charge', async () => {
+    repo._trades['trade_1'].fees = 50; // an earlier leg already charged 50
     const trade = await service.closeTrade('trade_1');
-    expect(trade.fees).toBe(200);
+    expect(trade.fees).toBeGreaterThan(50);
   });
 
   it('does NOT charge brokerage when closing a live (non-paper) trade', async () => {
