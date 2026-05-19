@@ -99,4 +99,14 @@ describe('WatchRepository', () => {
     expect(map.get('t1')).toBe(1525);
     expect(map.has('t2')).toBe(false);
   });
+
+  it('wasTokenExecutedSince queries by token + executedAt only, NOT by status (R2 must catch closed trades)', async () => {
+    prisma.watchEntry.count.mockResolvedValue(1);
+    const since = new Date('2026-05-19T09:00:00Z');
+    await repo.wasTokenExecutedSince('11536', since);
+
+    const whereArg = (prisma.watchEntry.count as jest.Mock).mock.calls[0][0].where;
+    expect(whereArg).toEqual({ token: '11536', executedAt: { gte: since } });
+    expect(whereArg.status).toBeUndefined();
+  });
 });

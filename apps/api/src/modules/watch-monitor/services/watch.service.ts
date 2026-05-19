@@ -47,10 +47,12 @@ export function hardLossCutRupees(entry: {
   return deployed > 0 ? 0.004 * deployed : HARD_LOSS_CUT_RUPEES;
 }
 
-/** Maximum ₹ deployed per trade. Determines share quantity:
- *  qty = floor(MAX_INVESTMENT_PER_TRADE / referencePrice).
- *  Sourced from the shared per-trade risk cap (DEFAULT_MAX_CAPITAL_PER_TRADE)
- *  so the watch sizer can never build an order the RiskManager will reject. */
+/** LEGACY FALLBACK per-trade capital cap. No longer drives live order sizing —
+ *  that is now the score-tiered capital from `evaluateTradePolicy` (R4).
+ *  This constant is retained only as the fallback in `computeOpenPnl` and
+ *  `checkPartialExitTrigger` when an entry has no persisted `quantity`.
+ *  Sourced from the shared risk cap (DEFAULT_MAX_CAPITAL_PER_TRADE) so the
+ *  fallback remains consistent with the RiskManager's hard limit. */
 export const MAX_INVESTMENT_PER_TRADE = DEFAULT_MAX_CAPITAL_PER_TRADE;
 
 export class WatchCapExceededError extends Error {
@@ -281,7 +283,8 @@ export class WatchService {
    *
    * Quantity selection:
    *   - F&O leg present → lotCount × optionsLotSize
-   *   - Equity intraday → floor(MAX_INVESTMENT_PER_TRADE / referencePrice)
+   *   - Equity intraday → floor(score-tiered capital / referencePrice)
+   *     (capital from `evaluateTradePolicy`)
    * Caller can override with `quantityOverride`. Reference price prefers
    * the live currentPrice over the initial fire price so we size against
    * what we'll actually pay.

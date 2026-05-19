@@ -149,10 +149,17 @@ export class WatchRepository {
   /**
    * True if any watch entry for this token was EXECUTED at or after `since`.
    * Backs the 30-minute re-entry cooldown (R2).
+   *
+   * Deliberately does NOT filter on `status`: a closed trade's entry moves
+   * to a terminal status (TARGET_HIT / STOPPED / EXITED) while `executedAt`
+   * is retained, and the cooldown MUST catch those closed trades. Filtering
+   * by status=TRADED would silently limit the cooldown to still-open trades.
+   * (WATCHING / DISMISSED entries never have `executedAt` set, so they
+   * cannot false-positive.)
    */
   async wasTokenExecutedSince(token: string, since: Date): Promise<boolean> {
     const count = await this.prisma.watchEntry.count({
-      where: { token, status: WatchStatus.TRADED, executedAt: { gte: since } },
+      where: { token, executedAt: { gte: since } },
     });
     return count > 0;
   }
