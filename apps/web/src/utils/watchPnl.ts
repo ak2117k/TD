@@ -1,7 +1,8 @@
 import type { WatchEntry } from '../types/watch.types';
 
 /** Max ₹ deployed per trade — mirrors backend MAX_INVESTMENT_PER_TRADE.
- *  Per-row quantity is floor(this / referencePrice) so P&L scales with stock price. */
+ *  Legacy fallback only: used by profitView when an entry has no persisted
+ *  real quantity. whatIfView sizes untraded alerts via tierCapital() instead. */
 export const MAX_INVESTMENT_PER_TRADE = 200_000;
 
 export interface ProfitView {
@@ -15,7 +16,9 @@ export interface ProfitView {
 /**
  * Live price-based P/L for an open entry: currentPrice vs reference
  * (executedPrice for TRADED, initialPrice for WATCHING), side-adjusted,
- * × dynamic qty = floor(MAX_INVESTMENT_PER_TRADE / ref).
+ * × qty = remainingQty ?? quantity ?? floor(MAX_INVESTMENT_PER_TRADE / ref)
+ *   (the last form is a legacy fallback for entries persisted before the real
+ *   quantity was tracked).
  */
 export function profitView(entry: WatchEntry): ProfitView {
   const ref = entry.executedPrice ?? entry.initialPrice;
@@ -88,7 +91,7 @@ export function whatIfView(entry: WatchEntry): ProfitView {
   const rawCeil =
     entry.profitTarget != null
       ? (entry.profitTarget - ref) * sideMul * qty // capped at the profit target
-      : rawPnl;
+      : rawPnl;                                     // no target -> only the floor applies
   // Never let the cap fall below the floor (degenerate target data).
   const ceilPnl = Math.max(rawCeil, floorPnl);
   const gross = Math.min(Math.max(rawPnl, floorPnl), ceilPnl);
