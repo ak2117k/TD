@@ -22,7 +22,13 @@ export function profitView(entry: WatchEntry): ProfitView {
   const curr = entry.currentPrice ?? ref;
   const sideMul = entry.side === 'BUY' ? 1 : -1;
   const diff = (curr - ref) * sideMul;
-  const qty = Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(ref, 1)));
+  // Real position size: the trailing remainder after a partial exit, else the
+  // full filled quantity. floor(MAX/price) is only a fallback for legacy
+  // entries persisted before the real quantity was tracked.
+  const qty =
+    entry.remainingQty ??
+    entry.quantity ??
+    Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(ref, 1)));
   return {
     abs: diff * qty,
     pct: ref > 0 ? (diff / ref) * 100 : 0,
@@ -116,4 +122,37 @@ export function breakdownChecks(
   }
   const bd = breakdown as { checks?: Array<{ name: string; passed: boolean }> } | null;
   return Array.isArray(bd?.checks) ? bd!.checks : [];
+}
+
+export interface AccountPnl {
+  /** equity − startingCapital — the authoritative account P&L. */
+  total: number;
+  /** Booked P&L so far: balance + deployed capital − starting capital. */
+  realized: number;
+  /** Unrealized P&L of open positions, mark-to-market. */
+  unrealized: number;
+  /** Deferred winning profit, released to cash at the 18:00 settlement. */
+  pending: number;
+}
+
+/**
+ * The authoritative account P&L, straight from the paper-account ledger — no
+ * reconstruction, no estimated quantities. `total` (equity − startingCapital)
+ * is THE real result; realized + unrealized + pending always sum to it. This
+ * is the single source of truth the watch page's "Real P/L" displays.
+ */
+export function accountRealPnl(a: {
+  startingCapital: number;
+  balance: number;
+  deployedCapital: number;
+  unrealizedPnl: number;
+  pendingProfit: number;
+  equity: number;
+}): AccountPnl {
+  return {
+    total: a.equity - a.startingCapital,
+    realized: a.balance + a.deployedCapital - a.startingCapital,
+    unrealized: a.unrealizedPnl,
+    pending: a.pendingProfit,
+  };
 }

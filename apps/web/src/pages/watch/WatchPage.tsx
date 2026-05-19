@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useWatchEntries } from '../../hooks/useWatchEntries';
 import { WatchTable } from './WatchTable';
 import { PaperAccountBadge } from '../../components/trading/PaperAccountBadge';
-import { pnlBreakdown } from '../../utils/watchPnl';
+import { pnlBreakdown, accountRealPnl } from '../../utils/watchPnl';
 import { usePaperAccount } from '../../hooks/usePaperAccount';
 import type { WatchStatus } from '../../types/watch.types';
 
@@ -64,22 +64,37 @@ export function WatchPage() {
       {!loading && !error && (
         <>
           {(() => {
-            // Real P/L uses the paper account's REST-priced unrealized P&L
-            // for the open slice (the watch entries' currentPrice is stale,
-            // WebSocket-fed) — so it stays in sync with the Unreal badge.
-            const { real, whatIf } = pnlBreakdown(entries, account?.unrealizedPnl);
+            // "Real P/L" is the authoritative paper-account result
+            // (equity − startingCapital) — the single source of truth, no
+            // reconstruction. Fall back to the entry-derived figure only
+            // while the account is still loading. "What-if" stays the
+            // reconstruction over alerts that were never actually traded.
+            const { real: fallbackReal, whatIf } = pnlBreakdown(
+              entries, account?.unrealizedPnl,
+            );
+            const acct = account ? accountRealPnl(account) : null;
+            const real = acct ? acct.total : fallbackReal;
             const fmt = (n: number) =>
               `${n >= 0 ? '+' : ''}₹${Math.abs(n) < 1 ? n.toFixed(2) : n.toFixed(0)}`;
             const colorOf = (n: number) =>
               n > 0 ? 'text-emerald-400' : n < 0 ? 'text-red-400' : 'text-[var(--color-text-secondary)]';
             return (
               <div className="mb-3 flex flex-wrap items-baseline gap-x-6 gap-y-1 text-sm">
-                <div>
+                <div
+                  title={
+                    acct
+                      ? 'Authoritative account P&L: equity − starting capital. ' +
+                        'Realized + open positions + pending (deferred wins released at 18:00).'
+                      : 'Realized + open positions.'
+                  }
+                >
                   <span className="text-[var(--color-text-muted)]">Real P/L: </span>
                   <span className={`font-semibold tabular-nums ${colorOf(real)}`}>{fmt(real)}</span>
-                  <span className="ml-1 text-xs text-[var(--color-text-muted)]">
-                    (realized + open positions)
-                  </span>
+                  {acct && (
+                    <span className="ml-1 text-xs text-[var(--color-text-muted)]">
+                      (realized {fmt(acct.realized)} · open {fmt(acct.unrealized)} · pending {fmt(acct.pending)})
+                    </span>
+                  )}
                 </div>
                 <div
                   title="Hypothetical P/L of alerts that were scored but never actually traded — not real money, never deployed."

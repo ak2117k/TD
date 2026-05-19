@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { sectionTotalPnl, pnlBreakdown, breakdownChecks } from './watchPnl';
+import {
+  sectionTotalPnl, pnlBreakdown, breakdownChecks, profitView, accountRealPnl,
+} from './watchPnl';
 import type { WatchEntry } from '../types/watch.types';
 
 function entry(o: Partial<WatchEntry>): WatchEntry {
@@ -12,7 +14,7 @@ function entry(o: Partial<WatchEntry>): WatchEntry {
     maxFavorable: null, maxAdverse: null, lastTickAt: null, lastRescoreAt: null,
     optionsToken: null, optionsType: null, optionsExpiry: null, optionsStrike: null,
     optionsLotSize: null, optionsSelectionScore: null, paperTradeId: null,
-    liveTradeId: null, executedAt: null, executedPrice: null, closedAt: null,
+    liveTradeId: null, executedAt: null, executedPrice: null, quantity: null, closedAt: null,
     closedReason: null, notes: null, partialExitedAt: null, partialExitPrice: null,
     partialQty: null, remainingQty: null, trailingHighWater: null,
     trailingStopPrice: null, scannerName: null, realizedPnl: null,
@@ -95,6 +97,54 @@ describe('pnlBreakdown', () => {
     const openPos = entry({ status: 'TRADED', executedPrice: 100, currentPrice: 105 });
     expect(pnlBreakdown([openPos]).open).toBeCloseTo(10000, 0); // undefined
     expect(pnlBreakdown([openPos], null).open).toBeCloseTo(10000, 0); // null
+  });
+});
+
+describe('profitView', () => {
+  it('uses entry.quantity for the position size, not floor(MAX/price)', () => {
+    // executedPrice 100 → the floor(200000/100) estimate would be 2000;
+    // the real filled quantity is 1500.
+    const e = entry({ status: 'TRADED', executedPrice: 100, currentPrice: 105, quantity: 1500 });
+    const v = profitView(e);
+    expect(v.qty).toBe(1500);
+    expect(v.abs).toBeCloseTo(7500, 0); // (105-100) * 1500
+  });
+
+  it('uses remainingQty (trailing remainder) over the full quantity after a partial exit', () => {
+    const e = entry({
+      status: 'TRADED', executedPrice: 100, currentPrice: 105,
+      quantity: 1500, remainingQty: 750,
+    });
+    expect(profitView(e).qty).toBe(750);
+  });
+
+  it('falls back to floor(MAX/price) when quantity is absent (legacy entry)', () => {
+    const e = entry({ status: 'TRADED', executedPrice: 100, currentPrice: 105, quantity: null });
+    expect(profitView(e).qty).toBe(2000); // floor(200000 / 100)
+  });
+});
+
+describe('accountRealPnl', () => {
+  // equity = balance + deployedCapital + unrealizedPnl + pendingProfit
+  const acct = {
+    startingCapital: 2_000_000,
+    balance: 1_500_000,
+    deployedCapital: 480_000,
+    unrealizedPnl: 3_000,
+    pendingProfit: 12_000,
+    equity: 1_995_000, // 1,500,000 + 480,000 + 3,000 + 12,000
+  };
+
+  it('total is equity minus starting capital — the authoritative account P&L', () => {
+    expect(accountRealPnl(acct).total).toBe(-5_000); // 1,995,000 - 2,000,000
+  });
+
+  it('decomposes into realized + unrealized + pending, which sum to total', () => {
+    const r = accountRealPnl(acct);
+    expect(r.unrealized).toBe(3_000);
+    expect(r.pending).toBe(12_000);
+    expect(r.realized).toBe(-20_000); // balance + deployed - starting
+    expect(r.realized + r.unrealized + r.pending).toBeCloseTo(r.total, 6);
   });
 });
 
