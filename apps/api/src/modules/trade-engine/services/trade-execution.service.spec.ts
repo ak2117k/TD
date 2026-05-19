@@ -72,7 +72,7 @@ describe('TradeExecutionService.closeTrade — exit-reason persistence', () => {
               message: 'ok',
             })),
             simulateTick: jest.fn(),
-            applyExitAccounting: jest.fn(() => 100),
+            applyExitAccounting: jest.fn(),
           },
         },
         {
@@ -316,6 +316,7 @@ describe('TradeExecutionService.executeTrade — paper-trade entry price', () =>
     expect(repo.updateTrade).toHaveBeenCalledWith(
       trade.id, expect.objectContaining({ fees: expect.any(Number) }),
     );
+    // executeTrade makes exactly one updateTrade call (the entry-charge write).
     const fees = (repo.updateTrade as jest.Mock).mock.calls[0][1].fees;
     expect(fees).toBeGreaterThan(0);
   });
@@ -364,7 +365,7 @@ describe('TradeExecutionService.closeTrade — paper-trade exit price', () => {
         fillPrice: 130.5,
       })),
       simulateTick: jest.fn(),
-      applyExitAccounting: jest.fn(() => 100),
+      applyExitAccounting: jest.fn(),
     };
 
     brokerAdapter = {
@@ -535,10 +536,11 @@ describe('TradeExecutionService.closeTrade — paper-trade exit price', () => {
 });
 
 /**
- * Broker-charge feature — every paper exit routes through
- * PaperTradeService.applyExitAccounting (flat ₹100 brokerage + deferred
- * profit) and records the charge on the trade row's `fees` field so the
- * startup balance replay can reconstruct it.
+ * Broker-charge feature - every paper exit routes through
+ * PaperTradeService.applyExitAccounting with the slice P&L and the real
+ * SEBI/exchange charge computed by computeOrderCharges. The charge is
+ * persisted on the trade row's `fees` field so the startup balance replay
+ * can reconstruct it.
  */
 describe('TradeExecutionService.closeTrade — broker charge', () => {
   let module: TestingModule;
