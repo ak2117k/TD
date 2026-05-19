@@ -385,9 +385,13 @@ export class TradeExecutionService {
     const multiplier = trade.side === 'BUY' ? 1 : -1;
     const slicePnl = multiplier * (exitPrice - entryPrice) * closeQty;
     const pnl = (trade.pnl ?? 0) + slicePnl;
+    // Price-return percentage — quantity-independent, so it stays correct
+    // after a partial exit. The old pnl / (entryPrice × trade.quantity) used
+    // the post-shrink remaining quantity as the denominator while pnl was the
+    // cumulative total → an inflated % on every partially-exited trade.
     const pnlPercent =
       entryPrice > 0
-        ? (pnl / (entryPrice * trade.quantity)) * 100
+        ? (multiplier * (exitPrice - entryPrice) / entryPrice) * 100
         : 0;
 
     // Paper exits incur a flat brokerage and defer any winning profit to
@@ -430,15 +434,20 @@ export class TradeExecutionService {
             status: 'PARTIALLY_FILLED',
             quantity: trade.quantity - closeQty,
             pnl,
+            pnlPercent,
             fees: totalFees,
             notes: noteForLegacyField,
           },
     );
 
-    // Position manager mirrors only fully-closed trades; a partial leaves
-    // the position in place — it is removed on the final close.
+    // Mirror the close into the in-memory position tracker: a full close
+    // removes the position, a partial close shrinks it. Both book only THIS
+    // slice's realized P&L (slicePnl) — a prior partial already booked its
+    // own slice, so passing the cumulative pnl would double-count it.
     if (isFullClose) {
-      this.positionManagerService.removePosition(tradeId, pnl);
+      this.positionManagerService.removePosition(tradeId, slicePnl);
+    } else {
+      this.positionManagerService.reducePosition(tradeId, closeQty, slicePnl);
     }
 
     // Emit updates

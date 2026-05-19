@@ -51,6 +51,10 @@ export class OpenPaperTradeRefresherWorker {
       const paperOptionTrades = openTrades.filter(
         (t) =>
           t.isPaperTrade &&
+          // Only fully-OPEN trades: a PARTIALLY_FILLED trade's `pnl` is the
+          // REALIZED P&L booked by the partial close — overwriting it with a
+          // mark-to-market figure would erase that realized profit.
+          t.status === 'OPEN' &&
           (t as any).instrument?.segment === 'OPTIONS' &&
           (t as any).instrument?.expiry &&
           (t as any).instrument?.strike != null &&

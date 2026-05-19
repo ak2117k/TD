@@ -105,6 +105,23 @@ describe('PaperTradeService.simulateOrder — fillPrice exposure', () => {
     expect(response.status).toBe('PENDING');
     expect(response.fillPrice).toBeUndefined();
   });
+
+  it('a MARKET order fills off the LTP cached by simulateTick (consistent cache key)', async () => {
+    // simulateTick caches the LTP; a later MARKET order on the SAME token must
+    // fill off that cached LTP, not fall back to request.price. The write key
+    // and the read key must match.
+    service.simulateTick({ token: '11536', symbol: 'TCS-EQ', ltp: 500 } as never);
+
+    const response = await service.simulateOrder({
+      symbol: 'TCS-EQ', token: '11536', exchange: 'NSE', side: 'BUY',
+      orderType: 'MARKET', quantity: 10, price: 999, positionType: 'INTRADAY',
+    });
+
+    expect(response.status).toBe('FILLED');
+    // Filled off the cached LTP 500 (± slippage) — NOT request.price 999.
+    expect(response.fillPrice).toBeGreaterThanOrEqual(500);
+    expect(response.fillPrice).toBeLessThanOrEqual(500 * 1.001);
+  });
 });
 
 /**

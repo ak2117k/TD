@@ -270,6 +270,30 @@ export class PositionManagerService implements OnModuleInit {
   }
 
   /**
+   * Reduce an open position after a PARTIAL close: shrink the tracked
+   * quantity by the closed slice and book that slice's realized P&L. Called
+   * by TradeExecutionService on a partial close so the in-memory position
+   * never overstates what is actually still open (a stale, un-reduced size
+   * would feed the risk engine and get_positions a 2x quantity). Deletes the
+   * position if the reduction takes it to zero.
+   */
+  reducePosition(tradeId: string, closedQty: number, realizedPnl: number): void {
+    const position = this.positions.get(tradeId);
+    if (!position) return;
+    this.todayRealizedPnl += realizedPnl;
+    position.quantity = Math.max(0, position.quantity - closedQty);
+    if (position.quantity <= 0) {
+      this.positions.delete(tradeId);
+      this.logger.log(`Position fully reduced and removed: ${position.symbol}`);
+    } else {
+      this.logger.log(
+        `Position reduced: ${position.symbol} -${closedQty} -> ${position.quantity}, ` +
+          `realized slice P&L: ${realizedPnl.toFixed(2)}`,
+      );
+    }
+  }
+
+  /**
    * Get all open position trade IDs and their symbols.
    */
   getOpenPositionEntries(): Array<{

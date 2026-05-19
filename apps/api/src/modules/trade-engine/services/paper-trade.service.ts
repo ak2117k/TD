@@ -241,8 +241,10 @@ export class PaperTradeService implements OnModuleInit {
       createdAt: new Date(),
     });
 
-    // Check if we can fill immediately based on cached LTP
-    const ltp = this.ltpCache.get(`${request.token}:${request.exchange}`);
+    // Check if we can fill immediately based on cached LTP. Keyed by token
+    // alone — the instrument token is unique and is the one identifier both
+    // ticks and orders reliably carry (symbol/exchange casing varies).
+    const ltp = this.ltpCache.get(request.token);
     if (ltp !== undefined) {
       const canFill = this.canFillAtPrice(request, ltp);
       if (canFill) {
@@ -262,7 +264,7 @@ export class PaperTradeService implements OnModuleInit {
    * Called on every tick to check if any pending paper orders should fill.
    */
   simulateTick(tick: TickData): void {
-    this.ltpCache.set(`${tick.token}:${tick.symbol}`, tick.ltp);
+    this.ltpCache.set(tick.token, tick.ltp);
 
     // Update virtual positions with latest LTP
     for (const pos of this.virtualPositions.values()) {
@@ -512,7 +514,7 @@ export class PaperTradeService implements OnModuleInit {
     request: OrderRequest,
   ): OrderResponse {
     const ltp =
-      this.ltpCache.get(`${request.token}:${request.exchange}`) ??
+      this.ltpCache.get(request.token) ??
       request.price ??
       0;
 

@@ -89,6 +89,7 @@ describe('TradeExecutionService.closeTrade — exit-reason persistence', () => {
           useValue: {
             addPosition: jest.fn(),
             removePosition: jest.fn(),
+            reducePosition: jest.fn(),
             updatePositionPnL: jest.fn(),
           },
         },
@@ -378,6 +379,7 @@ describe('TradeExecutionService.closeTrade — paper-trade exit price', () => {
           useValue: {
             addPosition: jest.fn(),
             removePosition: jest.fn(),
+            reducePosition: jest.fn(),
             updatePositionPnL: jest.fn(),
           },
         },
@@ -409,6 +411,17 @@ describe('TradeExecutionService.closeTrade — paper-trade exit price', () => {
     }).compile();
 
     service = module.get(TradeExecutionService);
+  });
+
+  it('partial close reduces the position-manager position rather than removing it', async () => {
+    await service.closeTrade('trade_1', { quantity: 20 });
+
+    const pm = module.get(PositionManagerService) as unknown as {
+      reducePosition: jest.Mock; removePosition: jest.Mock;
+    };
+    // slice P&L = (130.5 - 100) * 20 = 610
+    expect(pm.reducePosition).toHaveBeenCalledWith('trade_1', 20, 610);
+    expect(pm.removePosition).not.toHaveBeenCalled();
   });
 
   it('records the simulator fillPrice as exitPrice for paper closes', async () => {
@@ -472,6 +485,15 @@ describe('TradeExecutionService.closeTrade — paper-trade exit price', () => {
     expect(trade.quantity).toBe(30); // 50 - 20
     // exit 20 @ 130.5, entry 100 → realized = (130.5 - 100) * 20 = 610
     expect(trade.pnl).toBeCloseTo(610, 2);
+  });
+
+  it('partial close records a correct, quantity-independent pnlPercent', async () => {
+    // entry 100, exit 130.5 → price return +30.5%, independent of the 20/50
+    // split. The old pnl/(entry x trade.quantity) formula inflated it.
+    const trade = await service.closeTrade('trade_1', { quantity: 20 });
+
+    expect(trade.status).toBe('PARTIALLY_FILLED');
+    expect(trade.pnlPercent).toBeCloseTo(30.5, 1);
   });
 
   it('falls back to a real price when the simulator fills at 0 (no cached LTP)', async () => {
@@ -566,6 +588,7 @@ describe('TradeExecutionService.closeTrade — broker charge', () => {
           useValue: {
             addPosition: jest.fn(),
             removePosition: jest.fn(),
+            reducePosition: jest.fn(),
             updatePositionPnL: jest.fn(),
           },
         },
