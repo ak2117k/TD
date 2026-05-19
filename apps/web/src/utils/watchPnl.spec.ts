@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sectionTotalPnl, pnlBreakdown } from './watchPnl';
+import { sectionTotalPnl, pnlBreakdown, breakdownChecks } from './watchPnl';
 import type { WatchEntry } from '../types/watch.types';
 
 function entry(o: Partial<WatchEntry>): WatchEntry {
@@ -95,5 +95,23 @@ describe('pnlBreakdown', () => {
     const openPos = entry({ status: 'TRADED', executedPrice: 100, currentPrice: 105 });
     expect(pnlBreakdown([openPos]).open).toBeCloseTo(10000, 0); // undefined
     expect(pnlBreakdown([openPos], null).open).toBeCloseTo(10000, 0); // null
+  });
+});
+
+describe('breakdownChecks', () => {
+  const checks = [{ name: 'Idx', passed: true }];
+
+  it('reads the wrapped { checks: [...] } shape (initialBreakdown / new currentBreakdown)', () => {
+    expect(breakdownChecks({ checks })).toEqual(checks);
+  });
+
+  it('reads a bare [...] array (legacy currentBreakdown shape)', () => {
+    expect(breakdownChecks(checks)).toEqual(checks);
+  });
+
+  it('returns [] for null / undefined / malformed input', () => {
+    expect(breakdownChecks(null)).toEqual([]);
+    expect(breakdownChecks(undefined)).toEqual([]);
+    expect(breakdownChecks({ foo: 1 })).toEqual([]);
   });
 });

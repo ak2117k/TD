@@ -150,7 +150,10 @@ export class WatchMonitorService {
     await this.repo.update(entry.id, {
       currentScore: newScore,
       lastRescoreAt: now,
-      currentBreakdown: result.checks as unknown as Prisma.InputJsonValue,
+      // Wrap as { checks } to match initialBreakdown's shape — the watch
+      // table reads breakdown.checks; a bare array renders all factors as
+      // the neutral dot instead of ✓/✗.
+      currentBreakdown: { checks: result.checks } as unknown as Prisma.InputJsonValue,
     });
 
     // Task 4: 10-minute grace period. The score-decay stop is suppressed for

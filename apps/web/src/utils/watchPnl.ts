@@ -99,3 +99,21 @@ export function pnlBreakdown(
     accountUnrealizedPnl != null ? accountUnrealizedPnl : openFromEntries;
   return { realized, open, whatIf, real: realized + open };
 }
+
+/**
+ * Extract the per-check results from a watch-entry breakdown value. Accepts
+ * BOTH shapes: the wrapped `{ checks: [...] }` (initialBreakdown, and
+ * currentBreakdown since the rescore-shape fix) and a bare `[...]` array
+ * (currentBreakdown as persisted by older rescores). Returns [] when the
+ * breakdown is absent or malformed — so the factor cells fall back to the
+ * neutral dot rather than crashing.
+ */
+export function breakdownChecks(
+  breakdown: unknown,
+): Array<{ name: string; passed: boolean }> {
+  if (Array.isArray(breakdown)) {
+    return breakdown as Array<{ name: string; passed: boolean }>;
+  }
+  const bd = breakdown as { checks?: Array<{ name: string; passed: boolean }> } | null;
+  return Array.isArray(bd?.checks) ? bd!.checks : [];
+}

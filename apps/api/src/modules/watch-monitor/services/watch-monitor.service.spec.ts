@@ -64,7 +64,10 @@ describe('WatchMonitorService', () => {
     }));
   });
 
-  it('persists currentBreakdown equal to result.checks on a successful rescore', async () => {
+  it('persists currentBreakdown wrapped as { checks } on a successful rescore', async () => {
+    // Must match initialBreakdown's shape ({ checks: [...] }) — the watch
+    // table reads breakdown.checks, so a bare array makes every factor cell
+    // render the neutral dot instead of ✓/✗.
     const checks = [{ name: 'sector', passed: true, points: 10, detail: 'ok' }];
     scoring.score.mockResolvedValue({ score: 75, lotCount: 2, checks });
     await svc.rescoreOne({
@@ -73,7 +76,7 @@ describe('WatchMonitorService', () => {
       createdAt: wellPastGrace(),
     } as any);
     expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
-      currentScore: 75, currentBreakdown: checks,
+      currentScore: 75, currentBreakdown: { checks },
     }));
   });
 

@@ -1,6 +1,6 @@
 import { Fragment } from 'react';
 import type { WatchEntry } from '../../types/watch.types';
-import { profitView, isClosed } from '../../utils/watchPnl';
+import { profitView, isClosed, breakdownChecks } from '../../utils/watchPnl';
 import { WatchDetailPanel } from './WatchDetailPanel';
 import { factorCell, type FactorCellState } from './factorCell';
 
@@ -63,11 +63,6 @@ const FACTOR_COLUMNS: ReadonlyArray<{ name: string; short: string }> = [
   { name: 'Volume confirmation', short: 'Vol' },
 ];
 
-/** Extract the per-check results from a breakdown value (or [] if absent/malformed). */
-function breakdownChecks(breakdown: unknown): Array<{ name: string; passed: boolean }> {
-  const bd = breakdown as { checks?: Array<{ name: string; passed: boolean }> } | null;
-  return Array.isArray(bd?.checks) ? bd!.checks : [];
-}
 
 /** Tailwind class for a factor cell, keyed by its transition state. */
 const FACTOR_STATE_CLASS: Record<FactorCellState, string> = {
