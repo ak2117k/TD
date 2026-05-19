@@ -666,7 +666,7 @@ export class WatchService {
 
     this.logger.warn(
       `Hard loss-cut: ${entry?.symbol ?? entryId} exited at ₹${exitPrice.toFixed(2)} ` +
-        `— open loss ₹${Math.abs(openPnl).toFixed(0)} (≥ ₹${hardLossCutRupees(entry).toFixed(0)} threshold)`,
+        `— open loss ₹${Math.abs(openPnl).toFixed(0)} (≥ ₹${hardLossCutRupees(entry ?? {}).toFixed(0)} threshold)`,
     );
     await this.repo.createEvent({
       watchEntryId: entryId,

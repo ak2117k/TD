@@ -465,6 +465,13 @@ describe('WatchService.transitionStopped', () => {
     }));
     expect(feed.unsubscribeForWatch).toHaveBeenCalled();
   });
+
+  it('transitionLossCut does not throw when the entry is not found (null entry)', async () => {
+    repo.findById.mockResolvedValue(null);
+    await expect(
+      svc.transitionLossCut('missing-id', 1990, -1200),
+    ).resolves.not.toThrow();
+  });
 });
 
 describe('WatchService — exits close the linked paper trade', () => {
