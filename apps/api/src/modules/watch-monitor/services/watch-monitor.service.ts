@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Prisma, WatchEntry, WatchEventType, WatchStatus } from '@prisma/client';
 import { WatchRepository } from '../repositories/watch.repository';
 import { ChartinkScoringService } from '../../chartink/services/chartink-scoring.service';
-import { WatchService, HARD_LOSS_CUT_RUPEES } from './watch.service';
+import { WatchService, HARD_LOSS_CUT_RUPEES, hardLossCutRupees } from './watch.service';
 import { RiskGuardService } from './risk-guard.service';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
 
@@ -91,10 +91,10 @@ export class WatchMonitorService {
       this.feed.getQuote(entry.token)?.ltp ?? entry.currentPrice ?? null;
     if (price == null || price <= 0) return false;
     const openPnl = this.watch.computeOpenPnl(entry, price);
-    if (openPnl <= -HARD_LOSS_CUT_RUPEES) {
+    if (openPnl <= -hardLossCutRupees(entry)) {
       this.logger.warn(
         `Safety-net loss-cut: ${entry.symbol} open loss ₹${Math.abs(openPnl).toFixed(0)} ` +
-          `(≥ ₹${HARD_LOSS_CUT_RUPEES}) caught by the feed-independent rescore loop`,
+          `(≥ ₹${hardLossCutRupees(entry).toFixed(0)}) caught by the feed-independent rescore loop`,
       );
       await this.watch.transitionLossCut(entry.id, price, openPnl);
       return true;

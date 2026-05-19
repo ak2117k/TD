@@ -32,6 +32,22 @@ const PARTIAL_EXIT_FRACTION = 0.5;
  *  can enforce the same threshold as a feed-independent safety net. */
 export const HARD_LOSS_CUT_RUPEES = 1000;
 
+/**
+ * Hard price loss-cut threshold for a trade (R5): 0.4% of the deployed
+ * capital (quantity x executedPrice). Replaces the flat HARD_LOSS_CUT_RUPEES,
+ * which now only serves as the fallback for legacy entries with no `quantity`.
+ */
+export function hardLossCutRupees(entry: {
+  quantity?: number | null;
+  executedPrice?: number | null;
+  initialPrice?: number | null;
+}): number {
+  const qty = entry.quantity ?? 0;
+  const price = entry.executedPrice ?? entry.initialPrice ?? 0;
+  const deployed = qty * price;
+  return deployed > 0 ? 0.004 * deployed : HARD_LOSS_CUT_RUPEES;
+}
+
 /** Maximum ₹ deployed per trade. Determines share quantity:
  *  qty = floor(MAX_INVESTMENT_PER_TRADE / referencePrice).
  *  Sourced from the shared per-trade risk cap (DEFAULT_MAX_CAPITAL_PER_TRADE)
@@ -510,7 +526,7 @@ export class WatchService {
     // Only the target-hit check above is allowed to win first (a profit exit).
     if (entry.status === 'TRADED') {
       const openPnl = this.computeOpenPnl(entry, ltp);
-      if (openPnl <= -HARD_LOSS_CUT_RUPEES) {
+      if (openPnl <= -hardLossCutRupees(entry)) {
         await this.transitionLossCut(entry.id, ltp, openPnl);
         return;
       }
@@ -610,7 +626,7 @@ export class WatchService {
       const confirmPrice = await this.fetchLivePrice(entry);
       if (confirmPrice != null) {
         const confirmPnl = this.computeOpenPnl(entry, confirmPrice);
-        if (confirmPnl > -HARD_LOSS_CUT_RUPEES) {
+        if (confirmPnl > -hardLossCutRupees(entry)) {
           this.logger.warn(
             `Loss-cut aborted for ${entry.symbol}: trigger showed a ₹${Math.abs(openPnl).toFixed(0)} loss ` +
               `but a fresh quote (₹${confirmPrice.toFixed(2)}) shows ₹${Math.abs(confirmPnl).toFixed(0)} — bad tick.`,
@@ -624,7 +640,7 @@ export class WatchService {
 
     this.logger.warn(
       `Hard loss-cut: ${entry?.symbol ?? entryId} exited at ₹${exitPrice.toFixed(2)} ` +
-        `— open loss ₹${Math.abs(openPnl).toFixed(0)} (≥ ₹${HARD_LOSS_CUT_RUPEES} threshold)`,
+        `— open loss ₹${Math.abs(openPnl).toFixed(0)} (≥ ₹${hardLossCutRupees(entry).toFixed(0)} threshold)`,
     );
     await this.repo.createEvent({
       watchEntryId: entryId,

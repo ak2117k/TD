@@ -601,17 +601,28 @@ describe('WatchService.onTick — hard loss-cut', () => {
     }));
   });
 
-  it('sizes the loss-cut off entry.quantity, not the floor(MAX/price) estimate', async () => {
-    // Real filled quantity is 200; the floor(200000/2000) estimate would be 100.
-    // At ltp 1995 the real loss is (1995-2000)*200 = -₹1,000 → must cut.
-    // With the old reconstruction it would be only -₹500 and wrongly survive.
-    repo.findActiveByToken.mockResolvedValue([tradedEntry({ quantity: 200 })]);
+  it('hard-cuts at 0.4% of deployed capital (quantity x executedPrice) (R5)', async () => {
+    // quantity 100, executedPrice 2000 -> deployed 200,000 -> SL = 0.4% = 800.
+    // BUY: at ltp 1992 the loss is (1992-2000)*100 = -800 -> at threshold -> cut.
+    repo.findActiveByToken.mockResolvedValue([tradedEntry({ quantity: 100 })]);
 
-    await svc.onTick('11536', 1995, new Date());
+    await svc.onTick('11536', 1992, new Date());
 
     expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
       status: 'STOPPED', closedReason: 'loss-cut',
     }));
+  });
+
+  it('does NOT hard-cut at -700 when the 0.4%-of-capital threshold is 800 (R5)', async () => {
+    // ltp 1993 -> loss (1993-2000)*100 = -700, inside the 800 threshold.
+    repo.findActiveByToken.mockResolvedValue([tradedEntry({ quantity: 100 })]);
+
+    await svc.onTick('11536', 1993, new Date());
+
+    const cut = (repo.update.mock.calls as any[]).find(
+      (c) => c[1]?.closedReason === 'loss-cut',
+    );
+    expect(cut).toBeUndefined();
   });
 
   it('aborts the loss-cut when a fresh broker quote shows the trigger tick was a glitch', async () => {
