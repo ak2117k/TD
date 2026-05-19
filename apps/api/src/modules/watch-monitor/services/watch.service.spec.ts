@@ -1,6 +1,6 @@
 import { Test } from '@nestjs/testing';
 import { Logger } from '@nestjs/common';
-import { WatchService, WatchCapExceededError, TradeCooldownError } from './watch.service';
+import { WatchService, WatchCapExceededError, TradeCooldownError, TRADE_COOLDOWN_MS } from './watch.service';
 import { WatchRepository } from '../repositories/watch.repository';
 import { TargetCalculatorService } from './target-calculator.service';
 import { StrikeSelectorService } from './strike-selector.service';
@@ -155,6 +155,9 @@ describe('WatchService.createFromAlert', () => {
       TradeCooldownError,
     );
     expect(repo.createEntry).not.toHaveBeenCalled();
+    // the `since` argument must be ~30 min before now
+    const passedSince: Date = repo.wasTokenExecutedSince.mock.calls[0][1];
+    expect(passedSince.getTime()).toBeCloseTo(Date.now() - TRADE_COOLDOWN_MS, -3); // +/-1s
   });
 
   it('creates entry, INITIAL event, subscribes feed on happy path', async () => {

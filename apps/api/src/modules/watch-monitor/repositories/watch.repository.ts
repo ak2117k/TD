@@ -152,7 +152,7 @@ export class WatchRepository {
    */
   async wasTokenExecutedSince(token: string, since: Date): Promise<boolean> {
     const count = await this.prisma.watchEntry.count({
-      where: { token, executedAt: { gte: since } },
+      where: { token, status: WatchStatus.TRADED, executedAt: { gte: since } },
     });
     return count > 0;
   }
