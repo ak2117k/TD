@@ -1,6 +1,6 @@
 import { Test } from '@nestjs/testing';
 import { Logger } from '@nestjs/common';
-import { WatchService, WatchCapExceededError } from './watch.service';
+import { WatchService, WatchCapExceededError, TradeCooldownError } from './watch.service';
 import { WatchRepository } from '../repositories/watch.repository';
 import { TargetCalculatorService } from './target-calculator.service';
 import { StrikeSelectorService } from './strike-selector.service';
@@ -34,6 +34,7 @@ describe('WatchService.createFromAlert', () => {
       countActive: jest.fn().mockResolvedValue(0),
       createEntry: jest.fn().mockResolvedValue({ id: 'w1', token: '11536' }),
       createEvent: jest.fn().mockResolvedValue({ id: 'e1' }),
+      wasTokenExecutedSince: jest.fn().mockResolvedValue(false),
     };
     target = { compute: jest.fn().mockReturnValue({ target: 4150, source: 'indicator-sr' }) };
     strike = { pick: jest.fn().mockResolvedValue(null) };
@@ -143,6 +144,17 @@ describe('WatchService.createFromAlert', () => {
     repo.findActiveByToken.mockResolvedValue([]); // no active watch for this token
     await svc.createFromAlert(baseInput);
     expect(repo.createEntry).toHaveBeenCalled();
+  });
+
+  it('rejects a symbol traded within the last 30 minutes (R2 cooldown)', async () => {
+    repo.findActiveBySetupId.mockResolvedValue(null);
+    repo.findActiveByToken.mockResolvedValue([]);
+    repo.wasTokenExecutedSince.mockResolvedValue(true);
+
+    await expect(svc.createFromAlert(baseInput)).rejects.toBeInstanceOf(
+      TradeCooldownError,
+    );
+    expect(repo.createEntry).not.toHaveBeenCalled();
   });
 
   it('creates entry, INITIAL event, subscribes feed on happy path', async () => {

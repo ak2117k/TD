@@ -60,6 +60,17 @@ export class WatchCapExceededError extends Error {
   }
 }
 
+/** Re-entry cooldown window (R2): no new trade for a symbol within this many
+ *  ms of its last execution. */
+export const TRADE_COOLDOWN_MS = 30 * 60_000;
+
+export class TradeCooldownError extends Error {
+  constructor(symbol: string) {
+    super(`${symbol}: traded within the last 30 minutes - cooldown active`);
+    this.name = 'TradeCooldownError';
+  }
+}
+
 export interface CreateFromAlertInput {
   alertId: string;
   setupId: string;
@@ -140,6 +151,22 @@ export class WatchService {
         `createFromAlert: ${input.symbol} already being watched (entry ${reused.id}, status=${reused.status}) — skipping duplicate from setup ${input.setupId}`,
       );
       return reused;
+    }
+
+    // R2: 30-minute re-entry cooldown. A symbol executed in the last 30 min
+    // may not be re-traded even though its prior trade has already closed
+    // (which is why the active-token dedup above did not catch it).
+    const cooldownSince = new Date(Date.now() - TRADE_COOLDOWN_MS);
+    if (await this.repo.wasTokenExecutedSince(input.token, cooldownSince)) {
+      this.logger.warn(
+        formatTradeRejection({
+          symbol: input.symbol,
+          side: input.side,
+          stage: 'watch',
+          reason: 'symbol traded within the last 30 min - cooldown active',
+        }),
+      );
+      throw new TradeCooldownError(input.symbol);
     }
 
     const active = await this.repo.countActive();

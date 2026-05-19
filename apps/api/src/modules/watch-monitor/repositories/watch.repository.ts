@@ -147,6 +147,17 @@ export class WatchRepository {
   }
 
   /**
+   * True if any watch entry for this token was EXECUTED at or after `since`.
+   * Backs the 30-minute re-entry cooldown (R2).
+   */
+  async wasTokenExecutedSince(token: string, since: Date): Promise<boolean> {
+    const count = await this.prisma.watchEntry.count({
+      where: { token, executedAt: { gte: since } },
+    });
+    return count > 0;
+  }
+
+  /**
    * All TRADED entries that were executed today (IST date). Used by
    * RiskGuardService to compute the running daily P&L.
    */

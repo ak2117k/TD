@@ -4,7 +4,7 @@ import { MarketDataRepository } from '../../market-data/repositories/market-data
 import { ChartinkScoringService, classifyTrend } from './chartink-scoring.service';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { NseSectorIndexService } from '../../market-data/services/nse-sector-index.service';
-import { WatchService, WatchCapExceededError } from '../../watch-monitor/services/watch.service';
+import { WatchService, WatchCapExceededError, TradeCooldownError } from '../../watch-monitor/services/watch.service';
 import { formatTradeRejection } from '../../../common/utils/trade-rejection-log';
 import { isWithinEntryWindow } from '../../../common/utils/market-hours';
 import { evaluateTradePolicy } from '../../watch-monitor/services/trade-policy';
@@ -300,7 +300,9 @@ export class ChartinkProcessService {
         });
       } catch (err) {
         if (err instanceof WatchCapExceededError) {
-          this.logger.warn(`watch cap exceeded — skipping ${hit.symbol}`);
+          this.logger.warn(`watch cap exceeded - skipping ${hit.symbol}`);
+        } else if (err instanceof TradeCooldownError) {
+          this.logger.log(`cooldown active - skipping ${hit.symbol}`);
         } else {
           this.logger.warn(
             `watch.createFromAlert failed for ${hit.symbol}: ${err instanceof Error ? err.message : err}`,
