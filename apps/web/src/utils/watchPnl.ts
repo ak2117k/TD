@@ -38,6 +38,70 @@ export function profitView(entry: WatchEntry): ProfitView {
   };
 }
 
+/** Score-tiered capital (₹) for a hypothetical trade — mirrors backend R4
+ *  evaluateTradePolicy tiers: [60,65)->1L, [65,75)->1.5L, [75,inf)->2L. The
+ *  11:45-14:00 IST flat-1L window is intentionally omitted (a documented
+ *  what-if approximation). */
+function tierCapital(score: number): number {
+  if (score < 65) return 100_000;
+  if (score < 75) return 150_000;
+  return 200_000;
+}
+
+/** Estimated round-trip SEBI/exchange charges for a hypothetical NSE
+ *  equity-intraday trade — mirrors the backend trade-charges model (R6):
+ *  a BUY entry leg + a SELL exit leg. `turnover` is the per-leg value
+ *  (entry ~= exit for a what-if estimate). */
+function estimateRoundTripCharges(turnover: number): number {
+  const t = Math.max(0, turnover);
+  const brokerage = Math.min(t * 0.0003, 20); // 0.03%, capped Rs.20 — each leg
+  const exchangeTxn = t * 0.0000297;          // 0.00297% NSE — each leg
+  const sebiFee = t * 0.000001;               // Rs.10 per crore — each leg
+  const gstPerLeg = (brokerage + exchangeTxn) * 0.18;
+  const perLeg = brokerage + exchangeTxn + sebiFee + gstPerLeg;
+  const stampDuty = t * 0.00003;              // 0.003% — buy leg only
+  const stt = t * 0.00025;                    // 0.025% — sell leg only
+  return perLeg + stampDuty + perLeg + stt;
+}
+
+/**
+ * Bounded what-if P/L for an alert that was scored but never traded — what the
+ * trade WOULD have netted under our rules, NOT a raw unbounded mark-to-market:
+ *   - entry at initialPrice (the alert price), sized by score-tiered capital (R4)
+ *   - floored at the -0.4% hard stop-loss (R5)
+ *   - capped at the profit target
+ *   - net of round-trip SEBI charges (R6)
+ * Returns a ProfitView so the watch table can render a what-if row exactly
+ * like a real one. A never-marked entry (no currentPrice) yields abs 0.
+ */
+export function whatIfView(entry: WatchEntry): ProfitView {
+  const ref = entry.initialPrice;
+  const qty = Math.max(1, Math.floor(tierCapital(entry.initialScore) / Math.max(ref, 1)));
+  const hasLivePrice = entry.currentPrice != null;
+  if (!ref || ref <= 0 || !hasLivePrice) {
+    return { abs: 0, pct: 0, ref, qty, hasLivePrice };
+  }
+  const capital = qty * ref;
+  const sideMul = entry.side === 'BUY' ? 1 : -1;
+  const rawPnl = (entry.currentPrice! - ref) * sideMul * qty;
+  const floorPnl = -0.004 * capital; // R5: stopped at -0.4% of deployed capital
+  const rawCeil =
+    entry.profitTarget != null
+      ? (entry.profitTarget - ref) * sideMul * qty // capped at the profit target
+      : rawPnl;
+  // Never let the cap fall below the floor (degenerate target data).
+  const ceilPnl = Math.max(rawCeil, floorPnl);
+  const gross = Math.min(Math.max(rawPnl, floorPnl), ceilPnl);
+  const abs = gross - estimateRoundTripCharges(capital);
+  return {
+    abs,
+    pct: capital > 0 ? (abs / capital) * 100 : 0,
+    ref,
+    qty,
+    hasLivePrice,
+  };
+}
+
 const CLOSED: ReadonlyArray<string> = ['STOPPED', 'TARGET_HIT', 'EXITED', 'DISMISSED'];
 
 export function isClosed(status: string): boolean {
@@ -54,7 +118,10 @@ export function sectionTotalPnl(entries: WatchEntry[]): number {
     if (isClosed(e.status) && e.realizedPnl != null) {
       return total + e.realizedPnl;
     }
-    return total + profitView(e).abs;
+    if (e.status === 'TRADED') {
+      return total + profitView(e).abs;
+    }
+    return total + whatIfView(e).abs;
   }, 0);
 }
 
@@ -98,7 +165,7 @@ export function pnlBreakdown(
     } else if (e.status === 'TRADED') {
       openFromEntries += profitView(e).abs;
     } else {
-      whatIf += profitView(e).abs;
+      whatIf += whatIfView(e).abs;
     }
   }
   const open =

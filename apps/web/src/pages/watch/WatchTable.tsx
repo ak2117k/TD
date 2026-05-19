@@ -1,6 +1,6 @@
 import { Fragment } from 'react';
 import type { WatchEntry } from '../../types/watch.types';
-import { profitView, isClosed, breakdownChecks } from '../../utils/watchPnl';
+import { profitView, whatIfView, isClosed, breakdownChecks } from '../../utils/watchPnl';
 import { WatchDetailPanel } from './WatchDetailPanel';
 import { factorCell, type FactorCellState } from './factorCell';
 
@@ -89,7 +89,7 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
           <th className="py-2 px-3 text-left">Side</th>
           <th
             className="py-2 px-3 text-right"
-            title="Shares bought = floor(₹2,00,000 / reference price). Varies by stock price."
+            title="Traded rows: actual filled quantity. Untraded (what-if) rows: score-tiered capital ÷ price."
           >
             Qty
           </th>
@@ -97,7 +97,7 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
           <th className="py-2 px-3 text-right">Δ%</th>
           <th
             className="py-2 px-3 text-right"
-            title="Running P&L at ₹2L max investment per trade (qty varies by stock price)"
+            title="Real rows: live / realized P&L. What-if rows: bounded counterfactual — floored at the −0.4% stop, capped at target, net of charges."
           >
             P&amp;L
           </th>
@@ -120,7 +120,13 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
       </thead>
       <tbody>
         {entries.map((e) => {
-          const p = profitView(e);
+          // A what-if row = scored but never actually traded. Its P&L/Qty must
+          // come from whatIfView (bounded counterfactual), so the row matches
+          // the header's "What-if" total. Real (TRADED / closed-traded) rows
+          // keep profitView.
+          const isWhatIf =
+            !(isClosed(e.status) && e.realizedPnl != null) && e.status !== 'TRADED';
+          const p = isWhatIf ? whatIfView(e) : profitView(e);
           // Buy-time pass/fail per factor.
           const initialByName = new Map(
             breakdownChecks(e.initialBreakdown).map((c) => [c.name, c.passed]),

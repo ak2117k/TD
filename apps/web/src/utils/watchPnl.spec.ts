@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  sectionTotalPnl, pnlBreakdown, breakdownChecks, profitView, accountRealPnl,
+  sectionTotalPnl, pnlBreakdown, breakdownChecks, profitView, accountRealPnl, whatIfView,
 } from './watchPnl';
 import type { WatchEntry } from '../types/watch.types';
 
@@ -36,9 +36,10 @@ describe('sectionTotalPnl', () => {
 
   it('closed entry that never traded contributes its what-if P/L (matches the column)', () => {
     // STOPPED, never executed (realizedPnl null), price moved 100 → 105.
-    // qty = floor(200000/100) = 2000 → what-if = (105-100)*2000 = 10,000
+    // score 60 -> ₹1L tier, qty = floor(100000/100) = 1000,
+    // raw = (105-100)*1000 = 5000; within bounds; minus charges 82.41 -> 4917.59
     const e = entry({ status: 'STOPPED', initialPrice: 100, currentPrice: 105, realizedPnl: null });
-    expect(sectionTotalPnl([e])).toBeCloseTo(10000, 0);
+    expect(sectionTotalPnl([e])).toBeCloseTo(4917.59, 1);
   });
 
   it('closed entry that never traded and never moved contributes ₹0', () => {
@@ -57,18 +58,20 @@ describe('pnlBreakdown', () => {
   it('separates realized, open (live), and what-if', () => {
     const realized = entry({ status: 'STOPPED', realizedPnl: -1500 });
     const open = entry({ status: 'TRADED', executedPrice: 100, currentPrice: 105 }); // +10,000
-    const untraded = entry({ status: 'WATCHING', initialPrice: 100, currentPrice: 103 }); // +6,000
+    const untraded = entry({ status: 'WATCHING', initialPrice: 100, currentPrice: 103 }); // bounded what-if
     const b = pnlBreakdown([realized, open, untraded]);
     expect(b.realized).toBe(-1500);
     expect(b.open).toBeCloseTo(10000, 0);
-    expect(b.whatIf).toBeCloseTo(6000, 0);
+    expect(b.whatIf).toBeCloseTo(2917.59, 1);
     expect(b.real).toBeCloseTo(8500, 0); // realized + open, excludes what-if
   });
 
   it('counts a DISMISSED never-traded entry as what-if, never as real', () => {
+    // DISMISSED, never traded: score 60 -> ₹1L, qty=1000, raw=(110-100)*1000=10000,
+    // exactly at the cap (profitTarget 110), minus charges 82.41 -> 9917.59
     const dismissed = entry({ status: 'DISMISSED', initialPrice: 100, currentPrice: 110, realizedPnl: null });
     const b = pnlBreakdown([dismissed]);
-    expect(b.whatIf).toBeCloseTo(20000, 0); // (110-100) * floor(200000/100)
+    expect(b.whatIf).toBeCloseTo(9917.59, 1);
     expect(b.real).toBe(0);
   });
 
@@ -121,6 +124,54 @@ describe('profitView', () => {
   it('falls back to floor(MAX/price) when quantity is absent (legacy entry)', () => {
     const e = entry({ status: 'TRADED', executedPrice: 100, currentPrice: 105, quantity: null });
     expect(profitView(e).qty).toBe(2000); // floor(200000 / 100)
+  });
+});
+
+describe('whatIfView — bounded counterfactual', () => {
+  it('mid-range move: raw P&L within bounds, minus round-trip charges', () => {
+    // score 60 -> ₹1L tier, qty floor(100000/100)=1000, capital 100000.
+    // raw = (103-100)*1000 = 3000; within [floor -400, cap 10000].
+    // charges on 100000 capital = 82.41 -> abs = 3000 - 82.41
+    const e = entry({ status: 'WATCHING', initialPrice: 100, currentPrice: 103 });
+    const v = whatIfView(e);
+    expect(v.qty).toBe(1000);
+    expect(v.abs).toBeCloseTo(2917.59, 1);
+  });
+
+  it('floors a deep loss at the −0.4%-of-capital stop, not the raw drawdown', () => {
+    // raw = (90-100)*1000 = -10000, but floored at -0.4%*100000 = -400.
+    // abs = -400 - 82.41
+    const e = entry({ status: 'WATCHING', initialPrice: 100, currentPrice: 90 });
+    const v = whatIfView(e);
+    expect(v.abs).toBeCloseTo(-482.41, 1);
+    expect(v.abs).toBeGreaterThan(-1000); // NOT the raw -10000
+  });
+
+  it('caps a runaway gain at the profit target', () => {
+    // currentPrice 200 -> raw 100000, capped at (110-100)*1000 = 10000.
+    // abs = 10000 - 82.41
+    const e = entry({ status: 'WATCHING', initialPrice: 100, currentPrice: 200, profitTarget: 110 });
+    const v = whatIfView(e);
+    expect(v.abs).toBeCloseTo(9917.59, 1);
+  });
+
+  it('sizes quantity by the score tier (R4), not a flat ₹2L', () => {
+    // score 70 -> [65,75) tier -> ₹1.5L -> floor(150000/100) = 1500
+    const e = entry({ status: 'WATCHING', initialScore: 70, initialPrice: 100, currentPrice: 100 });
+    expect(whatIfView(e).qty).toBe(1500);
+  });
+
+  it('yields abs 0 when the alert has no current price (no opinion)', () => {
+    const e = entry({ status: 'WATCHING', initialPrice: 100, currentPrice: null });
+    const v = whatIfView(e);
+    expect(v.abs).toBe(0);
+    expect(v.hasLivePrice).toBe(false);
+  });
+
+  it('a SELL alert that fell in its favour shows a bounded gain', () => {
+    // SELL, ref 100, current 97 -> raw (97-100)*-1*1000 = 3000; bounded; minus charges
+    const e = entry({ status: 'WATCHING', side: 'SELL', initialPrice: 100, currentPrice: 97, profitTarget: 90 });
+    expect(whatIfView(e).abs).toBeCloseTo(2917.59, 1);
   });
 });
 
