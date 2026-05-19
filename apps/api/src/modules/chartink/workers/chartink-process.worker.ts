@@ -10,6 +10,9 @@ export class ChartinkProcessWorker {
 
   constructor(private readonly process: ChartinkProcessService) {}
 
+  // Bull default concurrency is 1 - Chartink alert jobs run strictly
+  // serially, so the createFromAlert same-symbol reuse guard cannot race.
+  // Do NOT raise concurrency without first making that guard atomic.
   @Process('process')
   async handle(job: Job<ChartinkProcessJobData>): Promise<void> {
     const { alertId, hits } = job.data;

@@ -139,6 +139,18 @@ describe('WatchService.createFromAlert', () => {
     expect(repo.createEntry).not.toHaveBeenCalled();
   });
 
+  it('R1: does not create a second entry while one is active for the symbol', async () => {
+    repo.findActiveBySetupId.mockResolvedValue(null);
+    repo.findActiveByToken.mockResolvedValue([
+      { id: 'already-open', token: '11536', status: 'TRADED', symbol: 'TCS-EQ' },
+    ]);
+
+    const r = await svc.createFromAlert(baseInput);
+
+    expect(r.id).toBe('already-open');
+    expect(repo.createEntry).not.toHaveBeenCalled();
+  });
+
   it('proceeds to create when no active entry exists for token (both dedups miss)', async () => {
     repo.findActiveBySetupId.mockResolvedValue(null);
     repo.findActiveByToken.mockResolvedValue([]); // no active watch for this token
