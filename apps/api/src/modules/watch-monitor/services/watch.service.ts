@@ -26,10 +26,9 @@ const TRAILING_STOP_PCT = 0.005;
 /** Fraction of position to exit at the partial-exit threshold. (Unchanged.) */
 const PARTIAL_EXIT_FRACTION = 0.5;
 
-/** Hard ₹ open-loss cut: a TRADED entry whose unrealized loss reaches this is
- *  closed immediately — ~0.5% on a ~₹2L position, deliberately tight. Retune
- *  by editing this single line. Exported so the WatchMonitorService 60s loop
- *  can enforce the same threshold as a feed-independent safety net. */
+/** Legacy fallback loss-cut threshold (₹1000). Used by hardLossCutRupees()
+ *  only for entries with no quantity. The live per-entry threshold is 0.4% of
+ *  deployed capital, computed by hardLossCutRupees(entry). */
 export const HARD_LOSS_CUT_RUPEES = 1000;
 
 /**
