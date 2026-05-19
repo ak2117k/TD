@@ -1,9 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Prisma, WatchEntry, WatchEventType } from '@prisma/client';
+import { Prisma, WatchEntry, WatchEventType, WatchStatus } from '@prisma/client';
 import { WatchRepository } from '../repositories/watch.repository';
 import { ChartinkScoringService } from '../../chartink/services/chartink-scoring.service';
-import { WatchService } from './watch.service';
+import { WatchService, HARD_LOSS_CUT_RUPEES } from './watch.service';
 import { RiskGuardService } from './risk-guard.service';
+import { MarketFeedService } from '../../market-data/services/market-feed.service';
 
 /**
  * Score-decay stop grace window: the score-decay stop is suppressed for the
@@ -23,6 +24,7 @@ export class WatchMonitorService {
     private readonly scoring: ChartinkScoringService,
     private readonly watch: WatchService,
     private readonly riskGuard: RiskGuardService,
+    private readonly feed: MarketFeedService,
   ) {}
 
   async tickAll(): Promise<void> {
@@ -43,14 +45,61 @@ export class WatchMonitorService {
     const paceMs = Math.max(0, Math.floor(60_000 / Math.max(entries.length, 1)));
     for (let i = 0; i < entries.length; i++) {
       try {
-        await this.rescoreOne(entries[i]);
+        // Heal feed subscriptions first: they are in-memory and wiped on an
+        // API restart, which leaves open positions with no live price.
+        this.ensureFeedSubscription(entries[i]);
+        // Safety net next: a hard price loss is more urgent than a score
+        // recompute. If the entry is cut, skip the now-pointless rescore.
+        const cut = await this.checkOpenLoss(entries[i]);
+        if (!cut) await this.rescoreOne(entries[i]);
       } catch (err) {
         this.logger.warn(
-          `rescoreOne unexpected throw for ${entries[i].symbol}: ${err instanceof Error ? err.message : err}`,
+          `tickAll: processing ${entries[i].symbol} threw: ${err instanceof Error ? err.message : err}`,
         );
       }
       if (i < entries.length - 1) await this.sleep(paceMs);
     }
+  }
+
+  /**
+   * Re-subscribe an entry's token(s) to the live feed. The feed's subscription
+   * map is in-memory and lost on an API restart; subscribeForWatch is only
+   * called when a NEW alert arrives, so an already-open position would never
+   * get ticks again after a restart — frozen ltp, +0 unrealized P&L, and a
+   * blind loss-cut. subscribeForWatch is idempotent, so re-running it every
+   * tick is cheap and self-heals after a restart or WebSocket reconnect.
+   */
+  private ensureFeedSubscription(entry: WatchEntry): void {
+    this.feed.subscribeForWatch(entry.token, entry.id);
+    if (entry.optionsToken) {
+      this.feed.subscribeForWatch(entry.optionsToken, entry.id);
+    }
+  }
+
+  /**
+   * Feed-independent safety net for the price-based loss-cut. The per-tick
+   * loss-cut lives in WatchService.applyTick; if that path stalls (e.g. a
+   * broker tick stream freezes for a token), a TRADED entry could bleed
+   * uncapped. This 60s-loop check re-evaluates open P&L from the feed quote
+   * cache — populated by the feed's own tick handler, independent of the
+   * watch onTick path — and hard-cuts the entry if the loss breaches the
+   * limit. Returns true when the entry was cut (caller skips the rescore).
+   */
+  private async checkOpenLoss(entry: WatchEntry): Promise<boolean> {
+    if (entry.status !== WatchStatus.TRADED) return false;
+    const price =
+      this.feed.getQuote(entry.token)?.ltp ?? entry.currentPrice ?? null;
+    if (price == null || price <= 0) return false;
+    const openPnl = this.watch.computeOpenPnl(entry, price);
+    if (openPnl <= -HARD_LOSS_CUT_RUPEES) {
+      this.logger.warn(
+        `Safety-net loss-cut: ${entry.symbol} open loss ₹${Math.abs(openPnl).toFixed(0)} ` +
+          `(≥ ₹${HARD_LOSS_CUT_RUPEES}) caught by the feed-independent rescore loop`,
+      );
+      await this.watch.transitionLossCut(entry.id, price, openPnl);
+      return true;
+    }
+    return false;
   }
 
   async rescoreOne(entry: WatchEntry): Promise<void> {

@@ -4,14 +4,15 @@ import { WatchService, WatchCapExceededError } from './watch.service';
 import { WatchRepository } from '../repositories/watch.repository';
 import { TargetCalculatorService } from './target-calculator.service';
 import { StrikeSelectorService } from './strike-selector.service';
-import { MarketFeedService } from '../../market-data/services/market-feed.service';
+import { MarketFeedService, BROKER_ADAPTER_TOKEN } from '../../market-data/services/market-feed.service';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
 import { WatchGateway } from '../gateways/watch.gateway';
 import { TradeExecutionService } from '../../trade-engine/services/trade-execution.service';
 import { DEFAULT_MAX_CAPITAL_PER_TRADE } from '@td/shared';
 import * as marketHours from '../../../common/utils/market-hours';
 
-const mockTrade = { closeTrade: jest.fn().mockResolvedValue({}) };
+// Loosely typed: tests assign `executeTrade`/`closeTrade` dynamically per case.
+const mockTrade: any = { closeTrade: jest.fn().mockResolvedValue({}) };
 
 describe('WatchService.createFromAlert', () => {
   let svc: WatchService;
@@ -50,6 +51,7 @@ describe('WatchService.createFromAlert', () => {
         { provide: LevelBookService, useValue: levelBook },
         { provide: WatchGateway, useValue: { emitTick: jest.fn(), emitEvent: jest.fn(), emitCreated: jest.fn() } },
         { provide: TradeExecutionService, useValue: mockTrade },
+        { provide: BROKER_ADAPTER_TOKEN, useValue: { getLiveQuote: jest.fn().mockResolvedValue({ ltp: 4000 }) } },
       ],
     }).compile();
     svc = mod.get(WatchService);
@@ -162,6 +164,28 @@ describe('WatchService.createFromAlert', () => {
     await svc.createFromAlert(baseInput);
     expect(feed.subscribeForWatch).toHaveBeenCalledWith('11536', 'w1');
     expect(feed.subscribeForWatch).toHaveBeenCalledWith('OPT-TOKEN', 'w1');
+  });
+
+  it('subscribes to the feed only AFTER the entry is executed (no WATCHING tick race)', async () => {
+    // Bug B: subscribing to the live feed before executeEntry flips the
+    // entry to TRADED let a tick land while status was still WATCHING —
+    // applyTick then skipped the price loss-cut (gated `status==='TRADED'`).
+    // The feed subscription must happen after the execute step resolves.
+    repo.findById = jest.fn().mockResolvedValue({
+      id: 'w1', token: '11536', symbol: 'TCS-EQ', side: 'BUY',
+      status: 'WATCHING', initialPrice: 4000, initialBreakdown: { lotCount: 1 },
+      optionsToken: null, optionsLotSize: null, profitTarget: 4150,
+    });
+    repo.update = jest.fn().mockResolvedValue({});
+    mockTrade.executeTrade = jest.fn().mockResolvedValue({ id: 'pt1', entryPrice: 4001 });
+
+    await svc.createFromAlert(baseInput);
+
+    expect(feed.subscribeForWatch).toHaveBeenCalled();
+    expect(mockTrade.executeTrade).toHaveBeenCalled();
+    const subscribeOrder = feed.subscribeForWatch.mock.invocationCallOrder[0];
+    const executeOrder = mockTrade.executeTrade.mock.invocationCallOrder[0];
+    expect(subscribeOrder).toBeGreaterThan(executeOrder);
   });
 
   it('auto-executes the paper trade after creating the entry', async () => {
@@ -355,14 +379,19 @@ describe('WatchService.onTick', () => {
     }));
   });
 
-  it('drops stale ticks older than lastTickAt', async () => {
+  it('drops a genuinely out-of-order tick (older than lastTickAt, fresh broker clock)', async () => {
+    // Realistic timestamps: both within the broker-clock trust window, so
+    // the out-of-order guard applies and the reordered tick is dropped.
+    const now = Date.now();
+    const lastTick = new Date(now - 1_000);  // last processed 1s ago
+    const staleTick = new Date(now - 6_000); // this tick is 6s older
     repo.findActiveByToken.mockResolvedValue([{
       id: 'w1', token: '11536', side: 'BUY', status: 'WATCHING',
       initialPrice: 4000, lastEventPrice: 4000, profitTarget: 4150,
-      lastTickAt: new Date('2026-05-13T10:00:05Z'),
+      lastTickAt: lastTick,
       maxFavorable: 4000, maxAdverse: 4000,
     }]);
-    await svc.onTick('11536', 4010, new Date('2026-05-13T10:00:00Z'));
+    await svc.onTick('11536', 4010, staleTick);
     expect(repo.update).not.toHaveBeenCalled();
     expect(repo.createEvent).not.toHaveBeenCalled();
   });
@@ -565,6 +594,26 @@ describe('WatchService.onTick — hard loss-cut', () => {
       status: 'STOPPED', closedReason: 'loss-cut',
     }));
   });
+
+  it('still loss-cuts when consecutive ticks carry a stale (non-advancing) broker timestamp', async () => {
+    // Repro of the BSHSL freeze: the broker keeps emitting ticks whose
+    // timestamp is hours behind wall-clock. The first such tick set
+    // lastTickAt to that stale value; every later tick is <= it, so the
+    // out-of-order guard dropped them ALL — applyTick never ran again and
+    // the loss-cut (which lives inside applyTick) was silently disabled.
+    // A bad broker clock must NEVER be able to wedge tick processing.
+    const staleTs = new Date(Date.now() - 3 * 60 * 60 * 1000); // 3h ago
+    repo.findActiveByToken.mockResolvedValue([
+      tradedEntry({ lastTickAt: staleTs }),
+    ]);
+
+    // New tick also carries the stale timestamp; ltp=1985 → loss -₹1,500.
+    await svc.onTick('11536', 1985, staleTs);
+
+    expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
+      status: 'STOPPED', closedReason: 'loss-cut',
+    }));
+  });
 });
 
 describe('WatchService.list — enrichment', () => {
@@ -627,6 +676,7 @@ describe('WatchService.executeEntry — 15:00 IST entry cutoff', () => {
         { provide: LevelBookService, useValue: { getLevels: jest.fn() } },
         { provide: WatchGateway, useValue: { emitTick: jest.fn() } },
         { provide: TradeExecutionService, useValue: trade },
+        { provide: BROKER_ADAPTER_TOKEN, useValue: { getLiveQuote: jest.fn().mockResolvedValue({ ltp: 4000 }) } },
       ],
     }).compile();
     svc = mod.get(WatchService);
@@ -671,5 +721,74 @@ describe('WatchService.executeEntry — 15:00 IST entry cutoff', () => {
       status: 'TRADED',
     }));
     expect(result).toMatchObject({ id: 'pt1' });
+  });
+});
+
+describe('WatchService.executeEntry — live-quote pricing (Bug A)', () => {
+  let svc: WatchService;
+  let repo: any;
+  let trade: any;
+  let brokerAdapter: any;
+
+  const watchingEntry = {
+    id: 'w1', token: '11536', symbol: 'TCS-EQ', side: 'BUY', exchange: 'NSE',
+    status: 'WATCHING', initialPrice: 4000, initialBreakdown: { lotCount: 1 },
+    optionsToken: null, optionsLotSize: null, profitTarget: 4150,
+  };
+
+  beforeEach(async () => {
+    jest.spyOn(marketHours, 'isWithinEntryWindow').mockReturnValue(true);
+    repo = {
+      findById: jest.fn().mockResolvedValue(watchingEntry),
+      update: jest.fn().mockResolvedValue({}),
+    };
+    trade = { executeTrade: jest.fn().mockResolvedValue({ id: 'pt1', entryPrice: 3800 }) };
+    brokerAdapter = { getLiveQuote: jest.fn().mockResolvedValue({ ltp: 3800 }) };
+    const mod = await Test.createTestingModule({
+      providers: [
+        WatchService,
+        { provide: WatchRepository, useValue: repo },
+        { provide: TargetCalculatorService, useValue: { compute: jest.fn() } },
+        { provide: StrikeSelectorService, useValue: { pick: jest.fn() } },
+        { provide: MarketFeedService, useValue: { subscribeForWatch: jest.fn() } },
+        { provide: LevelBookService, useValue: { getLevels: jest.fn() } },
+        { provide: WatchGateway, useValue: { emitTick: jest.fn() } },
+        { provide: TradeExecutionService, useValue: trade },
+        { provide: BROKER_ADAPTER_TOKEN, useValue: brokerAdapter },
+      ],
+    }).compile();
+    svc = mod.get(WatchService);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('prices the order off the live quote, not the stale alert price', async () => {
+    // Bug A: the Chartink trigger price (initialPrice) is 4000, but the live
+    // market is 3800. The order must be priced off the live quote — opening
+    // at a stale alert price births the position already mispriced.
+    brokerAdapter.getLiveQuote.mockResolvedValue({ ltp: 3800 });
+
+    await svc.executeEntry('w1', { mode: 'paper' });
+
+    expect(trade.executeTrade).toHaveBeenCalledWith(
+      expect.objectContaining({ price: 3800 }),
+    );
+  });
+
+  it('refuses to execute when no live quote is available (no stale-price fill)', async () => {
+    // With no live quote, executeEntry used to fall back to the stale
+    // Chartink trigger price. It must instead refuse to trade and leave the
+    // entry WATCHING — never open a position at an unverified price.
+    brokerAdapter.getLiveQuote.mockRejectedValue(new Error('quote unavailable'));
+
+    const result = await svc.executeEntry('w1', { mode: 'paper' });
+
+    expect(trade.executeTrade).not.toHaveBeenCalled();
+    expect(repo.update).not.toHaveBeenCalledWith(
+      'w1', expect.objectContaining({ status: 'TRADED' }),
+    );
+    expect(result).toBeNull();
   });
 });

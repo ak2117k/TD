@@ -4,6 +4,7 @@ import { WatchService } from './watch.service';
 import { WatchRepository } from '../repositories/watch.repository';
 import { ChartinkScoringService } from '../../chartink/services/chartink-scoring.service';
 import { RiskGuardService } from './risk-guard.service';
+import { MarketFeedService } from '../../market-data/services/market-feed.service';
 
 describe('WatchMonitorService', () => {
   let svc: WatchMonitorService;
@@ -11,6 +12,7 @@ describe('WatchMonitorService', () => {
   let scoring: any;
   let watch: any;
   let riskGuard: any;
+  let feed: any;
 
   beforeEach(async () => {
     repo = {
@@ -19,8 +21,13 @@ describe('WatchMonitorService', () => {
       update: jest.fn().mockResolvedValue({}),
     };
     scoring = { score: jest.fn() };
-    watch = { transitionStopped: jest.fn() };
+    watch = {
+      transitionStopped: jest.fn(),
+      transitionLossCut: jest.fn(),
+      computeOpenPnl: jest.fn(),
+    };
     riskGuard = { checkAndTrip: jest.fn().mockResolvedValue(false) };
+    feed = { getQuote: jest.fn(), subscribeForWatch: jest.fn() };
     const mod = await Test.createTestingModule({
       providers: [
         WatchMonitorService,
@@ -28,6 +35,7 @@ describe('WatchMonitorService', () => {
         { provide: ChartinkScoringService, useValue: scoring },
         { provide: WatchService, useValue: watch },
         { provide: RiskGuardService, useValue: riskGuard },
+        { provide: MarketFeedService, useValue: feed },
       ],
     }).compile();
     svc = mod.get(WatchMonitorService);
@@ -213,6 +221,88 @@ describe('WatchMonitorService', () => {
       expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
         currentScore: 80,
       }));
+    });
+  });
+
+  // ─── Open-loss safety net: feed-independent loss-cut ──────────────────────
+
+  describe('open-loss safety net', () => {
+    function tradedEntry(overrides: Record<string, any> = {}) {
+      return {
+        id: 'w1', symbol: 'TCS-EQ', token: '11536', exchange: 'NSE', side: 'BUY',
+        status: 'TRADED', initialPrice: 2000, executedPrice: 2000,
+        currentPrice: 2000, currentScore: 70, stopLossScore: 50,
+        createdAt: wellPastGrace(),
+        ...overrides,
+      };
+    }
+
+    it('loss-cuts a deeply underwater TRADED entry from the 60s loop, independent of the tick path', async () => {
+      // Defense-in-depth: the per-tick loss-cut lives in applyTick; if that
+      // path is wedged, the rescore loop must still catch the loss using a
+      // feed-cache price that does not depend on the watch tick handler.
+      jest.spyOn(svc as any, 'isMarketHours').mockReturnValue(true);
+      repo.findAllActive.mockResolvedValue([tradedEntry()]);
+      feed.getQuote.mockReturnValue({ ltp: 1980 }); // big adverse move
+      watch.computeOpenPnl.mockReturnValue(-1500);  // loss past the ₹1,000 cut
+
+      await svc.tickAll();
+
+      expect(watch.transitionLossCut).toHaveBeenCalledWith('w1', 1980, -1500);
+    });
+
+    it('does NOT loss-cut when the open loss is within the ₹1,000 threshold', async () => {
+      jest.spyOn(svc as any, 'isMarketHours').mockReturnValue(true);
+      repo.findAllActive.mockResolvedValue([tradedEntry()]);
+      feed.getQuote.mockReturnValue({ ltp: 1999 });
+      watch.computeOpenPnl.mockReturnValue(-100); // small loss, within the cut
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 1, checks: [] });
+
+      await svc.tickAll();
+
+      expect(watch.transitionLossCut).not.toHaveBeenCalled();
+    });
+
+    it('does NOT loss-cut a still-WATCHING entry (no position to cut)', async () => {
+      jest.spyOn(svc as any, 'isMarketHours').mockReturnValue(true);
+      repo.findAllActive.mockResolvedValue([tradedEntry({ status: 'WATCHING' })]);
+      feed.getQuote.mockReturnValue({ ltp: 1980 });
+      watch.computeOpenPnl.mockReturnValue(-1500);
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 1, checks: [] });
+
+      await svc.tickAll();
+
+      expect(watch.transitionLossCut).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── Feed re-subscription: self-heal after an API restart ─────────────────
+
+  describe('feed re-subscription', () => {
+    it('re-subscribes every active entry to the live feed each tick', async () => {
+      // Feed subscriptions are in-memory and wiped on an API restart; nothing
+      // else repopulates them, so open positions go dark (frozen ltp, +0
+      // unrealized P&L). The rescore loop must idempotently re-subscribe.
+      jest.spyOn(svc as any, 'isMarketHours').mockReturnValue(true);
+      // tickAll paces entries apart by 60s/N; stub the sleep so two entries
+      // don't block the test on real wall-clock time.
+      jest.spyOn(svc as any, 'sleep').mockResolvedValue(undefined);
+      repo.findAllActive.mockResolvedValue([
+        { id: 'w1', symbol: 'TCS-EQ', token: '11536', exchange: 'NSE', side: 'BUY',
+          status: 'TRADED', executedPrice: 4000, currentPrice: 4000, currentScore: 70,
+          stopLossScore: 50, createdAt: wellPastGrace(), optionsToken: null },
+        { id: 'w2', symbol: 'INFY-EQ', token: '1594', exchange: 'NSE', side: 'BUY',
+          status: 'WATCHING', initialPrice: 1500, currentScore: 65,
+          stopLossScore: 50, createdAt: wellPastGrace(), optionsToken: null },
+      ]);
+      feed.getQuote.mockReturnValue(null);
+      watch.computeOpenPnl.mockReturnValue(0);
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 1, checks: [] });
+
+      await svc.tickAll();
+
+      expect(feed.subscribeForWatch).toHaveBeenCalledWith('11536', 'w1');
+      expect(feed.subscribeForWatch).toHaveBeenCalledWith('1594', 'w2');
     });
   });
 });

@@ -1,9 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject, Optional } from '@nestjs/common';
 import { Prisma, WatchEntry, WatchEventType, WatchStatus } from '@prisma/client';
 import { WatchRepository } from '../repositories/watch.repository';
 import { TargetCalculatorService, LevelBookSnapshot } from './target-calculator.service';
 import { StrikeSelectorService } from './strike-selector.service';
-import { MarketFeedService } from '../../market-data/services/market-feed.service';
+import { MarketFeedService, BROKER_ADAPTER_TOKEN } from '../../market-data/services/market-feed.service';
+import { BrokerAdapter } from '../../../common/interfaces/broker-adapter.interface';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
 import { WatchGateway } from '../gateways/watch.gateway';
 import { TradeExecutionService } from '../../trade-engine/services/trade-execution.service';
@@ -25,9 +26,10 @@ const TRAILING_STOP_PCT = 0.005;
 const PARTIAL_EXIT_FRACTION = 0.5;
 
 /** Hard ₹ open-loss cut: a TRADED entry whose unrealized loss reaches this is
- *  closed immediately on the tick — ~0.5% on a ~₹2L position, deliberately
- *  tight. Retune by editing this single line. */
-const HARD_LOSS_CUT_RUPEES = 1000;
+ *  closed immediately — ~0.5% on a ~₹2L position, deliberately tight. Retune
+ *  by editing this single line. Exported so the WatchMonitorService 60s loop
+ *  can enforce the same threshold as a feed-independent safety net. */
+export const HARD_LOSS_CUT_RUPEES = 1000;
 
 /** Maximum ₹ deployed per trade. Determines share quantity:
  *  qty = floor(MAX_INVESTMENT_PER_TRADE / referencePrice).
@@ -66,6 +68,9 @@ export class WatchService {
     private readonly levelBook: LevelBookService,
     private readonly gateway: WatchGateway,
     private readonly trade: TradeExecutionService,
+    @Optional()
+    @Inject(BROKER_ADAPTER_TOKEN)
+    private readonly brokerAdapter: BrokerAdapter | null = null,
   ) {}
 
   /**
@@ -178,11 +183,6 @@ export class WatchService {
       notes: targetResult.source === 'fallback-2pct' ? 'pt:fallback-2pct' : null,
     });
 
-    this.feed.subscribeForWatch(entry.token, entry.id);
-    if (picked?.optionsToken) {
-      this.feed.subscribeForWatch(picked.optionsToken, entry.id);
-    }
-
     this.logger.log(
       `Watch created: ${entry.symbol} ${entry.side} score=${input.initialScore} target=${targetResult.target} (${targetResult.source})`,
     );
@@ -215,6 +215,17 @@ export class WatchService {
         }),
       );
       return entry;
+    } finally {
+      // Subscribe to the live feed only now — AFTER the execute step has
+      // resolved. Subscribing earlier (Bug B) let a tick land while the
+      // entry was still WATCHING, so applyTick skipped the price loss-cut
+      // (it is gated `status === 'TRADED'`). Runs on both paths: a TRADED
+      // entry needs ticks for its exits, and a still-WATCHING entry (auto-
+      // execute failed) needs them so the rescore loop has a live price.
+      this.feed.subscribeForWatch(entry.token, entry.id);
+      if (picked?.optionsToken) {
+        this.feed.subscribeForWatch(picked.optionsToken, entry.id);
+      }
     }
   }
 
@@ -264,7 +275,33 @@ export class WatchService {
 
     const optionsLotSize = (entry as any).optionsLotSize ?? null;
     const lotCount = (entry.initialBreakdown as any)?.lotCount ?? 1;
-    const referencePrice = (entry as any).currentPrice ?? entry.initialPrice;
+
+    // Bug A: never fill at the (possibly stale) Chartink trigger price stored
+    // as initialPrice. For an equity entry, price the order off a fresh live
+    // quote; if no live price can be obtained, refuse to trade — opening a
+    // position at an unverified price births it already mispriced. Options
+    // legs keep their existing reference (option pricing is out of scope).
+    let referencePrice: number;
+    if (optionsLotSize) {
+      referencePrice = (entry as any).currentPrice ?? entry.initialPrice;
+    } else {
+      const livePrice = await this.fetchLivePrice(entry);
+      const resolved = livePrice ?? (entry as any).currentPrice ?? null;
+      if (resolved == null || resolved <= 0) {
+        this.logger.warn(
+          formatTradeRejection({
+            symbol: entry.symbol,
+            side: entry.side ?? undefined,
+            stage: 'execution',
+            reason:
+              'no live quote available — refusing to fill at the stale alert price; entry stays WATCHING',
+          }),
+        );
+        return null;
+      }
+      referencePrice = resolved;
+    }
+
     const computedQty = optionsLotSize
       ? lotCount * optionsLotSize
       : Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(referencePrice, 1)));
@@ -300,6 +337,28 @@ export class WatchService {
     });
 
     return trade;
+  }
+
+  /**
+   * Fetch a fresh live LTP from the broker for an equity entry. Returns null
+   * when no broker is wired or the quote call fails — the caller then refuses
+   * to execute rather than trading at the stale stored alert price.
+   */
+  private async fetchLivePrice(entry: WatchEntry): Promise<number | null> {
+    if (!this.brokerAdapter) return null;
+    try {
+      const tick = await this.brokerAdapter.getLiveQuote(
+        entry.token,
+        (entry as any).exchange ?? 'NSE',
+      );
+      const ltp = (tick as any)?.ltp;
+      return typeof ltp === 'number' && ltp > 0 ? ltp : null;
+    } catch (err) {
+      this.logger.warn(
+        `fetchLivePrice(${entry.symbol}) failed: ${err instanceof Error ? err.message : err}`,
+      );
+      return null;
+    }
   }
 
   /**
@@ -351,15 +410,34 @@ export class WatchService {
   private static readonly MATERIAL_CHANGE_PCT = 0.0025;
 
   /**
+   * Out-of-order guard tolerance. The `lastTickAt` guard in onTick drops a
+   * tick whose timestamp is older than the last one processed — but only
+   * trusts the broker-supplied timestamp when it is itself plausibly fresh
+   * (within this window of wall-clock). A broker that emits a stale or
+   * non-advancing timestamp (observed in production: an illiquid token
+   * frozen at a pre-market time) would otherwise wedge the entry forever,
+   * silently disabling the price-based loss-cut that lives in applyTick.
+   */
+  private static readonly STALE_BROKER_TICK_MS = 60_000;
+
+  /**
    * Called by WatchMonitorWorker on each market tick for a watched token.
    * Drops out-of-order ticks, updates MFE/MAE watermarks, checks target
    * and material price-change thresholds, and triggers state transitions.
    */
   async onTick(token: string, ltp: number, timestamp: Date): Promise<void> {
     const entries = await this.findActiveByToken(token);
+    // Only trust the broker tick timestamp for ordering when it is close to
+    // wall-clock. If it is stale (or in the future), fall back to arrival
+    // time — monotonic, and so unable to permanently wedge the entry.
+    const now = new Date();
+    const brokerClockTrustworthy =
+      Math.abs(now.getTime() - timestamp.getTime()) <
+      WatchService.STALE_BROKER_TICK_MS;
+    const effectiveTs = brokerClockTrustworthy ? timestamp : now;
     for (const entry of entries) {
-      if (entry.lastTickAt && timestamp <= entry.lastTickAt) continue;
-      await this.applyTick(entry, ltp, timestamp);
+      if (entry.lastTickAt && effectiveTs <= entry.lastTickAt) continue;
+      await this.applyTick(entry, ltp, effectiveTs);
     }
   }
 
@@ -652,8 +730,10 @@ export class WatchService {
    *   qty = floor(MAX_INVESTMENT_PER_TRADE / ref)
    *   pnl = (ltp - ref) × sideMul × qty   (sideMul = +1 BUY, -1 SELL)
    * Reused here so the loss-cut threshold matches the displayed P&L exactly.
+   * Public so the WatchMonitorService safety-net loop computes P&L the same
+   * way the per-tick loss-cut does.
    */
-  private computeOpenPnl(entry: any, ltp: number): number {
+  computeOpenPnl(entry: any, ltp: number): number {
     const ref = entry.executedPrice ?? entry.initialPrice;
     if (!ref || ref <= 0) return 0;
     const sideMul = entry.side === 'BUY' ? 1 : -1;
