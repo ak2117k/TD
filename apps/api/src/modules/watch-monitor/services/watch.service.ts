@@ -325,16 +325,36 @@ export class WatchService {
       target: (entry as any).profitTarget ?? undefined,
     } as any);
 
-    await this.repo.update(entryId, {
+    const actualEntryPrice =
+      (trade as any).entryPrice ??
+      (entry as any).currentPrice ??
+      (entry as any).initialPrice;
+
+    const updateData: Prisma.WatchEntryUpdateInput = {
       status: WatchStatus.TRADED,
       executedAt: new Date(),
-      executedPrice:
-        (trade as any).entryPrice ??
-        (entry as any).currentPrice ??
-        (entry as any).initialPrice,
+      executedPrice: actualEntryPrice,
       paperTradeId: mode === 'paper' ? (trade as any).id : null,
       liveTradeId: mode === 'live' ? (trade as any).id : null,
-    });
+    };
+
+    // Re-anchor the profit target to the ACTUAL fill price. createFromAlert
+    // computed it from the Chartink alert price, but the live fill (the Bug A
+    // fix above) can differ — the stock moves between alert and execution —
+    // which would leave the target the wrong distance from the real entry, so
+    // it "hits" on noise within seconds for a near-zero / negative P&L.
+    // Equity only — an options leg's target tracking is out of scope here.
+    if (!optionsLotSize && actualEntryPrice > 0) {
+      const retarget = this.target.compute({
+        side: entry.side as 'BUY' | 'SELL',
+        entryPrice: actualEntryPrice,
+        levelBook: this.safeLevelBook(entry.token),
+      });
+      updateData.profitTarget = retarget.target;
+      updateData.profitTargetSource = retarget.source;
+    }
+
+    await this.repo.update(entryId, updateData);
 
     return trade;
   }

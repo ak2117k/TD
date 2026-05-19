@@ -670,7 +670,7 @@ describe('WatchService.executeEntry — 15:00 IST entry cutoff', () => {
       providers: [
         WatchService,
         { provide: WatchRepository, useValue: repo },
-        { provide: TargetCalculatorService, useValue: { compute: jest.fn() } },
+        { provide: TargetCalculatorService, useValue: { compute: jest.fn().mockReturnValue({ target: 4080, source: 'fallback-2pct' }) } },
         { provide: StrikeSelectorService, useValue: { pick: jest.fn() } },
         { provide: MarketFeedService, useValue: { subscribeForWatch: jest.fn() } },
         { provide: LevelBookService, useValue: { getLevels: jest.fn() } },
@@ -729,6 +729,7 @@ describe('WatchService.executeEntry — live-quote pricing (Bug A)', () => {
   let repo: any;
   let trade: any;
   let brokerAdapter: any;
+  let target: any;
 
   const watchingEntry = {
     id: 'w1', token: '11536', symbol: 'TCS-EQ', side: 'BUY', exchange: 'NSE',
@@ -744,11 +745,12 @@ describe('WatchService.executeEntry — live-quote pricing (Bug A)', () => {
     };
     trade = { executeTrade: jest.fn().mockResolvedValue({ id: 'pt1', entryPrice: 3800 }) };
     brokerAdapter = { getLiveQuote: jest.fn().mockResolvedValue({ ltp: 3800 }) };
+    target = { compute: jest.fn().mockReturnValue({ target: 3876, source: 'fallback-2pct' }) };
     const mod = await Test.createTestingModule({
       providers: [
         WatchService,
         { provide: WatchRepository, useValue: repo },
-        { provide: TargetCalculatorService, useValue: { compute: jest.fn() } },
+        { provide: TargetCalculatorService, useValue: target },
         { provide: StrikeSelectorService, useValue: { pick: jest.fn() } },
         { provide: MarketFeedService, useValue: { subscribeForWatch: jest.fn() } },
         { provide: LevelBookService, useValue: { getLevels: jest.fn() } },
@@ -790,5 +792,26 @@ describe('WatchService.executeEntry — live-quote pricing (Bug A)', () => {
       'w1', expect.objectContaining({ status: 'TRADED' }),
     );
     expect(result).toBeNull();
+  });
+
+  it('re-anchors the profit target to the actual execution price', async () => {
+    // initialPrice (the Chartink alert price) is 4000; the live fill is 3800.
+    // The profit target must be recomputed off 3800 — leaving it on the stale
+    // 4000 anchor makes the band the wrong width vs the real entry, so a
+    // target set off the alert price can sit a sliver above (or below) entry
+    // and "hit" on noise within seconds for a near-zero / negative P&L.
+    brokerAdapter.getLiveQuote.mockResolvedValue({ ltp: 3800 });
+    target.compute.mockReturnValue({ target: 3876, source: 'fallback-2pct' });
+
+    await svc.executeEntry('w1', { mode: 'paper' });
+
+    expect(target.compute).toHaveBeenCalledWith(
+      expect.objectContaining({ entryPrice: 3800 }),
+    );
+    expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
+      executedPrice: 3800,
+      profitTarget: 3876,
+      profitTargetSource: 'fallback-2pct',
+    }));
   });
 });
