@@ -23,6 +23,7 @@ describe('WatchService.createFromAlert', () => {
   let levelBook: any;
 
   beforeEach(async () => {
+    jest.useFakeTimers({ now: new Date('2026-05-19T04:30:00Z') }); // 10:00 IST
     // Default: run as if INSIDE the 09:15-15:00 IST entry window so the
     // auto-execute path is exercised. The executeEntry cutoff describe-block
     // overrides this with its own spy to test the after-15:00 path.
@@ -59,6 +60,7 @@ describe('WatchService.createFromAlert', () => {
 
   afterEach(() => {
     jest.restoreAllMocks();
+    jest.useRealTimers();
   });
 
   const baseInput = {
@@ -199,6 +201,7 @@ describe('WatchService.createFromAlert', () => {
       side: 'BUY',
       status: 'WATCHING',
       initialPrice: 4000,
+      initialScore: 72,
       initialBreakdown: { lotCount: 1 },
       optionsToken: null,
       optionsLotSize: null,
@@ -216,9 +219,8 @@ describe('WatchService.createFromAlert', () => {
       expect.objectContaining({
         symbol: 'TCS-EQ',
         side: 'BUY',
-        // floor(MAX_INVESTMENT_PER_TRADE / initialPrice) = floor(200,000 / 4000) = 50
-        // (MAX_INVESTMENT_PER_TRADE is ₹2L per trade; the ₹20L is the total account balance.)
-        quantity: 50,
+        // initialScore 72 -> capital 1,50,000; floor(150,000 / 4000) = 37
+        quantity: 37,
         orderType: 'MARKET',
         positionType: 'INTRADAY',
         price: 4000,
@@ -771,6 +773,7 @@ describe('WatchService.executeEntry — live-quote pricing (Bug A)', () => {
   };
 
   beforeEach(async () => {
+    jest.useFakeTimers({ now: new Date('2026-05-19T04:30:00Z') }); // 10:00 IST
     jest.spyOn(marketHours, 'isWithinEntryWindow').mockReturnValue(true);
     repo = {
       findById: jest.fn().mockResolvedValue(watchingEntry),
@@ -797,6 +800,7 @@ describe('WatchService.executeEntry — live-quote pricing (Bug A)', () => {
 
   afterEach(() => {
     jest.restoreAllMocks();
+    jest.useRealTimers();
   });
 
   it('prices the order off the live quote, not the stale alert price', async () => {
@@ -858,5 +862,19 @@ describe('WatchService.executeEntry — live-quote pricing (Bug A)', () => {
       profitTarget: 3876,
       profitTargetSource: 'fallback-2pct',
     }));
+  });
+
+  it('sizes the order from the score-tiered capital, not a flat 2L (R4)', async () => {
+    // initialScore 72 -> tier [65,75) -> capital 1,50,000; live quote 100.
+    repo.findById.mockResolvedValue({ ...watchingEntry, initialScore: 72 });
+    brokerAdapter.getLiveQuote.mockResolvedValue({ ltp: 100 });
+    trade.executeTrade.mockResolvedValue({ id: 'pt1', entryPrice: 100, quantity: 1500 });
+
+    await svc.executeEntry('w1', { mode: 'paper' });
+
+    // qty = floor(150,000 / 100) = 1500
+    expect(trade.executeTrade).toHaveBeenCalledWith(
+      expect.objectContaining({ quantity: 1500 }),
+    );
   });
 });

@@ -11,6 +11,7 @@ import { TradeExecutionService } from '../../trade-engine/services/trade-executi
 import { DEFAULT_MAX_CAPITAL_PER_TRADE } from '@td/shared';
 import { formatTradeRejection } from '../../../common/utils/trade-rejection-log';
 import { isWithinEntryWindow } from '../../../common/utils/market-hours';
+import { evaluateTradePolicy } from './trade-policy';
 
 export const WATCH_CAP = 50;
 
@@ -302,9 +303,16 @@ export class WatchService {
       referencePrice = resolved;
     }
 
+    // R4: equity quantity is sized off the score-tiered capital, not a flat
+    // 2L. evaluateTradePolicy always returns a valid capital; admission was
+    // already decided upstream in ChartinkProcessService.processOne.
+    const tradeCapital = evaluateTradePolicy({
+      score: entry.initialScore,
+      at: new Date(),
+    }).capital;
     const computedQty = optionsLotSize
       ? lotCount * optionsLotSize
-      : Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(referencePrice, 1)));
+      : Math.max(1, Math.floor(tradeCapital / Math.max(referencePrice, 1)));
     const qty = options.quantityOverride ?? computedQty;
 
     const trade = await this.trade.executeTrade({
@@ -813,7 +821,11 @@ export class WatchService {
     if (moveFavor < PARTIAL_EXIT_THRESHOLD_PCT) return;
 
     // Trigger! Compute the split quantities for the WatchEntry bookkeeping.
-    const initialQty = Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(ref, 1)));
+    // Prefer the REAL filled quantity persisted by executeEntry; the
+    // floor(MAX/ref) reconstruction is only a fallback for legacy entries.
+    const initialQty =
+      entry.quantity ??
+      Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(ref, 1)));
     const partialQty = Math.floor(initialQty * PARTIAL_EXIT_FRACTION);
     const remainingQty = initialQty - partialQty;
 
