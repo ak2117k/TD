@@ -485,12 +485,14 @@ describe('WatchService.onTick — hard loss-cut', () => {
   let repo: any;
   let feed: any;
   let gateway: any;
+  let brokerAdapter: any;
 
   beforeEach(async () => {
     repo = {
       findActiveByToken: jest.fn(),
       findById: jest.fn().mockResolvedValue({
         id: 'w1', token: '11536', symbol: 'TCS-EQ', status: 'TRADED',
+        side: 'BUY', executedPrice: 2000,
         optionsToken: null, paperTradeId: 'pt-1',
       }),
       createEvent: jest.fn().mockResolvedValue({ id: 'e1' }),
@@ -498,6 +500,7 @@ describe('WatchService.onTick — hard loss-cut', () => {
     };
     feed = { subscribeForWatch: jest.fn(), unsubscribeForWatch: jest.fn() };
     gateway = { emitTick: jest.fn(), emitEvent: jest.fn(), emitCreated: jest.fn() };
+    brokerAdapter = { getLiveQuote: jest.fn() };
     mockTrade.closeTrade = jest.fn().mockResolvedValue({});
     const mod = await Test.createTestingModule({
       providers: [
@@ -509,6 +512,7 @@ describe('WatchService.onTick — hard loss-cut', () => {
         { provide: LevelBookService, useValue: { getLevels: jest.fn() } },
         { provide: WatchGateway, useValue: gateway },
         { provide: TradeExecutionService, useValue: mockTrade },
+        { provide: BROKER_ADAPTER_TOKEN, useValue: brokerAdapter },
       ],
     }).compile();
     svc = mod.get(WatchService);
@@ -593,6 +597,22 @@ describe('WatchService.onTick — hard loss-cut', () => {
     expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
       status: 'STOPPED', closedReason: 'loss-cut',
     }));
+  });
+
+  it('aborts the loss-cut when a fresh broker quote shows the trigger tick was a glitch', async () => {
+    // The tick (1985) computes a -₹1,500 loss, but the broker's fresh quote
+    // says the real price is 2001 — no loss. A single bad feed tick must not
+    // trigger a real exit, so the cut is aborted on re-confirmation.
+    repo.findActiveByToken.mockResolvedValue([tradedEntry()]);
+    brokerAdapter.getLiveQuote.mockResolvedValue({ ltp: 2001 });
+
+    await svc.onTick('11536', 1985, new Date());
+
+    const lossCutUpdate = (repo.update.mock.calls as any[]).find(
+      (call: any[]) => call[1]?.closedReason === 'loss-cut',
+    );
+    expect(lossCutUpdate).toBeUndefined();
+    expect(mockTrade.closeTrade).not.toHaveBeenCalled();
   });
 
   it('still loss-cuts when consecutive ticks carry a stale (non-advancing) broker timestamp', async () => {

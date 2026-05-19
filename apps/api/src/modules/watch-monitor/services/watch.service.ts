@@ -588,6 +588,29 @@ export class WatchService {
     openPnl: number,
   ): Promise<void> {
     const entry = await this.repo.findById(entryId);
+
+    // Re-confirm the loss with an independent fresh REST quote before exiting.
+    // A single bad feed tick (observed: a glitch tick several rupees off the
+    // real price) must not trigger a real exit. If the fresh quote shows the
+    // loss is not actually past the threshold, abort. When no quote can be
+    // obtained, fall through and cut — a feed-blind open position is the
+    // riskier state, so we fail safe toward protecting capital.
+    if (entry) {
+      const confirmPrice = await this.fetchLivePrice(entry);
+      if (confirmPrice != null) {
+        const confirmPnl = this.computeOpenPnl(entry, confirmPrice);
+        if (confirmPnl > -HARD_LOSS_CUT_RUPEES) {
+          this.logger.warn(
+            `Loss-cut aborted for ${entry.symbol}: trigger showed a ₹${Math.abs(openPnl).toFixed(0)} loss ` +
+              `but a fresh quote (₹${confirmPrice.toFixed(2)}) shows ₹${Math.abs(confirmPnl).toFixed(0)} — bad tick.`,
+          );
+          return;
+        }
+        exitPrice = confirmPrice;
+        openPnl = confirmPnl;
+      }
+    }
+
     this.logger.warn(
       `Hard loss-cut: ${entry?.symbol ?? entryId} exited at ₹${exitPrice.toFixed(2)} ` +
         `— open loss ₹${Math.abs(openPnl).toFixed(0)} (≥ ₹${HARD_LOSS_CUT_RUPEES} threshold)`,
