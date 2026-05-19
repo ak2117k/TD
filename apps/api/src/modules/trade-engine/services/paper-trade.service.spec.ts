@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { PaperTradeService, BROKER_CHARGE_PER_EXIT } from './paper-trade.service';
+import { PaperTradeService } from './paper-trade.service';
 import { TradeRepository } from '../repositories/trade.repository';
 import {
   MarketFeedService,
@@ -298,6 +298,31 @@ describe('PaperTradeService.onModuleInit — balance + position rehydration', ()
     expect(acc.balance).toBe(2_000_000 - 6_000 + 120);
   });
 
+  it('subtracts an OPEN trade recorded entry-charge fees from the replayed balance', async () => {
+    const openTrades = [
+      {
+        status: 'OPEN', side: 'BUY', quantity: 10, entryPrice: 1000, pnl: null, fees: 37,
+        instrument: { symbol: 'TCS-EQ', exchange: 'NSE' },
+      },
+    ];
+    const repo = {
+      findPaperTradesSince: jest.fn().mockResolvedValue(openTrades),
+      getOpenTrades: jest.fn().mockResolvedValue(openTrades),
+    };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        PaperTradeService,
+        { provide: TradeRepository, useValue: repo },
+        { provide: MarketFeedService, useValue: mockMarketFeed },
+      ],
+    }).compile();
+    const service = module.get<PaperTradeService>(PaperTradeService);
+    await service.onModuleInit();
+
+    // balance = 20L - 10,000 (open BUY cost) - 37 (recorded entry charge)
+    expect(service.getVirtualBalance()).toBe(2_000_000 - 10_000 - 37);
+  });
+
   it('a closed trade nets pnl MINUS its recorded broker fees', async () => {
     // fees accumulates ₹100 per exit; a trade that was partially then fully
     // closed carries ₹200. The replay must subtract it so the recovered
@@ -315,15 +340,7 @@ describe('PaperTradeService.onModuleInit — balance + position rehydration', ()
   });
 });
 
-/**
- * Broker-charge + deferred-profit accounting (applyExitAccounting).
- *
- * Every paper exit costs a flat ₹100 brokerage. A LOSING exit simply
- * loses the ₹100. A WINNING exit gets only its base capital back during
- * the session — the profit slice is withheld in `pendingProfit` and only
- * swept into cash after market hours by settlePendingProfit() at 18:00 IST.
- */
-describe('PaperTradeService.applyExitAccounting — broker charge + deferred profit', () => {
+describe('PaperTradeService - entry & exit charges (R6)', () => {
   let service: PaperTradeService;
 
   beforeEach(async () => {
@@ -338,32 +355,23 @@ describe('PaperTradeService.applyExitAccounting — broker charge + deferred pro
     service.resetVirtualPortfolio(2_000_000);
   });
 
-  it('a losing exit charges only the flat ₹100 brokerage and defers nothing', async () => {
-    const charge = service.applyExitAccounting(-5000);
-    expect(charge).toBe(BROKER_CHARGE_PER_EXIT);
-    expect(service.getVirtualBalance()).toBe(2_000_000 - 100);
+  it('applyEntryCharge debits the supplied charge from the virtual balance', () => {
+    service.applyEntryCharge(57.34);
+    expect(service.getVirtualBalance()).toBeCloseTo(2_000_000 - 57.34, 2);
+  });
+
+  it('a losing exit deducts the supplied exit charge and defers nothing', async () => {
+    const charge = service.applyExitAccounting(-5000, 42.5);
+    expect(charge).toBe(42.5);
+    expect(service.getVirtualBalance()).toBeCloseTo(2_000_000 - 42.5, 2);
     expect((await service.getAccount()).pendingProfit).toBe(0);
   });
 
-  it('a winning exit withholds the profit — only base capital returns to cash', async () => {
-    const charge = service.applyExitAccounting(8000);
-    expect(charge).toBe(BROKER_CHARGE_PER_EXIT);
-    // cash drops by profit + brokerage; the profit is parked, not spendable
-    expect(service.getVirtualBalance()).toBe(2_000_000 - 8000 - 100);
+  it('a winning exit withholds the profit and deducts the exit charge', async () => {
+    const charge = service.applyExitAccounting(8000, 55);
+    expect(charge).toBe(55);
+    expect(service.getVirtualBalance()).toBeCloseTo(2_000_000 - 8000 - 55, 2);
     expect((await service.getAccount()).pendingProfit).toBe(8000);
-  });
-
-  it('equity counts deferred profit, so a win lifts equity immediately (minus brokerage)', async () => {
-    service.applyExitAccounting(8000);
-    const acc = await service.getAccount();
-    expect(acc.equity).toBe(2_000_000 - 100);
-    expect(acc.pendingProfit).toBe(8000);
-  });
-
-  it('charges ₹100 per exit event — two partial exits cost ₹200', () => {
-    service.applyExitAccounting(-100);
-    service.applyExitAccounting(-100);
-    expect(service.getVirtualBalance()).toBe(2_000_000 - 200);
   });
 });
 
@@ -383,21 +391,21 @@ describe('PaperTradeService.settlePendingProfit — 18:00 IST after-hours settle
   });
 
   it('sweeps accumulated deferred profit into the spendable cash balance', async () => {
-    service.applyExitAccounting(8000); // balance 1,991,900 · pending 8,000
+    service.applyExitAccounting(8000, 100); // balance 1,991,900 · pending 8,000
     service.settlePendingProfit();
     expect(service.getVirtualBalance()).toBe(2_000_000 - 100); // profit credited back
     expect((await service.getAccount()).pendingProfit).toBe(0);
   });
 
   it('is a no-op when there is no pending profit', () => {
-    service.applyExitAccounting(-3000); // pure loss — nothing deferred
+    service.applyExitAccounting(-3000, 100); // pure loss — nothing deferred
     const balBefore = service.getVirtualBalance();
     service.settlePendingProfit();
     expect(service.getVirtualBalance()).toBe(balBefore);
   });
 
   it('equity is unchanged by settlement — it only moves pending → cash', async () => {
-    service.applyExitAccounting(8000);
+    service.applyExitAccounting(8000, 100);
     const equityBefore = (await service.getAccount()).equity;
     service.settlePendingProfit();
     expect((await service.getAccount()).equity).toBe(equityBefore);

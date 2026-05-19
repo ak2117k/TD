@@ -21,13 +21,6 @@ const MAX_SLIPPAGE_PCT = 0.0005;
 const DEFAULT_VIRTUAL_CAPITAL = 2_000_000;
 
 /**
- * Flat brokerage + statutory charges modelled on every paper EXIT, in INR.
- * Charged once per close event — a partial exit and the final exit each
- * cost this amount, mirroring how a real broker bills per executed order.
- */
-export const BROKER_CHARGE_PER_EXIT = 100;
-
-/**
  * Epoch — trades created BEFORE this timestamp do not affect the paper
  * account balance. They remain in the `trades` table for journal/audit but
  * are skipped during the startup cash-flow replay.
@@ -163,6 +156,13 @@ export class PaperTradeService implements OnModuleInit {
           bal -= remainingValue;
         } else {
           bal += remainingValue;
+        }
+        // An OPEN trade's entry charge was debited live by applyEntryCharge
+        // and recorded on `fees`; subtract it so a restart is exact. (A
+        // PARTIALLY_FILLED trade's fees are already netted by the pnl-fees
+        // line below, so only do this for pure-OPEN.)
+        if (t.status === 'OPEN') {
+          bal -= t.fees ?? 0;
         }
         // A PARTIALLY_FILLED trade already realized P&L on its closed slice
         // (less the broker charge); that cash moved with the partial close,
@@ -391,36 +391,38 @@ export class PaperTradeService implements OnModuleInit {
   /**
    * Apply paper-account accounting for ONE position exit (close event).
    *
-   * A flat ₹100 brokerage is charged on every close — partial or full.
-   * The SELL fill in fillAtPrice() already credited the full exit value
-   * to cash, so here:
-   *   - LOSS  : just remove the ₹100 brokerage. The loss itself is
-   *             already reflected in the (smaller) exit proceeds.
-   *   - PROFIT: the realized gain is NOT spendable yet — claw it back out
-   *             of cash and park it in `pendingProfit`. Only the base
-   *             capital (minus ₹100) stays in the balance. The profit is
-   *             released after market hours by settlePendingProfit().
+   * `exitCharge` is the real per-order charge (see trade-charges.ts), passed
+   * in by the caller. The SELL fill in fillAtPrice() already credited the
+   * full exit value to cash, so here:
+   *   - LOSS  : just remove the exit charge.
+   *   - PROFIT: claw the realized gain back out of cash into `pendingProfit`
+   *             (released at the 18:00 settlement), and remove the charge.
    *
-   * Returns the brokerage charged so the caller can record it on the
-   * trade row's `fees` field for the startup balance replay.
+   * Returns the charge so the caller can record it on the trade's `fees`.
    */
-  applyExitAccounting(realizedPnl: number): number {
-    this.virtualBalance -= BROKER_CHARGE_PER_EXIT;
+  applyExitAccounting(realizedPnl: number, exitCharge: number): number {
+    this.virtualBalance -= exitCharge;
     if (realizedPnl > 0) {
       this.virtualBalance -= realizedPnl;
       this.pendingProfit += realizedPnl;
       this.logger.log(
-        `[Paper] Exit accounting: -₹${BROKER_CHARGE_PER_EXIT} brokerage, ` +
+        `[Paper] Exit accounting: -₹${exitCharge.toFixed(2)} charges, ` +
           `₹${realizedPnl.toFixed(0)} profit deferred to 18:00 settlement ` +
           `(pending=₹${this.pendingProfit.toFixed(0)})`,
       );
     } else {
       this.logger.log(
-        `[Paper] Exit accounting: -₹${BROKER_CHARGE_PER_EXIT} brokerage ` +
+        `[Paper] Exit accounting: -₹${exitCharge.toFixed(2)} charges ` +
           `(loss of ₹${Math.abs(realizedPnl).toFixed(0)} booked)`,
       );
     }
-    return BROKER_CHARGE_PER_EXIT;
+    return exitCharge;
+  }
+
+  /** Debit a paper ENTRY order's charges from the virtual balance (R6). */
+  applyEntryCharge(charge: number): void {
+    this.virtualBalance -= charge;
+    this.logger.log(`[Paper] Entry charges: -₹${charge.toFixed(2)}`);
   }
 
   /**
