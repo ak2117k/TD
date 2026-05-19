@@ -324,9 +324,9 @@ describe('PaperTradeService.onModuleInit — balance + position rehydration', ()
   });
 
   it('a closed trade nets pnl MINUS its recorded broker fees', async () => {
-    // fees accumulates ₹100 per exit; a trade that was partially then fully
-    // closed carries ₹200. The replay must subtract it so the recovered
-    // balance matches what applyExitAccounting did live.
+    // fees accumulates real SEBI charges per close event; a trade partially
+    // then fully closed carries two charges' worth. The replay must subtract
+    // it so the recovered balance matches what applyExitAccounting did live.
     const service = await buildWith([
       {
         status: 'CLOSED', side: 'BUY', quantity: 10, entryPrice: 100,

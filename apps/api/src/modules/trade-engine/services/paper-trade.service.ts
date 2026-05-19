@@ -139,9 +139,9 @@ export class PaperTradeService implements OnModuleInit {
 
         if (!isOpen) {
           // A non-open trade's net cash effect is its realized P&L less the
-          // broker charges booked on its exit(s). `fees` accumulates ₹100
-          // per close event — see applyExitAccounting. CANCELLED/REJECTED
-          // trades carry pnl=null → net 0, a clean no-op.
+          // broker charges booked on its legs. `fees` accumulates real SEBI
+          // per-order charges — see applyEntryCharge / applyExitAccounting.
+          // CANCELLED/REJECTED trades carry pnl=null → net 0, a clean no-op.
           const net = (t.pnl ?? 0) - (t.fees ?? 0);
           bal += net;
           realized += net;
