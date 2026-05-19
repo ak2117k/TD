@@ -599,6 +599,19 @@ describe('WatchService.onTick — hard loss-cut', () => {
     }));
   });
 
+  it('sizes the loss-cut off entry.quantity, not the floor(MAX/price) estimate', async () => {
+    // Real filled quantity is 200; the floor(200000/2000) estimate would be 100.
+    // At ltp 1995 the real loss is (1995-2000)*200 = -₹1,000 → must cut.
+    // With the old reconstruction it would be only -₹500 and wrongly survive.
+    repo.findActiveByToken.mockResolvedValue([tradedEntry({ quantity: 200 })]);
+
+    await svc.onTick('11536', 1995, new Date());
+
+    expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
+      status: 'STOPPED', closedReason: 'loss-cut',
+    }));
+  });
+
   it('aborts the loss-cut when a fresh broker quote shows the trigger tick was a glitch', async () => {
     // The tick (1985) computes a -₹1,500 loss, but the broker's fresh quote
     // says the real price is 2001 — no loss. A single bad feed tick must not
@@ -812,6 +825,18 @@ describe('WatchService.executeEntry — live-quote pricing (Bug A)', () => {
       'w1', expect.objectContaining({ status: 'TRADED' }),
     );
     expect(result).toBeNull();
+  });
+
+  it('persists the real filled quantity on the watch entry', async () => {
+    // The watch entry must carry the actual traded quantity so P&L never
+    // reconstructs floor(MAX_INVESTMENT / price).
+    trade.executeTrade.mockResolvedValue({ id: 'pt1', entryPrice: 3800, quantity: 52 });
+
+    await svc.executeEntry('w1', { mode: 'paper' });
+
+    expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
+      quantity: 52,
+    }));
   });
 
   it('re-anchors the profit target to the actual execution price', async () => {

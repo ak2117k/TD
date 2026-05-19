@@ -37,6 +37,16 @@ describe('RiskGuardService', () => {
     expect(r.breakdown).toHaveLength(2);
   });
 
+  it('uses the real entry.quantity, not the floor(MAX/price) estimate', async () => {
+    // executedPrice=100 → the floor(200000/100) estimate would be 2000, but
+    // the real filled quantity is 1500. pnl = (105-100)*1500 = +7,500.
+    repo.findTradedToday.mockResolvedValue([
+      { symbol: 'A', side: 'BUY', executedPrice: 100, currentPrice: 105, quantity: 1500 },
+    ]);
+    const r = await svc.computeDailyPnL();
+    expect(r.pnl).toBe(7_500);
+  });
+
   it('flips sign for SELL entries (profit when price drops)', async () => {
     // A=SELL: executedPrice=100 → qty=2000; pnl = (95-100)*2000*(-1) = +10,000
     repo.findTradedToday.mockResolvedValue([

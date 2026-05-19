@@ -40,8 +40,12 @@ export class RiskGuardService {
       const ref = (e as any).executedPrice ?? (e as any).initialPrice;
       const curr = (e as any).currentPrice ?? ref;
       const sideMul = (e as any).side === 'BUY' ? 1 : -1;
-      // Dynamic qty: MAX_INVESTMENT / executedPrice. Matches WatchController.execute.
-      const qty = Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(ref, 1)));
+      // Real open quantity (trailing remainder, else full filled quantity);
+      // floor(MAX/price) is only a fallback for legacy entries with no qty.
+      const qty =
+        (e as any).remainingQty ??
+        (e as any).quantity ??
+        Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(ref, 1)));
       const pnl = (curr - ref) * qty * sideMul;
       total += pnl;
       breakdown.push({ symbol: (e as any).symbol, pnl });

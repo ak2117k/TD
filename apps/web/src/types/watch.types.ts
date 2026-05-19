@@ -43,6 +43,8 @@ export interface WatchEntry {
   liveTradeId: string | null;
   executedAt: string | null;
   executedPrice: number | null;
+  /** Actual filled quantity — the real position size (server-enriched). */
+  quantity: number | null;
   closedAt: string | null;
   closedReason: string | null;
   notes: string | null;

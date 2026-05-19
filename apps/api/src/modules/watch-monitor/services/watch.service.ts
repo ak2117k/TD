@@ -334,6 +334,9 @@ export class WatchService {
       status: WatchStatus.TRADED,
       executedAt: new Date(),
       executedPrice: actualEntryPrice,
+      // The REAL filled quantity — so P&L is computed from the actual position
+      // size, never reconstructed as floor(MAX_INVESTMENT_PER_TRADE / price).
+      quantity: (trade as any).quantity ?? qty,
       paperTradeId: mode === 'paper' ? (trade as any).id : null,
       liveTradeId: mode === 'live' ? (trade as any).id : null,
     };
@@ -780,7 +783,13 @@ export class WatchService {
     const ref = entry.executedPrice ?? entry.initialPrice;
     if (!ref || ref <= 0) return 0;
     const sideMul = entry.side === 'BUY' ? 1 : -1;
-    const qty = Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(ref, 1)));
+    // Real open quantity: the trailing remainder after a partial exit, else
+    // the full filled quantity. The floor(MAX/price) estimate is only a
+    // fallback for legacy entries persisted before `quantity` was tracked.
+    const qty =
+      entry.remainingQty ??
+      entry.quantity ??
+      Math.max(1, Math.floor(MAX_INVESTMENT_PER_TRADE / Math.max(ref, 1)));
     return (ltp - ref) * sideMul * qty;
   }
 
