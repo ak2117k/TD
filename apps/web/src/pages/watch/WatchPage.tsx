@@ -2,7 +2,8 @@ import { useState } from 'react';
 import { useWatchEntries } from '../../hooks/useWatchEntries';
 import { WatchTable } from './WatchTable';
 import { PaperAccountBadge } from '../../components/trading/PaperAccountBadge';
-import { sectionTotalPnl } from '../../utils/watchPnl';
+import { pnlBreakdown } from '../../utils/watchPnl';
+import { usePaperAccount } from '../../hooks/usePaperAccount';
 import type { WatchStatus } from '../../types/watch.types';
 
 const FILTERS: Array<{ label: string; value: WatchStatus | undefined }> = [
@@ -23,6 +24,7 @@ export function WatchPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [date, setDate] = useState<string>(todayIST());
   const { entries, loading, error } = useWatchEntries(filter, date);
+  const { account } = usePaperAccount();
   const activeCount = entries.filter(e => e.status === 'WATCHING' || e.status === 'TRADED').length;
 
   return (
@@ -62,17 +64,29 @@ export function WatchPage() {
       {!loading && !error && (
         <>
           {(() => {
-            const total = sectionTotalPnl(entries);
+            // Real P/L uses the paper account's REST-priced unrealized P&L
+            // for the open slice (the watch entries' currentPrice is stale,
+            // WebSocket-fed) — so it stays in sync with the Unreal badge.
+            const { real, whatIf } = pnlBreakdown(entries, account?.unrealizedPnl);
+            const fmt = (n: number) =>
+              `${n >= 0 ? '+' : ''}₹${Math.abs(n) < 1 ? n.toFixed(2) : n.toFixed(0)}`;
+            const colorOf = (n: number) =>
+              n > 0 ? 'text-emerald-400' : n < 0 ? 'text-red-400' : 'text-[var(--color-text-secondary)]';
             return (
-              <div className="mb-3 text-sm">
-                <span className="text-[var(--color-text-muted)]">
-                  {'Total P/L (incl. what-if): '}
-                </span>
-                <span className={`font-semibold tabular-nums ${
-                  total > 0 ? 'text-emerald-400' : total < 0 ? 'text-red-400' : 'text-[var(--color-text-secondary)]'
-                }`}>
-                  {total >= 0 ? '+' : ''}₹{Math.abs(total) < 1 ? total.toFixed(2) : total.toFixed(0)}
-                </span>
+              <div className="mb-3 flex flex-wrap items-baseline gap-x-6 gap-y-1 text-sm">
+                <div>
+                  <span className="text-[var(--color-text-muted)]">Real P/L: </span>
+                  <span className={`font-semibold tabular-nums ${colorOf(real)}`}>{fmt(real)}</span>
+                  <span className="ml-1 text-xs text-[var(--color-text-muted)]">
+                    (realized + open positions)
+                  </span>
+                </div>
+                <div
+                  title="Hypothetical P/L of alerts that were scored but never actually traded — not real money, never deployed."
+                >
+                  <span className="text-[var(--color-text-muted)]">What-if (untraded alerts): </span>
+                  <span className={`tabular-nums ${colorOf(whatIf)}`}>{fmt(whatIf)}</span>
+                </div>
               </div>
             );
           })()}

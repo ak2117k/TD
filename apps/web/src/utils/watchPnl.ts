@@ -51,3 +51,51 @@ export function sectionTotalPnl(entries: WatchEntry[]): number {
     return total + profitView(e).abs;
   }, 0);
 }
+
+export interface PnlBreakdown {
+  /** Booked P/L from trades that actually closed. Real money. */
+  realized: number;
+  /** Live unrealized P/L of currently-open (TRADED) positions. Real money. */
+  open: number;
+  /** Hypothetical P/L of alerts that were scored but never traded. NOT real. */
+  whatIf: number;
+  /** Real P/L = realized + open. Excludes what-if. */
+  real: number;
+}
+
+/**
+ * Split a watch section's P/L into real money (realized + currently-open) vs
+ * hypothetical "what-if" P/L from alerts that were never actually traded — so
+ * the header can show the two separately instead of one misleading blend.
+ *
+ * `accountUnrealizedPnl` — when given (the paper account's `unrealizedPnl`) —
+ * replaces the watch-entry-derived `open` slice. The paper account is priced
+ * from fresh REST quotes, whereas the watch entries' `currentPrice` is fed by
+ * the (token-capped, often stale) WebSocket — so the account figure is the
+ * authoritative one, and using it keeps "Real P/L" in sync with the Unreal
+ * badge (real === Unreal + realized). When omitted, `open` falls back to the
+ * watch-entry estimate.
+ *
+ * A never-traded entry stays "what-if" even after it is DISMISSED — only
+ * entries that genuinely traded are "real".
+ */
+export function pnlBreakdown(
+  entries: WatchEntry[],
+  accountUnrealizedPnl?: number | null,
+): PnlBreakdown {
+  let realized = 0;
+  let openFromEntries = 0;
+  let whatIf = 0;
+  for (const e of entries) {
+    if (isClosed(e.status) && e.realizedPnl != null) {
+      realized += e.realizedPnl;
+    } else if (e.status === 'TRADED') {
+      openFromEntries += profitView(e).abs;
+    } else {
+      whatIf += profitView(e).abs;
+    }
+  }
+  const open =
+    accountUnrealizedPnl != null ? accountUnrealizedPnl : openFromEntries;
+  return { realized, open, whatIf, real: realized + open };
+}
