@@ -1,12 +1,16 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, Inject, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import {
+  BrokerAdapter,
   OrderRequest,
   OrderResponse,
   TickData,
 } from '../../../common/interfaces/broker-adapter.interface';
 import { TradeRepository } from '../repositories/trade.repository';
-import { MarketFeedService } from '../../market-data/services/market-feed.service';
+import {
+  MarketFeedService,
+  BROKER_ADAPTER_TOKEN,
+} from '../../market-data/services/market-feed.service';
 import { v4 as uuidv4 } from 'uuid';
 
 /** Simulated slippage range: 0.01% to 0.05%. */
@@ -92,6 +96,9 @@ export class PaperTradeService implements OnModuleInit {
   constructor(
     private readonly tradeRepository: TradeRepository,
     private readonly marketFeed: MarketFeedService,
+    @Optional()
+    @Inject(BROKER_ADAPTER_TOKEN)
+    private readonly brokerAdapter: BrokerAdapter | null = null,
   ) {}
 
   /**
@@ -441,14 +448,43 @@ export class PaperTradeService implements OnModuleInit {
    * getAccount().equity live without depending on the tick handler.
    */
   @Cron('*/15 * * * * *', { timeZone: 'Asia/Kolkata' })
-  refreshOpenPositions(): void {
+  async refreshOpenPositions(): Promise<void> {
     for (const pos of this.virtualPositions.values()) {
       if (!pos.token) continue;
-      const quote = this.marketFeed.getQuote(pos.token);
-      if (!quote || quote.ltp <= 0) continue;
-      pos.ltp = quote.ltp;
+      // Prefer the WebSocket quote cache. When the token isn't on the WS —
+      // Angel One caps the socket at ~50 tokens, so open-position tokens are
+      // routinely squeezed out by indices + the scanner — fall back to a REST
+      // broker quote. Without this an equity position freezes at its entry
+      // price (pnl 0, +0 unrealized) the moment its WS slot is lost.
+      let ltp = this.marketFeed.getQuote(pos.token)?.ltp ?? 0;
+      if (ltp <= 0) {
+        ltp = await this.fetchRestLtp(pos.token, pos.exchange);
+      }
+      if (ltp <= 0) continue;
+      pos.ltp = ltp;
       const multiplier = pos.side === 'BUY' ? 1 : -1;
-      pos.pnl = multiplier * (quote.ltp - pos.averagePrice) * pos.quantity;
+      pos.pnl = multiplier * (ltp - pos.averagePrice) * pos.quantity;
+    }
+  }
+
+  /**
+   * Fetch a fresh LTP straight from the broker's REST quote API — used by
+   * refreshOpenPositions when a position's token has no WebSocket tick.
+   * Returns 0 (caller keeps the last value) when no broker is wired or the
+   * call fails. Calls are naturally paced — refreshOpenPositions awaits them
+   * one position at a time.
+   */
+  private async fetchRestLtp(token: string, exchange: string): Promise<number> {
+    if (!this.brokerAdapter) return 0;
+    try {
+      const tick = await this.brokerAdapter.getLiveQuote(token, exchange || 'NSE');
+      const ltp = (tick as { ltp?: number } | null)?.ltp;
+      return typeof ltp === 'number' && ltp > 0 ? ltp : 0;
+    } catch (err) {
+      this.logger.warn(
+        `fetchRestLtp(${token}) failed: ${err instanceof Error ? err.message : err}`,
+      );
+      return 0;
     }
   }
 

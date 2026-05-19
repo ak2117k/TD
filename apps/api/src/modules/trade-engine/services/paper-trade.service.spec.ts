@@ -1,7 +1,10 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { PaperTradeService, BROKER_CHARGE_PER_EXIT } from './paper-trade.service';
 import { TradeRepository } from '../repositories/trade.repository';
-import { MarketFeedService } from '../../market-data/services/market-feed.service';
+import {
+  MarketFeedService,
+  BROKER_ADAPTER_TOKEN,
+} from '../../market-data/services/market-feed.service';
 import { OrderRequest } from '../../../common/interfaces/broker-adapter.interface';
 
 /** Stub repo for the service constructor — onModuleInit isn't called in these tests. */
@@ -607,5 +610,65 @@ describe('PaperTradeService.onModuleInit — terminal-status replay safety', () 
     // Only the OPEN trade is a live position.
     expect(service.getVirtualPositions()).toHaveLength(1);
     expect(service.getVirtualPositions()[0].symbol).toBe('TCS-EQ');
+  });
+});
+
+/**
+ * REST fallback — when a position's token is not on Angel One's WebSocket
+ * (the socket caps at ~50 tokens, so open-position tokens get squeezed out
+ * by indices + the scanner), refreshOpenPositions must fetch a fresh quote
+ * over REST so the position marks to market instead of freezing at entry.
+ */
+describe('PaperTradeService.refreshOpenPositions — REST fallback when WS cache misses', () => {
+  async function buildWithBroker(
+    feed: { getQuote: jest.Mock },
+    broker: { getLiveQuote: jest.Mock },
+  ): Promise<PaperTradeService> {
+    const repo = {
+      findPaperTradesSince: jest.fn().mockResolvedValue([]),
+      getOpenTrades: jest.fn().mockResolvedValue([]),
+    };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        PaperTradeService,
+        { provide: TradeRepository, useValue: repo },
+        { provide: MarketFeedService, useValue: feed },
+        { provide: BROKER_ADAPTER_TOKEN, useValue: broker },
+      ],
+    }).compile();
+    const service = module.get<PaperTradeService>(PaperTradeService);
+    service.resetVirtualPortfolio(2_000_000);
+    return service;
+  }
+
+  const buyOrder: OrderRequest = {
+    symbol: 'TCS-EQ', token: '11536', exchange: 'NSE', side: 'BUY',
+    orderType: 'MARKET', quantity: 2000, price: 100, positionType: 'INTRADAY',
+  };
+
+  it('falls back to a REST broker quote when the WS quote cache has no tick', async () => {
+    const feed = { getQuote: jest.fn(() => null) }; // token not on the WebSocket
+    const broker = { getLiveQuote: jest.fn().mockResolvedValue({ ltp: 110 }) };
+    const service = await buildWithBroker(feed, broker);
+    await service.simulateOrder(buyOrder);
+
+    await service.refreshOpenPositions();
+
+    const pos = service.getVirtualPositions()[0];
+    expect(broker.getLiveQuote).toHaveBeenCalledWith('11536', 'NSE');
+    expect(pos.ltp).toBe(110);
+    expect(pos.pnl).toBeGreaterThan(19_000); // (110 - ~100) * 2000
+  });
+
+  it('does not call the broker when the WS cache already has a tick', async () => {
+    const feed = { getQuote: jest.fn(() => ({ ltp: 105 })) };
+    const broker = { getLiveQuote: jest.fn() };
+    const service = await buildWithBroker(feed, broker);
+    await service.simulateOrder(buyOrder);
+
+    await service.refreshOpenPositions();
+
+    expect(broker.getLiveQuote).not.toHaveBeenCalled();
+    expect(service.getVirtualPositions()[0].ltp).toBe(105);
   });
 });
