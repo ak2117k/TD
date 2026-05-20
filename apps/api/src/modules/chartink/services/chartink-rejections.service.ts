@@ -10,6 +10,13 @@ export interface GetRejectionsParams {
   limit?: number;
 }
 
+export interface RejectionScoreCheck {
+  name: string;
+  points: number;
+  pointsPossible: number;
+  passed: boolean;
+}
+
 export interface RejectionRow {
   id: string;
   processedAt: string;
@@ -19,6 +26,7 @@ export interface RejectionRow {
   reason: string;
   score: number | null;
   hitPrice: number;
+  scoreBreakdown: RejectionScoreCheck[] | null;
 }
 
 export interface RejectionsResponse {
@@ -93,6 +101,12 @@ export class ChartinkRejectionsService {
         reason: r.rejectReason ?? '',
         score: r.score ?? null,
         hitPrice: r.hitPrice,
+        // Forward the persisted breakdown verbatim. The column is `Json?` in
+        // Prisma — when it isn't an array (missing or a corrupted scalar) we
+        // emit null so the frontend's per-factor renderer can fall back to "·".
+        scoreBreakdown: Array.isArray(r.scoreBreakdown)
+          ? (r.scoreBreakdown as RejectionScoreCheck[])
+          : null,
       }));
 
     return {

@@ -35,6 +35,11 @@ describe('ChartinkRejectionsService', () => {
       score: 42,
       hitPrice: 1500.5,
       alert: { scanner: { scanName: 'Breakout Scan' } },
+      scoreBreakdown: [
+        { name: 'Sector aligned', points: 8, pointsPossible: 10, passed: true },
+        { name: 'MACD on 1d', points: 6, pointsPossible: 8, passed: true },
+        { name: 'MACD on 5m', points: 0, pointsPossible: 8, passed: false },
+      ],
     },
     {
       id: 'r2',
@@ -98,6 +103,11 @@ describe('ChartinkRejectionsService', () => {
         reason: 'score below threshold',
         score: 42,
         hitPrice: 1500.5,
+        scoreBreakdown: [
+          { name: 'Sector aligned', points: 8, pointsPossible: 10, passed: true },
+          { name: 'MACD on 1d', points: 6, pointsPossible: 8, passed: true },
+          { name: 'MACD on 5m', points: 0, pointsPossible: 8, passed: false },
+        ],
       });
     });
 
@@ -105,6 +115,7 @@ describe('ChartinkRejectionsService', () => {
       const res = await service.getRejections({});
       const r1 = res.rejections.find((r) => r.id === 'r1')!;
       expect(r1.scanner).toBe('');
+      expect(r1.scoreBreakdown).toBeNull();
       const r2 = res.rejections.find((r) => r.id === 'r2')!;
       expect(r2.reason).toBe('');
       expect(r2.score).toBeNull();
@@ -127,6 +138,24 @@ describe('ChartinkRejectionsService', () => {
       const res = await service.getRejections({});
       expect(res.rejections.some((r) => r.kind === 'setup')).toBe(false);
       expect(res.rejections.some((r) => r.id === 'accepted1')).toBe(false);
+    });
+
+    it('maps a non-array scoreBreakdown to null (defensive — corrupted JSON)', async () => {
+      mockRepo.findAlertSetupsInRange.mockResolvedValue([
+        {
+          id: 'rx',
+          processedAt: new Date('2026-05-18T07:00:00.000Z'),
+          symbol: 'BEL',
+          kind: 'error',
+          rejectReason: 'indicator crash',
+          score: null,
+          hitPrice: 429.13,
+          alert: { scanner: { scanName: 'X' } },
+          scoreBreakdown: 'oops-not-an-array',
+        },
+      ]);
+      const res = await service.getRejections({});
+      expect(res.rejections[0].scoreBreakdown).toBeNull();
     });
   });
 
