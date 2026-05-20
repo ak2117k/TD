@@ -512,6 +512,31 @@ describe('WatchService — exits close the linked paper trade', () => {
     await svc.transitionStopped('w1', 55, 'score-decay');
     expect(mockTrade.closeTrade).toHaveBeenCalledWith('pt-1', expect.anything());
   });
+
+  // Regression: every exit transition that *has* a known trigger price MUST
+  // forward it to closeTrade. Without it, the trade-execution fallback resolves
+  // an exitPrice from the cached LTP at simulation time — which drifts from the
+  // real trigger and silently under-/over-reports the realised P&L on the
+  // linked Trade row. See POLICYBZR 2026-05-20: triggered at ₹1834.60 but the
+  // Trade row recorded ₹1842.22, hiding ~₹823 of loss.
+
+  it('transitionTargetHit forwards the trigger price as opts.exitPrice', async () => {
+    await svc.transitionTargetHit('w1', 4160);
+    expect(mockTrade.closeTrade).toHaveBeenCalledWith(
+      'pt-1',
+      expect.objectContaining({ exitPrice: 4160 }),
+    );
+  });
+
+  it('transitionLossCut forwards the confirmed loss-cut price as opts.exitPrice', async () => {
+    // No broker-adapter override on this describe block, so fetchLivePrice
+    // returns null and the loss-cut keeps the original price argument.
+    await svc.transitionLossCut('w1', 1990, -1200);
+    expect(mockTrade.closeTrade).toHaveBeenCalledWith(
+      'pt-1',
+      expect.objectContaining({ exitPrice: 1990 }),
+    );
+  });
 });
 
 describe('WatchService.onTick — hard loss-cut', () => {

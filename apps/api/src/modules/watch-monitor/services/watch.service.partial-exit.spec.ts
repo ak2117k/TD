@@ -257,8 +257,13 @@ describe('WatchService — partial-exit + trailing-stop', () => {
     // Price drops to 1148 — below stop (1149.225)
     await svc.onTick('11536', 1148, new Date());
 
-    // Should close the remaining position via the linked trade
-    expect(trade.closeTrade).toHaveBeenCalledWith('pt-1', 'trailing-stop');
+    // Should close the remaining position via the linked trade, forwarding
+    // the trail-stop trigger price as opts.exitPrice so the Trade row
+    // records the actual stop price (not the cached LTP at simulation time).
+    expect(trade.closeTrade).toHaveBeenCalledWith(
+      'pt-1',
+      expect.objectContaining({ reason: 'trailing-stop', exitPrice: 1148 }),
+    );
 
     // TRAILING_STOP_HIT event
     expect(repo.createEvent).toHaveBeenCalledWith(

@@ -283,6 +283,15 @@ export class TradeExecutionService {
           reason?: string | null;
           /** Close only this many units (partial exit). Omit to close all. */
           quantity?: number;
+          /**
+           * Caller-known trigger price (target-hit, loss-cut, trailing-stop).
+           * When supplied, the paper-trade close fills at THIS price instead
+           * of the cached LTP at simulation time. Without it, the Trade row's
+           * recorded exitPrice can drift from the trigger price by the time
+           * the close order runs, silently under-/over-reporting realised P&L.
+           * Ignored for live trades — the broker is authoritative there.
+           */
+          exitPrice?: number;
         },
   ): Promise<Trade> {
     const opts =
@@ -334,24 +343,37 @@ export class TradeExecutionService {
       // price even when the instrument has no cached LTP. Without a price
       // on the close order the simulator fills at 0, credits no cash, and
       // books a phantom catastrophic loss.
+      //
+      // Preference: caller-supplied `opts.exitPrice` (the actual stop/target
+      // trigger price) wins, then cached LTP, then entry price. The caller-
+      // supplied path matters: by the time the close order runs the cached
+      // LTP can have drifted several rupees from the trigger that decided
+      // the exit, silently under-/over-reporting the realised P&L on the
+      // Trade row.
+      const callerExitPrice =
+        typeof opts.exitPrice === 'number' && opts.exitPrice > 0
+          ? opts.exitPrice
+          : null;
       const lastPrice = instrument
         ? await this.getLastPrice(instrument.token, instrument.exchange)
         : null;
       closeOrder.price =
-        lastPrice && lastPrice > 0
+        callerExitPrice ??
+        (lastPrice && lastPrice > 0
           ? lastPrice
           : trade.entryPrice && trade.entryPrice > 0
             ? trade.entryPrice
-            : undefined;
+            : undefined);
 
       const paperResponse =
         await this.paperTradeService.simulateOrder(closeOrder);
 
       // Pick the first STRICTLY-POSITIVE price. A 0 fill (no LTP) must never
       // be accepted — find(>0) is used instead of the ?? chain, which would
-      // treat a literal 0 as a valid value and corrupt P&L.
+      // treat a literal 0 as a valid value and corrupt P&L. callerExitPrice
+      // is checked first so the trigger price wins over a stale cached fill.
       exitPrice =
-        [paperResponse.fillPrice, lastPrice, trade.entryPrice].find(
+        [callerExitPrice, paperResponse.fillPrice, lastPrice, trade.entryPrice].find(
           (p): p is number => typeof p === 'number' && p > 0,
         ) ?? 0;
 
