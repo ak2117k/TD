@@ -1,6 +1,7 @@
 import { Fragment } from 'react';
 import type { WatchEntry } from '../../types/watch.types';
 import { profitView, whatIfView, isClosed, breakdownChecks } from '../../utils/watchPnl';
+import { trailView, SL_AMBER_THRESHOLD_PCT } from '../../utils/trailView';
 import { WatchDetailPanel } from './WatchDetailPanel';
 import { factorCell, type FactorCellState } from './factorCell';
 
@@ -102,7 +103,8 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
             P&amp;L
           </th>
           <th className="py-2 px-3 text-right">P&amp;L %</th>
-          <th className="py-2 px-3 text-right">Target</th>
+          <th className="py-2 px-3 text-right" title="Live stop: hard −0.4% loss-cut before partial exit; trailing stop after.">SL</th>
+          <th className="py-2 px-3 text-right" title="Profit target (re-anchored to the live fill on execute).">TP</th>
           <th className="py-2 px-3 text-left">Status</th>
           <th className="py-2 px-3 text-right" title="Order fill time — or the alert time if never traded (IST)">Buy Time</th>
           <th className="py-2 px-3 text-right" title="Position close / alert stop time (IST)">Sell Time</th>
@@ -127,6 +129,9 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
           const isWhatIf =
             !(isClosed(e.status) && e.realizedPnl != null) && e.status !== 'TRADED';
           const p = isWhatIf ? whatIfView(e) : profitView(e);
+          const t = trailView(e);
+          const slAmber =
+            t.state === 'armed' && t.distancePct != null && t.distancePct < SL_AMBER_THRESHOLD_PCT;
           // Buy-time pass/fail per factor.
           const initialByName = new Map(
             breakdownChecks(e.initialBreakdown).map((c) => [c.name, c.passed]),
@@ -147,11 +152,6 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
             >
               <td className="py-2 px-3 font-mono text-[var(--color-text-primary)]">
                 {e.symbol}
-                {e.partialExitedAt && (
-                  <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">
-                    ½ exit · trail ₹{e.trailingStopPrice?.toFixed(2)}
-                  </span>
-                )}
               </td>
               <td
                 className="py-2 px-3 text-left text-[var(--color-text-secondary)] max-w-[160px] truncate"
@@ -220,6 +220,21 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
                   </td>
                 </>
               )}
+              <td
+                className={`py-2 px-3 text-right tabular-nums ${
+                  slAmber ? 'text-amber-400' : 'text-[var(--color-text-primary)]'
+                }`}
+                title={t.slKind ? `${t.slKind} stop` : undefined}
+              >
+                {t.slPrice != null ? (
+                  <>
+                    ₹{t.slPrice.toFixed(2)}
+                    <span className="ml-1 text-[10px] text-[var(--color-text-muted)]">{t.slKind}</span>
+                  </>
+                ) : (
+                  <span className="text-[var(--color-text-muted)]">—</span>
+                )}
+              </td>
               <td className="py-2 px-3 text-right text-[var(--color-text-secondary)]">
                 {e.profitTarget.toFixed(2)}
               </td>
@@ -273,10 +288,14 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
             {e.id === selectedId && (
               <tr>
                 <td
-                  colSpan={23}
+                  colSpan={24}
                   className="p-2 bg-[var(--color-bg-tertiary)]/40 border-b border-[var(--color-border-subtle)]"
                 >
-                  <WatchDetailPanel entryId={e.id} onClose={() => onSelect(null)} />
+                  <WatchDetailPanel
+                    entryId={e.id}
+                    entry={e}
+                    onClose={() => onSelect(null)}
+                  />
                 </td>
               </tr>
             )}
