@@ -90,6 +90,8 @@ const INDUSTRY_TO_SECTOR_TOKEN: Record<string, string> = {
   'diversified fmcg': SECTOR_TOKEN.FMCG,
   cigarettes: SECTOR_TOKEN.FMCG,
   'cigarettes & tobacco products': SECTOR_TOKEN.FMCG,
+  // NSE 2026 rollup: replaces the granular FMCG sub-industries above.
+  'fast moving consumer goods': SECTOR_TOKEN.FMCG,
 
   // ─── Consumer durables ───
   'consumer durables': SECTOR_TOKEN.CONSUMER_DURABLES,
@@ -100,6 +102,8 @@ const INDUSTRY_TO_SECTOR_TOKEN: Record<string, string> = {
   automobiles: SECTOR_TOKEN.AUTO,
   'auto components': SECTOR_TOKEN.AUTO,
   'auto ancillaries': SECTOR_TOKEN.AUTO,
+  // NSE 2026 rollup: merges Automobiles + Auto Components into one industry.
+  'automobile and auto components': SECTOR_TOKEN.AUTO,
 
   // ─── Metals / Mining ───
   'ferrous metals': SECTOR_TOKEN.METAL,
@@ -108,6 +112,8 @@ const INDUSTRY_TO_SECTOR_TOKEN: Record<string, string> = {
   'metals & minerals trading': SECTOR_TOKEN.METAL,
   'minerals & mining': SECTOR_TOKEN.METAL,
   'industrial minerals': SECTOR_TOKEN.METAL,
+  // NSE 2026 rollup: merges ferrous + non-ferrous + mining into one industry.
+  'metals & mining': SECTOR_TOKEN.METAL,
 
   // ─── Energy / Oil & Gas / Power ───
   'petroleum products': SECTOR_TOKEN.ENERGY,
@@ -116,6 +122,8 @@ const INDUSTRY_TO_SECTOR_TOKEN: Record<string, string> = {
   power: SECTOR_TOKEN.ENERGY,
   'coal': SECTOR_TOKEN.ENERGY,
   'consumable fuels': SECTOR_TOKEN.ENERGY,
+  // NSE 2026 rollup: merges oil + gas + coal + consumable fuels.
+  'oil gas & consumable fuels': SECTOR_TOKEN.ENERGY,
 
   // ─── Realty ───
   realty: SECTOR_TOKEN.REALTY,
@@ -131,6 +139,8 @@ const INDUSTRY_TO_SECTOR_TOKEN: Record<string, string> = {
   'construction materials': SECTOR_TOKEN.INFRA,
   'transport infrastructure': SECTOR_TOKEN.INFRA,
   'aerospace & defense': SECTOR_TOKEN.INFRA,
+  // NSE 2026 rollup: industrial / capital-goods bucket (largest unmapped, 63 rows).
+  'capital goods': SECTOR_TOKEN.INFRA,
 
   // ─── Telecom / Media → NIFTY MEDIA ───
   'telecom - services': SECTOR_TOKEN.MEDIA,
@@ -140,6 +150,9 @@ const INDUSTRY_TO_SECTOR_TOKEN: Record<string, string> = {
   'media & entertainment': SECTOR_TOKEN.MEDIA,
   entertainment: SECTOR_TOKEN.MEDIA,
   'media - print/television/radio': SECTOR_TOKEN.MEDIA,
+  // NSE 2026 rollups: telecom + media now ship as broader industry strings.
+  telecommunication: SECTOR_TOKEN.MEDIA,
+  'media entertainment & publication': SECTOR_TOKEN.MEDIA,
 };
 
 /**
