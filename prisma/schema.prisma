@@ -621,3 +621,136 @@ model WatchEvent {
   @@index([eventType])
   @@map("watch_events")
 }
+
+// ============================================================================
+// Ungated Shadow-Track A/B Experiment
+// See docs/superpowers/specs/2026-05-20-ungated-shadow-track-design.md
+// ============================================================================
+
+model UngatedWatchEntry {
+  id                    String   @id @default(cuid())
+  alertId               String?
+  setupId               String?
+  symbol                String
+  token                 String
+  exchange              String
+  side                  String
+  initialPrice          Float
+  initialScore          Int
+  initialBreakdown      Json
+  initialAt             DateTime @default(now())
+  profitTarget          Float
+  profitTargetSource    String
+  stopLossScore         Int      @default(60)
+  status                WatchStatus @default(WATCHING)
+  currentPrice          Float?
+  currentScore          Int?
+  currentBreakdown      Json?
+  maxFavorable          Float?
+  maxAdverse            Float?
+  lastTickAt            DateTime?
+  lastRescoreAt         DateTime?
+  lastEventPrice        Float?
+  paperTradeId          String?
+  executedAt            DateTime?
+  executedPrice         Float?
+  quantity              Int?
+  closedAt              DateTime?
+  closedReason          String?
+  notes                 String?
+  dismissedAt           DateTime?
+  partialExitedAt       DateTime?
+  partialExitPrice      Float?
+  partialQty            Int?
+  remainingQty          Int?
+  trailingHighWater     Float?
+  trailingStopPrice     Float?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  events                UngatedWatchEvent[]
+
+  @@index([status])
+  @@index([token])
+  @@index([symbol])
+  @@index([createdAt])
+  @@map("ungated_watch_entries")
+}
+
+model UngatedWatchEvent {
+  id            String         @id @default(cuid())
+  watchEntryId  String
+  watchEntry    UngatedWatchEntry @relation(fields: [watchEntryId], references: [id], onDelete: Cascade)
+  eventType     WatchEventType
+  price         Float?
+  score         Int?
+  breakdown     Json?
+  priceDelta    Float?
+  scoreDelta    Int?
+  notes         String?
+  createdAt     DateTime       @default(now())
+
+  @@index([watchEntryId, createdAt])
+  @@index([eventType])
+  @@map("ungated_watch_events")
+}
+
+model UngatedTrade {
+  id              String   @id @default(cuid())
+  instrumentId    String
+  signalId        String?
+  orderId         String?
+  side            String
+  orderType       String
+  positionType    String
+  quantity        Int
+  entryPrice      Float?
+  exitPrice       Float?
+  stoploss        Float?
+  target          Float?
+  pnl             Float?
+  pnlPercent      Float?
+  fees            Float    @default(0)
+  status          String   @default("PENDING")
+  strategy        String?
+  isPaperTrade    Boolean  @default(true)
+  entryTime       DateTime?
+  exitTime        DateTime?
+  notes           String?
+  entryReason     String?
+  exitReasonTag   String?
+  exitNotes       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("ungated_trades")
+}
+
+model UngatedPaperAccount {
+  id               String   @id @default(cuid())
+  startingBalance  Float
+  cash             Float
+  realizedPnl      Float    @default(0)
+  fees             Float    @default(0)
+  deployedCapital  Float    @default(0)
+  killSwitchAt     DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@map("ungated_paper_account")
+}
+
+model UngatedRejection {
+  id          String   @id @default(cuid())
+  alertId     String?
+  symbol      String
+  reason      String
+  score       Int?
+  hitPrice    Float?
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([reason])
+  @@map("ungated_rejections")
+}
