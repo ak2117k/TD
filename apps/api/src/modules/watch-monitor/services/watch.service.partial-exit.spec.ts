@@ -141,9 +141,13 @@ describe('WatchService — partial-exit + trailing-stop', () => {
     await svc.onTick('11536', 1010, new Date());
 
     // Should have partially closed the linked trade (100 of 200 shares)
+    // AND forwarded the trigger price as opts.exitPrice — without it the
+    // trade-execution fallback resolves an exitPrice from the cached LTP
+    // at simulation time, drifting from the actual partial-exit trigger
+    // and corrupting the partial-slice pnl on the Trade row.
     expect(trade.closeTrade).toHaveBeenCalledWith(
       'pt-1',
-      expect.objectContaining({ quantity: 100 }),
+      expect.objectContaining({ quantity: 100, exitPrice: 1010 }),
     );
 
     // Should have written a PARTIAL_EXIT event

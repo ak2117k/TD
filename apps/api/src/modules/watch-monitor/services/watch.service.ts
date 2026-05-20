@@ -895,12 +895,16 @@ export class WatchService {
     // Partially close the linked trade: closeTrade shrinks the original
     // Trade row to PARTIALLY_FILLED and credits cash for the closed slice —
     // no orphan rows, so the trades table stays a clean source of truth.
+    // ltp is the partial-exit trigger price — forward it so the partial
+    // slice's recorded fill matches the actual trigger, not the cached LTP
+    // at simulation time (same class of bug as commit 9fb5bcd).
     const partialTradeId = entry.paperTradeId ?? entry.liveTradeId;
     if (partialTradeId) {
       try {
         await this.trade.closeTrade(partialTradeId, {
           reason: 'partial-exit',
           quantity: partialQty,
+          exitPrice: ltp,
         });
       } catch (err) {
         this.logger.warn(
