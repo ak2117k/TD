@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
 import { watchApi } from '../../services/watch.service';
-import type { WatchEntryWithEvents } from '../../types/watch.types';
+import type { WatchEntry, WatchEntryWithEvents } from '../../types/watch.types';
 import { WatchEventLog } from './WatchEventLog';
+import { TrailingStopSection } from './TrailingStopSection';
 
-interface Props { entryId: string; onClose?: () => void }
+interface Props { entryId: string; entry?: WatchEntry; onClose?: () => void }
 
-export function WatchDetailPanel({ entryId, onClose }: Props) {
-  const [entry, setEntry] = useState<WatchEntryWithEvents | null>(null);
+export function WatchDetailPanel({ entryId, entry: liveEntry, onClose }: Props) {
+  const [detail, setDetail] = useState<WatchEntryWithEvents | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -14,7 +15,7 @@ export function WatchDetailPanel({ entryId, onClose }: Props) {
     setError(null);
     try {
       const data = await watchApi.get(entryId);
-      setEntry(data);
+      setDetail(data);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -37,7 +38,12 @@ export function WatchDetailPanel({ entryId, onClose }: Props) {
     finally { setBusy(false); }
   }
 
-  if (!entry) {
+  // Live-first: prefer the polled entry from the table (so the stat grid +
+  // trail section refresh live), fall back to the fetched detail. The event
+  // log always reads from `detail` (only the fetch carries events).
+  const view: WatchEntry | WatchEntryWithEvents | null = liveEntry ?? detail;
+
+  if (!view) {
     return (
       <div className="p-4 flex items-start justify-between text-[var(--color-text-muted)]">
         <span>{error ? `Error: ${error}` : 'Loading…'}</span>
@@ -58,27 +64,27 @@ export function WatchDetailPanel({ entryId, onClose }: Props) {
     <div className="p-4 bg-[var(--color-bg-secondary)] border border-[var(--color-border-subtle)] rounded text-[var(--color-text-primary)]">
       <div className="flex items-baseline justify-between mb-3">
         <div>
-          <span className="font-mono text-lg text-[var(--color-text-primary)]">{entry.symbol}</span>
-          <span className="ml-2 text-[var(--color-text-secondary)]">{entry.side}</span>
+          <span className="font-mono text-lg text-[var(--color-text-primary)]">{view.symbol}</span>
+          <span className="ml-2 text-[var(--color-text-secondary)]">{view.side}</span>
           <span
             className={`ml-2 px-2 py-0.5 rounded text-xs font-medium ${
-              entry.status === 'WATCHING'
+              view.status === 'WATCHING'
                 ? 'bg-blue-500/20 text-blue-300'
-                : entry.status === 'TRADED'
+                : view.status === 'TRADED'
                   ? 'bg-emerald-500/20 text-emerald-300'
-                  : entry.status === 'TARGET_HIT'
+                  : view.status === 'TARGET_HIT'
                     ? 'bg-emerald-600/30 text-emerald-200'
-                    : entry.status === 'STOPPED'
+                    : view.status === 'STOPPED'
                       ? 'bg-red-500/20 text-red-300'
                       : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]'
             }`}
           >
-            {entry.status}
+            {view.status}
           </span>
         </div>
         <div className="flex items-center gap-3">
           <span className="text-xs text-[var(--color-text-muted)]">
-            {new Date(entry.initialAt).toLocaleString('en-IN')}
+            {new Date(view.initialAt).toLocaleString('en-IN')}
           </span>
           {onClose && (
             <button
@@ -96,56 +102,58 @@ export function WatchDetailPanel({ entryId, onClose }: Props) {
         <div>
           <div className="text-[var(--color-text-muted)] text-xs">Initial</div>
           <div className="text-[var(--color-text-primary)]">
-            ₹{entry.initialPrice.toFixed(2)} (score {entry.initialScore})
+            ₹{view.initialPrice.toFixed(2)} (score {view.initialScore})
           </div>
         </div>
         <div>
           <div className="text-[var(--color-text-muted)] text-xs">Current</div>
           <div className="text-[var(--color-text-primary)]">
-            ₹{(entry.currentPrice ?? entry.initialPrice).toFixed(2)} (score {entry.currentScore ?? entry.initialScore})
+            ₹{(view.currentPrice ?? view.initialPrice).toFixed(2)} (score {view.currentScore ?? view.initialScore})
           </div>
         </div>
         <div>
           <div className="text-[var(--color-text-muted)] text-xs">Target</div>
           <div className="text-[var(--color-text-primary)]">
-            ₹{entry.profitTarget.toFixed(2)} <span className="text-[var(--color-text-muted)] text-xs">({entry.profitTargetSource})</span>
+            ₹{view.profitTarget.toFixed(2)} <span className="text-[var(--color-text-muted)] text-xs">({view.profitTargetSource})</span>
           </div>
         </div>
         <div>
           <div className="text-[var(--color-text-muted)] text-xs">Max Favorable</div>
-          <div className="text-[var(--color-text-primary)]">₹{entry.maxFavorable?.toFixed(2) ?? '—'}</div>
+          <div className="text-[var(--color-text-primary)]">₹{view.maxFavorable?.toFixed(2) ?? '—'}</div>
         </div>
         <div>
           <div className="text-[var(--color-text-muted)] text-xs">Max Adverse</div>
-          <div className="text-[var(--color-text-primary)]">₹{entry.maxAdverse?.toFixed(2) ?? '—'}</div>
+          <div className="text-[var(--color-text-primary)]">₹{view.maxAdverse?.toFixed(2) ?? '—'}</div>
         </div>
         <div>
           <div className="text-[var(--color-text-muted)] text-xs">SL (score)</div>
-          <div className="text-[var(--color-text-primary)]">&lt; {entry.stopLossScore}</div>
+          <div className="text-[var(--color-text-primary)]">&lt; {view.stopLossScore}</div>
         </div>
       </div>
 
-      {entry.optionsToken && (
+      {view.optionsToken && (
         <div className="text-sm mb-4 p-2 bg-[var(--color-bg-tertiary)] rounded">
           <div className="text-xs text-[var(--color-text-muted)] mb-1">Options leg</div>
           <div className="font-mono text-[var(--color-text-primary)]">
-            {entry.symbol} {entry.optionsStrike} {entry.optionsType}
-            {entry.optionsExpiry && (
-              <> · expires {new Date(entry.optionsExpiry).toLocaleDateString('en-IN')}</>
+            {view.symbol} {view.optionsStrike} {view.optionsType}
+            {view.optionsExpiry && (
+              <> · expires {new Date(view.optionsExpiry).toLocaleDateString('en-IN')}</>
             )}
-            {entry.optionsSelectionScore != null && (
-              <> · rank-score {entry.optionsSelectionScore.toFixed(3)}</>
+            {view.optionsSelectionScore != null && (
+              <> · rank-score {view.optionsSelectionScore.toFixed(3)}</>
             )}
           </div>
         </div>
       )}
 
+      <TrailingStopSection entry={view as WatchEntry} />
+
       <div className="mb-4">
         <div className="text-xs text-[var(--color-text-muted)] mb-2">Event log</div>
-        <WatchEventLog events={entry.events} />
+        <WatchEventLog events={detail?.events ?? []} />
       </div>
 
-      {entry.status === 'WATCHING' && (
+      {view.status === 'WATCHING' && (
         <div className="flex gap-2">
           <button
             onClick={() => execute('paper')}
