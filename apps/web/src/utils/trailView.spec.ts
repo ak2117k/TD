@@ -23,6 +23,7 @@ function entry(o: Partial<WatchEntry>): WatchEntry {
 function armedBuy(over: Partial<WatchEntry> = {}): WatchEntry {
   return entry({
     status: 'TRADED', side: 'BUY', executedPrice: 100,
+    // WatchEntry.partialExitedAt is typed string | null; cast silences the literal-string check.
     partialExitedAt: '2026-05-20T05:00:00Z' as never,
     partialQty: 750, partialExitPrice: 104, remainingQty: 750,
     trailingHighWater: 106.8, trailingStopPrice: 106.27, currentPrice: 106.5,
@@ -113,12 +114,21 @@ describe('trailView — armed metrics (BUY)', () => {
   it('distancePct is null when currentPrice is null', () => {
     expect(trailView(armedBuy({ currentPrice: null })).distancePct).toBeNull();
   });
+
+  it('protected and lockedTotal are null when trailStop is missing on an armed entry', () => {
+    const v = trailView(armedBuy({ trailingStopPrice: null }));
+    expect(v.protected).toBeNull();
+    expect(v.lockedTotal).toBeNull();
+    // realised is still computed from the partial-exit fields
+    expect(v.realised).toBeCloseTo(3000, 4);
+  });
 });
 
 describe('trailView — armed metrics (SELL)', () => {
   it('realised, protected, distancePct are favorable-positive on a SELL that fell', () => {
     const v = trailView(entry({
       status: 'TRADED', side: 'SELL', executedPrice: 100,
+      // WatchEntry.partialExitedAt is typed string | null; cast silences the literal-string check.
       partialExitedAt: '2026-05-20T05:00:00Z' as never,
       partialQty: 500, partialExitPrice: 96, remainingQty: 500,
       trailingHighWater: 93.2, trailingStopPrice: 93.66, currentPrice: 93.5,

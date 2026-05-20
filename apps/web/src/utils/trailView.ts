@@ -64,9 +64,9 @@ export function trailView(entry: WatchEntry): TrailView {
     const trailStop = entry.trailingStopPrice ?? null;
 
     const realised = (partialExitPrice - exec) * sideMul * partialQty;
-    const protectedPnl =
-      trailStop != null ? (trailStop - exec) * sideMul * remainingQty : 0;
-    const lockedTotal = realised + protectedPnl;
+    const protectedPnl: number | null =
+      trailStop != null ? (trailStop - exec) * sideMul * remainingQty : null;
+    const lockedTotal = protectedPnl != null ? realised + protectedPnl : null;
 
     const curr = entry.currentPrice;
     const distancePct =
