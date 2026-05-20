@@ -108,7 +108,20 @@ export class WatchService {
    * trade's realized P/L.
    */
   async list(opts: { status?: WatchStatus; date?: string }): Promise<
-    Array<WatchEntry & { scannerName: string | null; realizedPnl: number | null }>
+    Array<
+      WatchEntry & {
+        scannerName: string | null;
+        realizedPnl: number | null;
+        /**
+         * Round-trip SEBI/exchange/brokerage charges for the linked trade.
+         * Null when the entry has no realized pnl (trade still open, or
+         * the linked Trade row could not be resolved). The watch page's
+         * footer sums these to surface the structural charge drag on
+         * intraday equity P&L.
+         */
+        realizedFees: number | null;
+      }
+    >
   > {
     const entries = await this.repo.list(opts);
     const alertIds = entries
@@ -117,16 +130,18 @@ export class WatchService {
     const tradeIds = entries
       .map((e) => e.paperTradeId ?? e.liveTradeId)
       .filter((x): x is string => !!x);
-    const [scannerNames, realizedPnls] = await Promise.all([
+    const [scannerNames, realization] = await Promise.all([
       this.repo.findScannerNames(alertIds),
-      this.repo.findRealizedPnls(tradeIds),
+      this.repo.findTradeRealization(tradeIds),
     ]);
     return entries.map((e) => {
       const tradeId = e.paperTradeId ?? e.liveTradeId;
+      const r = tradeId ? realization.get(tradeId) : undefined;
       return {
         ...e,
         scannerName: e.alertId ? scannerNames.get(e.alertId) ?? null : null,
-        realizedPnl: tradeId ? realizedPnls.get(tradeId) ?? null : null,
+        realizedPnl: r?.pnl ?? null,
+        realizedFees: r?.fees ?? null,
       };
     });
   }

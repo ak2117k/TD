@@ -90,14 +90,18 @@ describe('WatchRepository', () => {
     expect(prisma.chartinkAlert.findMany).not.toHaveBeenCalled();
   });
 
-  it('findRealizedPnls maps tradeId -> pnl, skipping null pnl', async () => {
+  it('findTradeRealization maps tradeId -> { pnl, fees }, skipping null pnl', async () => {
     prisma.trade.findMany.mockResolvedValue([
-      { id: 't1', pnl: 1525 },
-      { id: 't2', pnl: null },
+      { id: 't1', pnl: 1525, fees: 117.25 },
+      { id: 't2', pnl: null, fees: 0 },
+      { id: 't3', pnl: -800, fees: null }, // fees null → treated as 0
     ]);
-    const map = await repo.findRealizedPnls(['t1', 't2']);
-    expect(map.get('t1')).toBe(1525);
-    expect(map.has('t2')).toBe(false);
+    const map = await repo.findTradeRealization(['t1', 't2', 't3']);
+    expect(map.get('t1')).toEqual({ pnl: 1525, fees: 117.25 });
+    expect(map.has('t2')).toBe(false); // null pnl row is skipped entirely
+    // null fees coerces to 0 — the watch summary footer sums fees, so a null
+    // here would propagate as NaN and corrupt the displayed total.
+    expect(map.get('t3')).toEqual({ pnl: -800, fees: 0 });
   });
 
   it('wasTokenExecutedSince queries by token + executedAt only, NOT by status (R2 must catch closed trades)', async () => {

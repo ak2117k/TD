@@ -722,14 +722,16 @@ describe('WatchService.onTick — hard loss-cut', () => {
 });
 
 describe('WatchService.list — enrichment', () => {
-  it('attaches scannerName and realizedPnl to each entry', async () => {
+  it('attaches scannerName, realizedPnl and realizedFees to each entry', async () => {
     const repo = {
       list: jest.fn().mockResolvedValue([
         { id: 'w1', alertId: 'a1', paperTradeId: 't1', liveTradeId: null, status: 'TARGET_HIT' },
         { id: 'w2', alertId: null, paperTradeId: null, liveTradeId: null, status: 'WATCHING' },
       ]),
       findScannerNames: jest.fn().mockResolvedValue(new Map([['a1', 'Scanner X']])),
-      findRealizedPnls: jest.fn().mockResolvedValue(new Map([['t1', 4200]])),
+      findTradeRealization: jest
+        .fn()
+        .mockResolvedValue(new Map([['t1', { pnl: 4200, fees: 117.25 }]])),
     };
     const mod = await Test.createTestingModule({
       providers: [
@@ -748,8 +750,18 @@ describe('WatchService.list — enrichment', () => {
     const result = await svc.list({ status: undefined, date: '2026-05-15' });
 
     expect(repo.list).toHaveBeenCalledWith({ status: undefined, date: '2026-05-15' });
-    expect(result[0]).toMatchObject({ id: 'w1', scannerName: 'Scanner X', realizedPnl: 4200 });
-    expect(result[1]).toMatchObject({ id: 'w2', scannerName: null, realizedPnl: null });
+    expect(result[0]).toMatchObject({
+      id: 'w1',
+      scannerName: 'Scanner X',
+      realizedPnl: 4200,
+      realizedFees: 117.25,
+    });
+    expect(result[1]).toMatchObject({
+      id: 'w2',
+      scannerName: null,
+      realizedPnl: null,
+      realizedFees: null,
+    });
   });
 });
 

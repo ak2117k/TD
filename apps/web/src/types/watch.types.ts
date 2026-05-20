@@ -58,6 +58,10 @@ export interface WatchEntry {
   scannerName: string | null;
   /** Realized P/L of the linked trade once closed (server-enriched). */
   realizedPnl: number | null;
+  /** Round-trip SEBI/exchange/brokerage charges on the linked trade. Null
+   *  alongside `realizedPnl == null`. Surfaced on the watch-page footer to
+   *  show the structural charge drag separately from price-only P&L. */
+  realizedFees: number | null;
   createdAt: string;
   updatedAt: string;
 }

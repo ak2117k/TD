@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useWatchEntries } from '../../hooks/useWatchEntries';
 import { WatchTable } from './WatchTable';
 import { PaperAccountBadge } from '../../components/trading/PaperAccountBadge';
-import { pnlBreakdown, accountRealPnl } from '../../utils/watchPnl';
+import { pnlBreakdown, accountRealPnl, dayRealizedSummary } from '../../utils/watchPnl';
 import { usePaperAccount } from '../../hooks/usePaperAccount';
 import type { WatchStatus } from '../../types/watch.types';
 
@@ -106,6 +106,44 @@ export function WatchPage() {
             );
           })()}
           <WatchTable entries={entries} onSelect={setSelectedId} selectedId={selectedId} />
+
+          {(() => {
+            // Day-realised summary footer: gross / charges / net for the
+            // closed trades currently visible. Mirrors the date filter
+            // (reads from the same `entries` the table renders), so the
+            // numbers move with the date picker. Only renders when there's
+            // at least one closed-and-traded entry — otherwise we'd show a
+            // misleading "₹0 net".
+            const s = dayRealizedSummary(entries);
+            if (s.count === 0) return null;
+            const fmt = (n: number) =>
+              `${n >= 0 ? '+' : '−'}₹${Math.abs(n).toFixed(2)}`;
+            const colorOf = (n: number) =>
+              n > 0 ? 'text-emerald-400' : n < 0 ? 'text-red-400' : 'text-[var(--color-text-secondary)]';
+            return (
+              <div className="mt-4 rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-tertiary)]/40 px-4 py-3">
+                <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 text-sm">
+                  <div className="text-[11px] uppercase tracking-wider text-[var(--color-text-muted)]">
+                    Day realised — {s.count} closed trade{s.count === 1 ? '' : 's'}
+                  </div>
+                  <div className="flex flex-wrap items-baseline gap-x-6 gap-y-1 tabular-nums">
+                    <div title="Sum of price-only P&L across closed trades, before SEBI/exchange/STT charges.">
+                      <span className="text-[var(--color-text-muted)]">Gross </span>
+                      <span className={`font-semibold ${colorOf(s.gross)}`}>{fmt(s.gross)}</span>
+                    </div>
+                    <div title="Round-trip SEBI + exchange + STT + GST + stamp duty + brokerage on the closed trades. Always reduces net.">
+                      <span className="text-[var(--color-text-muted)]">Charges </span>
+                      <span className="font-semibold text-amber-400">−₹{s.charges.toFixed(2)}</span>
+                    </div>
+                    <div title="What you actually pocket: Gross − Charges. The number that matters.">
+                      <span className="text-[var(--color-text-muted)]">Net </span>
+                      <span className={`font-semibold ${colorOf(s.net)}`}>{fmt(s.net)}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
         </>
       )}
     </div>
