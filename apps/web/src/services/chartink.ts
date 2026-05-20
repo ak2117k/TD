@@ -43,6 +43,13 @@ export interface RejectionSummary {
   byKind: RejectionKindCount[];
 }
 
+export interface RejectionScoreCheck {
+  name: string;
+  points: number;
+  pointsPossible: number;
+  passed: boolean;
+}
+
 export interface RejectionRow {
   id: string;
   processedAt: string; // ISO
@@ -52,6 +59,9 @@ export interface RejectionRow {
   reason: string;
   score: number | null;
   hitPrice: number;
+  /** Per-factor scoring detail when scoring ran; null for kinds like
+   *  `unresolved`, `no-direction`, `error` where scoring never executed. */
+  scoreBreakdown: RejectionScoreCheck[] | null;
 }
 
 export interface RejectionsResponse {

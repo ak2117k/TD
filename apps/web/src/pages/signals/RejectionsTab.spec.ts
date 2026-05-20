@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildKindBreakdown, acceptanceRate } from './RejectionsTab';
+import { buildKindBreakdown, acceptanceRate, factorPoints } from './RejectionsTab';
 
 describe('buildKindBreakdown', () => {
   it('returns rows sorted by count descending with bar pct relative to the max', () => {
@@ -42,5 +42,28 @@ describe('acceptanceRate', () => {
 
   it('returns 0 when nothing was processed', () => {
     expect(acceptanceRate({ totalProcessed: 0, accepted: 0, rejected: 0, byKind: [] })).toBe(0);
+  });
+});
+
+describe('factorPoints', () => {
+  const breakdown = [
+    { name: 'Sector aligned', points: 8, pointsPossible: 10, passed: true },
+    { name: 'MACD on 5m', points: 0, pointsPossible: 8, passed: false },
+  ];
+
+  it('returns the matching check looked up by factor name', () => {
+    expect(factorPoints(breakdown, 'Sector aligned')).toEqual({
+      points: 8,
+      pointsPossible: 10,
+      passed: true,
+    });
+  });
+
+  it('returns null when the factor is not present in the breakdown', () => {
+    expect(factorPoints(breakdown, 'Index aligned')).toBeNull();
+  });
+
+  it('returns null when the entire breakdown is null', () => {
+    expect(factorPoints(null, 'Sector aligned')).toBeNull();
   });
 });

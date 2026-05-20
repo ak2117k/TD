@@ -36,6 +36,22 @@ export function acceptanceRate(summary: RejectionSummary): number {
   return Math.round((summary.accepted / summary.totalProcessed) * 100);
 }
 
+/**
+ * Look up the matching check in a rejection row's per-factor breakdown.
+ * Returns null when the row had no breakdown (scoring never ran) or the
+ * factor isn't in the row — the cell renderer falls back to "·" then.
+ */
+export function factorPoints(
+  breakdown: RejectionRow['scoreBreakdown'],
+  factorName: string,
+): { points: number; pointsPossible: number; passed: boolean } | null {
+  if (!breakdown) return null;
+  const c = breakdown.find((x) => x.name === factorName);
+  return c
+    ? { points: c.points, pointsPossible: c.pointsPossible, passed: c.passed }
+    : null;
+}
+
 // --- Presentation ----------------------------------------------------------
 
 function kindColor(kind: string): string {

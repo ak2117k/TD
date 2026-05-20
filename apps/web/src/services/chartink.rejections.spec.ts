@@ -32,6 +32,7 @@ function stubResponse(): RejectionsResponse {
         reason: 'no MTF direction agreement',
         score: null,
         hitPrice: 3890.5,
+        scoreBreakdown: null,
       },
     ],
   };
