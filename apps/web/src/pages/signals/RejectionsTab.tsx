@@ -7,6 +7,7 @@ import type {
   RejectionRow,
   RejectionSummary,
 } from '@/services/chartink';
+import { FACTOR_COLUMNS } from '@/utils/factorColumns';
 
 // --- Pure helpers (unit-tested in RejectionsTab.spec.ts) -------------------
 
@@ -132,6 +133,39 @@ function KindBar({ row }: { row: KindBreakdownRow }) {
   );
 }
 
+/**
+ * One factor cell on a rejection row. Shows the obtained `points` value
+ * (green when `passed`, red otherwise) with a `factor — points/possible`
+ * tooltip; a muted "·" when the row has no breakdown OR the factor is
+ * absent from it (e.g. unresolved / no-direction / error kinds).
+ */
+function FactorScoreCell({
+  factor,
+  breakdown,
+}: {
+  factor: { name: string };
+  breakdown: RejectionRow['scoreBreakdown'];
+}) {
+  const pts = factorPoints(breakdown, factor.name);
+  if (!pts) {
+    return (
+      <td className="px-2 py-2 text-center tabular-nums">
+        <span className="text-gray-500">·</span>
+      </td>
+    );
+  }
+  return (
+    <td
+      className="px-2 py-2 text-center tabular-nums"
+      title={`${factor.name} — ${pts.points}/${pts.pointsPossible}`}
+    >
+      <span className={pts.passed ? 'text-emerald-300' : 'text-red-300'}>
+        {pts.points}
+      </span>
+    </td>
+  );
+}
+
 function RejectionsTable({ rows }: { rows: RejectionRow[] }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-gray-700/60">
@@ -144,6 +178,15 @@ function RejectionsTable({ rows }: { rows: RejectionRow[] }) {
             <th className="px-3 py-2">Kind</th>
             <th className="px-3 py-2">Reason</th>
             <th className="px-3 py-2 text-right">Score</th>
+            {FACTOR_COLUMNS.map((f) => (
+              <th
+                key={f.name}
+                className="px-2 py-2 text-center font-medium"
+                title={f.name}
+              >
+                {f.short}
+              </th>
+            ))}
           </tr>
         </thead>
         <tbody>
@@ -173,6 +216,9 @@ function RejectionsTable({ rows }: { rows: RejectionRow[] }) {
               <td className="px-3 py-2 text-right tabular-nums text-gray-300">
                 {r.score ?? '—'}
               </td>
+              {FACTOR_COLUMNS.map((f) => (
+                <FactorScoreCell key={f.name} factor={f} breakdown={r.scoreBreakdown} />
+              ))}
             </tr>
           ))}
         </tbody>
