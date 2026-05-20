@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { AngelOneAdapterService } from '../services/angel-one-adapter.service';
@@ -54,11 +54,12 @@ const RATE_LIMIT_MS = 1200;
  * are safe.
  *
  * Operationally this is the missing piece between "tick stream is live" and
- * "DB always has a complete history." Together with the on-startup backfill
- * (yet to be added) it eliminates the data-gap class of bugs entirely.
+ * "DB always has a complete history." Paired with the boot-time catch-up
+ * (`onModuleInit` → `backfillUniverseAtBoot`) it covers both steady-state
+ * incremental fills and the "API was offline at 15:35 / 23:35 IST" hole.
  */
 @Injectable()
-export class DailyBackfillWorker {
+export class DailyBackfillWorker implements OnModuleInit {
   private readonly logger = new Logger(DailyBackfillWorker.name);
 
   constructor(
@@ -66,6 +67,23 @@ export class DailyBackfillWorker {
     private readonly adapter: AngelOneAdapterService,
     private readonly repo: MarketDataRepository,
   ) {}
+
+  /**
+   * Boot-time catch-up runner. Fire-and-forget on purpose: the universe
+   * pass takes ~19s (rate-limited broker calls + per-target sleeps) and we
+   * don't want to block API readiness behind it. The cron at 15:35 / 23:35
+   * IST handles the steady-state case; this hook only matters when the API
+   * was offline at those windows. `backfillOne` itself is a no-op when the
+   * latest candle for an (instrument, timeframe) is already current, so the
+   * cost in the common case is just the inter-target sleeps.
+   */
+  async onModuleInit(): Promise<void> {
+    this.backfillUniverseAtBoot().catch((err) => {
+      this.logger.warn(
+        `Boot-time candle backfill failed: ${err instanceof Error ? err.message : err}`,
+      );
+    });
+  }
 
   /**
    * 15:35 IST, Mon-Fri — equity close + 5min buffer so the broker has
