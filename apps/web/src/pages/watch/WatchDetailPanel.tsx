@@ -146,11 +146,15 @@ export function WatchDetailPanel({ entryId, entry: liveEntry, onClose }: Props) 
         </div>
       )}
 
-      <TrailingStopSection entry={view as WatchEntry} />
+      <TrailingStopSection entry={view} />
 
       <div className="mb-4">
         <div className="text-xs text-[var(--color-text-muted)] mb-2">Event log</div>
-        <WatchEventLog events={detail?.events ?? []} />
+        {detail == null ? (
+          <div className="text-xs text-[var(--color-text-muted)]">Loading events…</div>
+        ) : (
+          <WatchEventLog events={detail.events} />
+        )}
       </div>
 
       {view.status === 'WATCHING' && (
