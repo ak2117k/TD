@@ -8,6 +8,11 @@ import { WatchService, WatchCapExceededError, TradeCooldownError } from '../../w
 import { formatTradeRejection } from '../../../common/utils/trade-rejection-log';
 import { isWithinEntryWindow } from '../../../common/utils/market-hours';
 import { evaluateTradePolicy } from '../../watch-monitor/services/trade-policy';
+import { UngatedWatchService, UngatedSymbolDupError, UngatedCooldownError } from '../../ungated-track/services/ungated-watch.service';
+import { UngatedRejectionRepository, UngatedRejectionReason } from '../../ungated-track/repositories/ungated-rejection.repository';
+import {
+  UngatedCapitalExhaustedError, UngatedPositionCapError, UngatedKillSwitchError,
+} from '../../ungated-track/services/ungated-paper-account.service';
 
 interface Hit {
   symbol: string;
@@ -51,6 +56,8 @@ export class ChartinkProcessService {
     private readonly angelOne: AngelOneAdapterService,
     private readonly nseSector: NseSectorIndexService,
     private readonly watch: WatchService,
+    private readonly ungatedWatch: UngatedWatchService,
+    private readonly ungatedRejections: UngatedRejectionRepository,
   ) {}
 
   async processAlert(alertId: string, hits: Hit[]): Promise<void> {
@@ -326,6 +333,42 @@ export class ChartinkProcessService {
         { scan: scanName, side },
       );
     }
+
+    // === 5. UNGATED shadow track — runs unconditionally for every scored alert.
+    // Independent try/catch: failures here MUST NOT affect the gated path.
+    // See specs/2026-05-20-ungated-shadow-track-design.md §5.1.
+    try {
+      await this.ungatedWatch.createFromAlert({
+        alertId,
+        setupId: null,
+        symbol: hit.symbol,
+        token: instrument.token,
+        exchange: 'NSE',
+        side,
+        initialPrice: hit.hitPrice,
+        initialScore: scoringResult.score,
+        initialBreakdown: { checks: scoringResult.checks, lotCount: scoringResult.lotCount } as any,
+      });
+    } catch (err) {
+      const reason = this.mapUngatedError(err);
+      if (reason) {
+        await this.ungatedRejections.record({
+          alertId, symbol: hit.symbol, reason,
+          score: scoringResult.score, hitPrice: hit.hitPrice,
+        });
+      } else {
+        this.logger.warn(`[ungated] ${hit.symbol}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+  }
+
+  private mapUngatedError(err: unknown): UngatedRejectionReason | null {
+    if (err instanceof UngatedCapitalExhaustedError) return 'capital-exhausted';
+    if (err instanceof UngatedPositionCapError) return 'position-cap';
+    if (err instanceof UngatedSymbolDupError) return 'symbol-dup';
+    if (err instanceof UngatedCooldownError) return 'cooldown';
+    if (err instanceof UngatedKillSwitchError) return 'kill-switch';
+    return null;
   }
 
   /**
