@@ -28,4 +28,13 @@ export class WatchGateway implements OnGatewayInit {
   emitCreated(entry: unknown) {
     this.server.emit('watch:created', entry);
   }
+
+  /**
+   * Push the full updated entry row so the frontend merges in place.
+   * Replaces the older "tick → refetch entire list" hop that caused
+   * the watch table to flash on every tick.
+   */
+  emitEntry(entry: unknown) {
+    this.server.emit('watch:entry', entry);
+  }
 }

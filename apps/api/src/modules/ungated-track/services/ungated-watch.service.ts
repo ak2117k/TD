@@ -7,6 +7,7 @@ import { UngatedTradeRepository } from '../repositories/ungated-trade.repository
 import { UngatedPaperAccountService, TRADE_CAPITAL } from './ungated-paper-account.service';
 import { UngatedTradeExecutionService } from './ungated-trade-execution.service';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
+import { UngatedWatchGateway } from '../gateways/ungated-watch.gateway';
 
 export class UngatedSymbolDupError extends Error {
   constructor(public readonly symbol: string) {
@@ -46,6 +47,7 @@ export class UngatedWatchService {
     private readonly account: UngatedPaperAccountService,
     private readonly exec: UngatedTradeExecutionService,
     private readonly feed: MarketFeedService,
+    private readonly gateway: UngatedWatchGateway,
   ) {}
 
   async createFromAlert(input: UngatedCreateFromAlertInput) {
@@ -147,6 +149,10 @@ export class UngatedWatchService {
       // to render. Mirrors what gated WatchService writes on every tick.
       try {
         await this.repo.update(entry.id, { currentPrice: ltp, lastTickAt: ts });
+        // Push the full updated row via WebSocket so the frontend merges
+        // in place — no per-tick refetch, no table flash.
+        const fresh = await this.repo.findById(entry.id);
+        if (fresh) this.gateway.emitEntry(fresh);
       } catch (err) {
         this.logger.warn(`[ungated] failed to persist tick for ${entry.symbol}: ${err}`);
       }

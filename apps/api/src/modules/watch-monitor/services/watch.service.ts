@@ -554,6 +554,13 @@ export class WatchService {
     });
 
     this.gateway.emitTick(entry.id, { price: ltp, currentScore: entry.currentScore ?? null });
+    // Push the full row so the frontend can merge in place without a
+    // refetch — replaces the "tick → refetch list" hop and the visible
+    // table flash that came with it. Read the freshest row so it
+    // includes the currentPrice/maxFavorable/maxAdverse we just wrote.
+    this.repo.findById(entry.id).then((fresh) => {
+      if (fresh) this.gateway.emitEntry(fresh);
+    }).catch(() => {});
 
     const isTargetHit = side === 'BUY'
       ? ltp >= entry.profitTarget

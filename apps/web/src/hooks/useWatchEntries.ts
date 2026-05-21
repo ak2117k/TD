@@ -27,22 +27,29 @@ export function useWatchEntries(status?: WatchStatus, date?: string) {
 
   useEffect(() => {
     const socket: Socket = io(`${API_BASE}/watch`, { transports: ['websocket'] });
-    let tickDebounce: ReturnType<typeof setTimeout> | null = null;
-    const debouncedRefetch = () => {
-      if (tickDebounce) clearTimeout(tickDebounce);
-      tickDebounce = setTimeout(() => { refetch(); }, 1000);
+    // The full updated row arrives on every tick — merge in place so React
+    // only re-renders the one row that changed instead of the whole table.
+    // Eliminates the per-tick "page flash" that hard-refresh papered over.
+    const onEntry = (incoming: WatchEntry) => {
+      setEntries((prev) => {
+        const idx = prev.findIndex((e) => e.id === incoming.id);
+        if (idx < 0) return prev; // not in current view (different status filter, etc.)
+        const next = prev.slice();
+        next[idx] = { ...next[idx], ...incoming };
+        return next;
+      });
     };
-    const onTick = () => { debouncedRefetch(); };
+    // Status transitions and new-row events are rare — refetch is fine for
+    // these. (The tick path above handles the high-frequency case.)
     const onEvent = () => { refetch(); };
     const onCreated = () => { refetch(); };
-    socket.on('watch:tick', onTick);
+    socket.on('watch:entry', onEntry);
     socket.on('watch:event', onEvent);
     socket.on('watch:created', onCreated);
     return () => {
-      socket.off('watch:tick', onTick);
+      socket.off('watch:entry', onEntry);
       socket.off('watch:event', onEvent);
       socket.off('watch:created', onCreated);
-      if (tickDebounce) clearTimeout(tickDebounce);
       socket.disconnect();
     };
   }, [refetch]);

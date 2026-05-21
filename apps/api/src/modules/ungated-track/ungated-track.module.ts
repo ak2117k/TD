@@ -7,6 +7,7 @@ import { UngatedTradeExecutionService } from './services/ungated-trade-execution
 import { UngatedWatchService } from './services/ungated-watch.service';
 import { UngatedComparisonService } from './services/ungated-comparison.service';
 import { UngatedTrackController } from './controllers/ungated-track.controller';
+import { UngatedWatchGateway } from './gateways/ungated-watch.gateway';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { MarketDataModule } from '../market-data/market-data.module';
 import { MarketFeedService } from '../market-data/services/market-feed.service';
@@ -22,6 +23,7 @@ import { MarketFeedService } from '../market-data/services/market-feed.service';
     UngatedTradeExecutionService,
     UngatedWatchService,
     UngatedComparisonService,
+    UngatedWatchGateway,
   ],
   exports: [UngatedWatchService, UngatedRejectionRepository],
 })
