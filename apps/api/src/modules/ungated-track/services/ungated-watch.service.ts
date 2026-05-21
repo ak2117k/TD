@@ -6,6 +6,7 @@ import {
 import { UngatedTradeRepository } from '../repositories/ungated-trade.repository';
 import { UngatedPaperAccountService, TRADE_CAPITAL } from './ungated-paper-account.service';
 import { UngatedTradeExecutionService } from './ungated-trade-execution.service';
+import { MarketFeedService } from '../../market-data/services/market-feed.service';
 
 export class UngatedSymbolDupError extends Error {
   constructor(public readonly symbol: string) {
@@ -44,6 +45,7 @@ export class UngatedWatchService {
     private readonly trades: UngatedTradeRepository,
     private readonly account: UngatedPaperAccountService,
     private readonly exec: UngatedTradeExecutionService,
+    private readonly feed: MarketFeedService,
   ) {}
 
   async createFromAlert(input: UngatedCreateFromAlertInput) {
@@ -102,6 +104,12 @@ export class UngatedWatchService {
       quantity: qty,
     });
 
+    // Subscribe to live ticks so onTick fires for this token. Without this
+    // the entry sits TRADED forever with no currentPrice → frontend shows
+    // "—" in the live P&L columns AND transitions (target/loss-cut/partial/
+    // trail) never trigger.
+    this.feed.subscribeForWatch(input.token, entry.id);
+
     return entry;
   }
 
@@ -112,10 +120,17 @@ export class UngatedWatchService {
   private readonly TRAILING_STOP_PCT = 0.005;
 
   // --- Public tick entrypoint ---
-  async onTick(token: string, ltp: number, _ts: Date): Promise<void> {
+  async onTick(token: string, ltp: number, ts: Date): Promise<void> {
     const entries = await this.repo.findActiveByToken(token);
     for (const entry of entries) {
       if (entry.status !== 'TRADED') continue;
+      // Persist the live price so the frontend's P&L column has a value
+      // to render. Mirrors what gated WatchService writes on every tick.
+      try {
+        await this.repo.update(entry.id, { currentPrice: ltp, lastTickAt: ts });
+      } catch (err) {
+        this.logger.warn(`[ungated] failed to persist tick for ${entry.symbol}: ${err}`);
+      }
       try {
         await this.applyTick(entry, ltp);
       } catch (err) {

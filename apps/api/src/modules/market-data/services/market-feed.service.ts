@@ -86,7 +86,11 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
    */
   private readonly watchTokens = new Map<string, Set<string>>();
   private readonly watchEntryTokens = new Map<string, Set<string>>();
-  private watchTickHandler: ((token: string, ltp: number, ts: Date) => void | Promise<void>) | null = null;
+  // Multi-handler support: each module can register its own tick callback.
+  // The gated WatchMonitorModule registers WatchService.onTick. The ungated
+  // shadow-track registers UngatedWatchService.onTick. Both fire on every
+  // tick for any watched token.
+  private watchTickHandlers: Array<(token: string, ltp: number, ts: Date) => void | Promise<void>> = [];
 
   /** Whether the feed is actively running. */
   private feedActive = false;
@@ -1327,7 +1331,7 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
   registerWatchTickHandler(
     handler: (token: string, ltp: number, ts: Date) => void | Promise<void>,
   ): void {
-    this.watchTickHandler = handler;
+    this.watchTickHandlers.push(handler);
   }
 
   /**
@@ -1335,11 +1339,11 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
    * tick to the watch handler if any watch entries are subscribed.
    */
   protected dispatchWatchTick(token: string, ltp: number, ts: Date): void {
-    if (!this.watchTickHandler) return;
+    if (this.watchTickHandlers.length === 0) return;
     const subs = this.watchTokens.get(token);
     if (!subs || subs.size === 0) return;
-    try {
-      const r = this.watchTickHandler(token, ltp, ts);
+    for (const handler of this.watchTickHandlers) try {
+      const r = handler(token, ltp, ts);
       if (r instanceof Promise) {
         r.catch((err) => {
           this.logger.warn(
