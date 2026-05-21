@@ -454,6 +454,25 @@ describe('TradeExecutionService.closeTrade — paper-trade exit price', () => {
     expect(trade.status).toBe('CLOSED');
   });
 
+  // Regression: when the caller (watch-monitor stop/target/trail paths) knows
+  // the actual trigger price, opts.exitPrice MUST override the simulator's
+  // fill — the simulator's cached LTP can have drifted from the trigger by
+  // the time the close order runs, silently corrupting realised P&L on the
+  // Trade row. See POLICYBZR 2026-05-20: trigger 1834.60 → recorded 1842.22.
+  it('uses opts.exitPrice over the simulator fillPrice when the caller passes a trigger price', async () => {
+    // simulateOrder is set up to return fillPrice 130.5, but the caller knows
+    // the stop fired at 92 — the recorded exitPrice MUST be 92.
+    const trade = await service.closeTrade('trade_1', {
+      reason: 'sl-loss-cut',
+      exitPrice: 92,
+    });
+
+    expect(trade.exitPrice).toBe(92);
+    // P&L = (92 - 100) * 50 = -400 — based on the trigger, not the stale fill.
+    expect(trade.pnl).toBeCloseTo(-400, 2);
+    expect(trade.status).toBe('CLOSED');
+  });
+
   it('falls back to getLastPrice() when the simulator omits fillPrice', async () => {
     paperService.simulateOrder.mockResolvedValueOnce({
       orderId: 'paper_close_legacy',

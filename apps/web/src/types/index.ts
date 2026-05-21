@@ -104,6 +104,7 @@ export interface NavItem {
   path: string;
   label: string;
   icon: React.ComponentType<{ size?: number; className?: string }>;
+  badge?: string;
 }
 
 // Levels-context strategy: structured signal payload.

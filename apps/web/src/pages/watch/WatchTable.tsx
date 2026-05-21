@@ -4,6 +4,7 @@ import { profitView, whatIfView, isClosed, breakdownChecks } from '../../utils/w
 import { trailView, SL_AMBER_THRESHOLD_PCT } from '../../utils/trailView';
 import { WatchDetailPanel } from './WatchDetailPanel';
 import { factorCell, type FactorCellState } from './factorCell';
+import { FACTOR_COLUMNS } from '../../utils/factorColumns';
 
 interface Props {
   entries: WatchEntry[];
@@ -49,21 +50,6 @@ function fmtTime(iso: string | null): string {
     hour12: false, timeZone: 'Asia/Kolkata',
   });
 }
-
-/** The 10 scoring factors, in fixed column order (short header → full name). */
-const FACTOR_COLUMNS: ReadonlyArray<{ name: string; short: string }> = [
-  { name: 'Index aligned', short: 'Idx' },
-  { name: 'Sector aligned', short: 'Sect' },
-  { name: 'Relative strength', short: 'RS' },
-  { name: 'Price vs 20-EMA', short: 'EMA' },
-  { name: 'SuperTrend match', short: 'ST' },
-  { name: 'MACD on 1d', short: 'M1d' },
-  { name: 'MACD on 5m', short: 'M5m' },
-  { name: 'MACD on 1m', short: 'M1m' },
-  { name: 'S/R room', short: 'S/R' },
-  { name: 'Volume confirmation', short: 'Vol' },
-];
-
 
 /** Tailwind class for a factor cell, keyed by its transition state. */
 const FACTOR_STATE_CLASS: Record<FactorCellState, string> = {

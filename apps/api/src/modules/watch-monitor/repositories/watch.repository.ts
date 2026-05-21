@@ -212,18 +212,24 @@ export class WatchRepository {
     return new Map(alerts.map((a) => [a.id, a.scanner.scanName]));
   }
 
-  /** Resolve tradeId -> realized pnl. Batched; null pnl is omitted. */
-  async findRealizedPnls(tradeIds: string[]): Promise<Map<string, number>> {
+  /**
+   * Resolve tradeId -> { pnl, fees }. Batched; rows with null pnl are
+   * omitted (trade hasn't been priced out yet). Null `fees` is coerced
+   * to 0 so the watch summary footer can sum them without NaN.
+   */
+  async findTradeRealization(
+    tradeIds: string[],
+  ): Promise<Map<string, { pnl: number; fees: number }>> {
     const ids = [...new Set(tradeIds.filter((x): x is string => !!x))];
     if (ids.length === 0) return new Map();
     const trades = await this.prisma.trade.findMany({
       where: { id: { in: ids } },
-      select: { id: true, pnl: true },
+      select: { id: true, pnl: true, fees: true },
     });
     return new Map(
       trades
         .filter((t) => t.pnl != null)
-        .map((t) => [t.id, t.pnl as number]),
+        .map((t) => [t.id, { pnl: t.pnl as number, fees: t.fees ?? 0 }]),
     );
   }
 }

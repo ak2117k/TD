@@ -21,6 +21,7 @@ import { ChartinkModule } from './modules/chartink/chartink.module';
 import { FundamentalsModule } from './modules/fundamentals/fundamentals.module';
 import { WatchMonitorModule } from './modules/watch-monitor/watch-monitor.module';
 import { StrategyReviewModule } from './modules/strategy-review/strategy-review.module';
+import { UngatedTrackModule } from './modules/ungated-track/ungated-track.module';
 
 @Module({
   imports: [
@@ -96,6 +97,9 @@ import { StrategyReviewModule } from './modules/strategy-review/strategy-review.
 
     // Strategy Review — read-only analytics over stored trading history
     StrategyReviewModule,
+
+    // Ungated Track — shadow paper-trade pipeline for unfiltered signals
+    UngatedTrackModule,
   ],
   providers: [],
 })

@@ -9,6 +9,11 @@ import { AngelOneAdapterService } from '../../../market-data/services/angel-one-
 import { NseSectorIndexService } from '../../../market-data/services/nse-sector-index.service';
 import { WatchService, WatchCapExceededError } from '../../../watch-monitor/services/watch.service';
 import * as marketHours from '../../../../common/utils/market-hours';
+import { UngatedWatchService, UngatedSymbolDupError, UngatedCooldownError } from '../../../ungated-track/services/ungated-watch.service';
+import { UngatedRejectionRepository } from '../../../ungated-track/repositories/ungated-rejection.repository';
+import {
+  UngatedCapitalExhaustedError, UngatedPositionCapError, UngatedKillSwitchError,
+} from '../../../ungated-track/services/ungated-paper-account.service';
 
 /** A 5-min-MACD score-check entry, for exercising the MACD entry gate. */
 const macd5mCheck = (passed: boolean) => ({
@@ -37,6 +42,8 @@ describe('ChartinkProcessService', () => {
   let angelOne: { getHistoricalData: jest.Mock };
   let nseSector: { getSectorIndexForSymbol: jest.Mock };
   let watchSvc: { createFromAlert: jest.Mock };
+  let ungatedWatch: { createFromAlert: jest.Mock };
+  let ungatedRejections: { record: jest.Mock };
 
   // Default happy-path candles — 50 bars trending UP, enough for classifyTrend
   const UP_CANDLES = makeTrendingCloses('UP', 50).map((close) => ({ close, timestamp: new Date(), open: close, high: close, low: close, volume: 1000 }));
@@ -70,6 +77,8 @@ describe('ChartinkProcessService', () => {
     angelOne = { getHistoricalData: jest.fn().mockResolvedValue(UP_CANDLES) };
     nseSector = { getSectorIndexForSymbol: jest.fn().mockResolvedValue('99926019') };
     watchSvc = { createFromAlert: jest.fn().mockResolvedValue({ id: 'w1' }) };
+    ungatedWatch = { createFromAlert: jest.fn().mockResolvedValue({ id: 'uw1' }) };
+    ungatedRejections = { record: jest.fn().mockResolvedValue(undefined) };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -81,6 +90,8 @@ describe('ChartinkProcessService', () => {
         { provide: AngelOneAdapterService, useValue: angelOne },
         { provide: NseSectorIndexService, useValue: nseSector },
         { provide: WatchService, useValue: watchSvc },
+        { provide: UngatedWatchService, useValue: ungatedWatch },
+        { provide: UngatedRejectionRepository, useValue: ungatedRejections },
       ],
     }).compile();
 
@@ -675,6 +686,61 @@ describe('ChartinkProcessService', () => {
       );
       expect(noDirCall).toBeDefined();
       expect(noDirCall![0]).toContain('stock fetch boom');
+    });
+  });
+
+  // ─── Ungated shadow track fork ─────────────────────────────────────────────
+
+  describe('ChartinkProcessService — ungated fork', () => {
+    beforeEach(() => {
+      // Standard happy-path instrument setup for every fork test.
+      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', exchange: 'NSE' });
+      mdRepo.getInstrumentByToken.mockResolvedValue({ id: 'sec-1', token: '99926019', exchange: 'NSE' });
+      angelOne.getHistoricalData.mockResolvedValue(
+        makeTrendingCloses('UP', 50).map((close) => ({
+          close, timestamp: new Date(), open: close, high: close, low: close, volume: 1000,
+        })),
+      );
+    });
+
+    it('scored-low alert: gated rejects, ungated still calls createFromAlert', async () => {
+      const LOW_SCORE = 40;
+      scoring.score.mockResolvedValue({ score: LOW_SCORE, lotCount: 0, checks: [] });
+
+      await service.processOne('alert-ug-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      // Gated path: kind=scored-low persisted
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: 'scored-low' }),
+      );
+      // Ungated path: still called despite gated rejection
+      expect(ungatedWatch.createFromAlert).toHaveBeenCalledWith(
+        expect.objectContaining({ initialScore: LOW_SCORE }),
+      );
+    });
+
+    it('ungated createFromAlert failure does NOT affect the gated path', async () => {
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [macd5mCheck(true), supertrendCheck(true)] });
+      ungatedWatch.createFromAlert.mockRejectedValue(new Error('ungated db crash'));
+
+      // processOne must resolve cleanly — ungated failure must not propagate
+      await expect(service.processOne('alert-ug-2', { symbol: 'RELIANCE', hitPrice: 2885 })).resolves.toBeUndefined();
+
+      // Gated path still produced the setup
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: 'setup' }),
+      );
+    });
+
+    it('UngatedCapitalExhaustedError persists a rejection row', async () => {
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [] });
+      ungatedWatch.createFromAlert.mockRejectedValue(new UngatedCapitalExhaustedError(50_000));
+
+      await service.processOne('alert-ug-3', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      expect(ungatedRejections.record).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'capital-exhausted' }),
+      );
     });
   });
 });

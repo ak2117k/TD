@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   sectionTotalPnl, pnlBreakdown, breakdownChecks, profitView, accountRealPnl, whatIfView,
+  dayRealizedSummary,
 } from './watchPnl';
 import type { WatchEntry } from '../types/watch.types';
 
@@ -18,9 +19,46 @@ function entry(o: Partial<WatchEntry>): WatchEntry {
     closedReason: null, notes: null, partialExitedAt: null, partialExitPrice: null,
     partialQty: null, remainingQty: null, trailingHighWater: null,
     trailingStopPrice: null, scannerName: null, realizedPnl: null,
+    realizedFees: null,
     createdAt: '', updatedAt: '', ...o,
   };
 }
+
+describe('dayRealizedSummary', () => {
+  it('sums realised pnl + fees across closed entries, exposes net = gross - charges', () => {
+    const e1 = entry({ status: 'TARGET_HIT', realizedPnl: 2010, realizedFees: 105 });
+    const e2 = entry({ status: 'STOPPED',    realizedPnl: -859,  realizedFees: 117 });
+    const e3 = entry({ status: 'EXITED',     realizedPnl: 662,   realizedFees: 95  });
+    const summary = dayRealizedSummary([e1, e2, e3]);
+    expect(summary.count).toBe(3);
+    expect(summary.gross).toBe(2010 - 859 + 662);
+    expect(summary.charges).toBe(105 + 117 + 95);
+    expect(summary.net).toBe(summary.gross - summary.charges);
+  });
+
+  it('skips open (TRADED) and never-traded what-if rows — only realised contributes', () => {
+    const open = entry({ status: 'TRADED', realizedPnl: null });          // not closed yet
+    const noTrade = entry({ status: 'STOPPED', realizedPnl: null });      // never executed
+    const real = entry({ status: 'TARGET_HIT', realizedPnl: 500, realizedFees: 50 });
+    const summary = dayRealizedSummary([open, noTrade, real]);
+    expect(summary.count).toBe(1);
+    expect(summary.gross).toBe(500);
+    expect(summary.charges).toBe(50);
+    expect(summary.net).toBe(450);
+  });
+
+  it('null realizedFees degrades to gross-only — never NaN', () => {
+    const legacy = entry({ status: 'STOPPED', realizedPnl: -300, realizedFees: null });
+    const summary = dayRealizedSummary([legacy]);
+    expect(summary.charges).toBe(0);
+    expect(summary.net).toBe(-300);
+    expect(Number.isNaN(summary.net)).toBe(false);
+  });
+
+  it('empty list yields all zeros (no division-by-anything noise)', () => {
+    expect(dayRealizedSummary([])).toEqual({ count: 0, gross: 0, charges: 0, net: 0 });
+  });
+});
 
 describe('sectionTotalPnl', () => {
   it('open entries contribute live price-based P/L', () => {

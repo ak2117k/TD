@@ -21,6 +21,7 @@ import {
   Settings,
   ChevronLeft,
   ChevronRight,
+  GitCompareArrows,
 } from 'lucide-react';
 import type { NavItem } from '@/types';
 
@@ -33,6 +34,7 @@ const navItems: NavItem[] = [
   { path: '/rejections', label: 'Rejections', icon: Ban },
   { path: '/chartink', label: 'Chartink', icon: Radio },
   { path: '/watch', label: 'Watch', icon: Eye },
+  { path: '/ungated-watch', label: 'Ungated Watch', icon: GitCompareArrows, badge: 'EXP' },
   { path: '/auto-trade', label: 'Auto-Trade', icon: Bot },
   { path: '/positions', label: 'Positions', icon: Briefcase },
   { path: '/news', label: 'News', icon: Newspaper },
@@ -96,7 +98,16 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
                 }
               >
                 <item.icon size={20} className="shrink-0" />
-                {!collapsed && <span>{item.label}</span>}
+                {!collapsed && (
+                  <span className="flex items-center gap-1.5">
+                    {item.label}
+                    {item.badge && (
+                      <span className="text-[9px] px-1 py-0.5 rounded bg-amber-500/20 text-amber-300 leading-none">
+                        {item.badge}
+                      </span>
+                    )}
+                  </span>
+                )}
               </NavLink>
 
               {/* Tooltip when collapsed */}

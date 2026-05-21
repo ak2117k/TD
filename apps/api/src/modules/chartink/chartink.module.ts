@@ -11,6 +11,7 @@ import { ChartinkRejectionsService } from './services/chartink-rejections.servic
 import { ChartinkProcessWorker } from './workers/chartink-process.worker';
 import { ChartinkWebhookController } from './controllers/chartink-webhook.controller';
 import { ChartinkController } from './controllers/chartink.controller';
+import { UngatedTrackModule } from '../ungated-track/ungated-track.module';
 
 // @Global so ChartinkRepository and ChartinkScoringService are injectable
 // without consumers importing this module — avoids the circular dep that would
@@ -23,6 +24,7 @@ import { ChartinkController } from './controllers/chartink.controller';
     PrismaModule,
     MarketDataModule,
     SignalGeneratorModule,
+    UngatedTrackModule,
     BullModule.registerQueue({ name: 'chartink-process' }),
   ],
   controllers: [ChartinkWebhookController, ChartinkController],

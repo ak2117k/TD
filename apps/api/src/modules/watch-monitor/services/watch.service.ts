@@ -108,7 +108,20 @@ export class WatchService {
    * trade's realized P/L.
    */
   async list(opts: { status?: WatchStatus; date?: string }): Promise<
-    Array<WatchEntry & { scannerName: string | null; realizedPnl: number | null }>
+    Array<
+      WatchEntry & {
+        scannerName: string | null;
+        realizedPnl: number | null;
+        /**
+         * Round-trip SEBI/exchange/brokerage charges for the linked trade.
+         * Null when the entry has no realized pnl (trade still open, or
+         * the linked Trade row could not be resolved). The watch page's
+         * footer sums these to surface the structural charge drag on
+         * intraday equity P&L.
+         */
+        realizedFees: number | null;
+      }
+    >
   > {
     const entries = await this.repo.list(opts);
     const alertIds = entries
@@ -117,16 +130,18 @@ export class WatchService {
     const tradeIds = entries
       .map((e) => e.paperTradeId ?? e.liveTradeId)
       .filter((x): x is string => !!x);
-    const [scannerNames, realizedPnls] = await Promise.all([
+    const [scannerNames, realization] = await Promise.all([
       this.repo.findScannerNames(alertIds),
-      this.repo.findRealizedPnls(tradeIds),
+      this.repo.findTradeRealization(tradeIds),
     ]);
     return entries.map((e) => {
       const tradeId = e.paperTradeId ?? e.liveTradeId;
+      const r = tradeId ? realization.get(tradeId) : undefined;
       return {
         ...e,
         scannerName: e.alertId ? scannerNames.get(e.alertId) ?? null : null,
-        realizedPnl: tradeId ? realizedPnls.get(tradeId) ?? null : null,
+        realizedPnl: r?.pnl ?? null,
+        realizedFees: r?.fees ?? null,
       };
     });
   }
@@ -600,7 +615,9 @@ export class WatchService {
       price,
     });
     // Close the linked trade so deployed capital is returned to cash.
-    await this.closeLinkedTrade(entry, 'target-hit');
+    // The trigger price is forwarded so the Trade row records the actual
+    // target-hit price, not the cached LTP at simulation time.
+    await this.closeLinkedTrade(entry, 'target-hit', price);
     await this.repo.update(entryId, {
       status: WatchStatus.TARGET_HIT,
       closedAt: new Date(),
@@ -678,7 +695,10 @@ export class WatchService {
       notes: `cause:loss-cut loss:${Math.abs(openPnl).toFixed(0)}`,
     });
     // Close the linked trade so deployed capital is returned to cash.
-    await this.closeLinkedTrade(entry, 'sl-loss-cut');
+    // exitPrice was just confirmed by a fresh REST quote above — forward it
+    // so the Trade row records the actual trigger price, not the cached LTP
+    // at simulation time (the silent under-reporting bug from 2026-05-20).
+    await this.closeLinkedTrade(entry, 'sl-loss-cut', exitPrice);
     await this.repo.update(entryId, {
       status: WatchStatus.STOPPED,
       closedAt: new Date(),
@@ -705,11 +725,24 @@ export class WatchService {
    * a broker failure is logged, never thrown — the entry status transition
    * must still proceed so the watch lifecycle is never left half-done.
    */
-  private async closeLinkedTrade(entry: any, reason: string): Promise<void> {
+  /**
+   * Close the linked Trade for an exiting watch entry.
+   *
+   * `exitPrice` MUST be passed by callers that have a known trigger price
+   * (target-hit, hard loss-cut, trailing-stop). Without it, the trade-engine
+   * fallback resolves the exit price from the cached LTP at simulation time,
+   * which can drift several rupees from the actual trigger and silently
+   * under-/over-reports realised P&L on the Trade row.
+   */
+  private async closeLinkedTrade(
+    entry: any,
+    reason: string,
+    exitPrice?: number,
+  ): Promise<void> {
     const tradeId = entry?.paperTradeId ?? entry?.liveTradeId;
     if (!tradeId) return;
     try {
-      await this.trade.closeTrade(tradeId, reason);
+      await this.trade.closeTrade(tradeId, { reason, exitPrice });
     } catch (err) {
       this.logger.warn(
         `closeLinkedTrade: failed to close trade ${tradeId} for ${entry?.symbol}: ` +
@@ -877,12 +910,16 @@ export class WatchService {
     // Partially close the linked trade: closeTrade shrinks the original
     // Trade row to PARTIALLY_FILLED and credits cash for the closed slice —
     // no orphan rows, so the trades table stays a clean source of truth.
+    // ltp is the partial-exit trigger price — forward it so the partial
+    // slice's recorded fill matches the actual trigger, not the cached LTP
+    // at simulation time (same class of bug as commit 9fb5bcd).
     const partialTradeId = entry.paperTradeId ?? entry.liveTradeId;
     if (partialTradeId) {
       try {
         await this.trade.closeTrade(partialTradeId, {
           reason: 'partial-exit',
           quantity: partialQty,
+          exitPrice: ltp,
         });
       } catch (err) {
         this.logger.warn(
@@ -965,8 +1002,10 @@ export class WatchService {
 
     // Close the remaining position via the linked trade — closeTrade
     // credits cash and marks the Trade record CLOSED (whatever quantity
-    // remains after the earlier partial exit).
-    await this.closeLinkedTrade(entry, 'trailing-stop');
+    // remains after the earlier partial exit). ltp is the price the
+    // trailing stop actually fired at — forward it so the Trade row
+    // records that price, not the cached LTP at simulation time.
+    await this.closeLinkedTrade(entry, 'trailing-stop', ltp);
 
     await this.repo.createEvent({
       watchEntryId: entry.id,

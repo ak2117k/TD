@@ -176,6 +176,41 @@ export function pnlBreakdown(
   return { realized, open, whatIf, real: realized + open };
 }
 
+export interface DayRealizedSummary {
+  /** How many entries contributed (closed entries with a non-null realizedPnl). */
+  count: number;
+  /** Sum of trade-engine `pnl` across closed entries — price-only, pre-fees. */
+  gross: number;
+  /** Sum of trade-engine `fees` across the same set — SEBI/exchange/STT/etc. */
+  charges: number;
+  /** gross − charges. Net P&L the user actually realises. */
+  net: number;
+}
+
+/**
+ * Summary of *realised* P&L + charges across the watch entries currently in
+ * view, intended for the page-bottom footer. Mirrors the top header's date
+ * filter (by definition: the footer reads from the same `entries` array).
+ *
+ * Only closed entries with a non-null `realizedPnl` are summed — open
+ * (TRADED) positions and never-traded what-if rows are deliberately
+ * excluded, because their fees haven't been booked yet (or never will be).
+ * `realizedFees` is null-coerced to 0 so legacy rows without the server-
+ * enriched field degrade to gross-only rather than NaN-poisoning the total.
+ */
+export function dayRealizedSummary(entries: WatchEntry[]): DayRealizedSummary {
+  let count = 0;
+  let gross = 0;
+  let charges = 0;
+  for (const e of entries) {
+    if (!isClosed(e.status) || e.realizedPnl == null) continue;
+    count += 1;
+    gross += e.realizedPnl;
+    charges += e.realizedFees ?? 0;
+  }
+  return { count, gross, charges, net: gross - charges };
+}
+
 /**
  * Extract the per-check results from a watch-entry breakdown value. Accepts
  * BOTH shapes: the wrapped `{ checks: [...] }` (initialBreakdown, and

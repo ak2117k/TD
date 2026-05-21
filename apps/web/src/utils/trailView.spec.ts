@@ -16,6 +16,7 @@ function entry(o: Partial<WatchEntry>): WatchEntry {
     closedReason: null, notes: null, partialExitedAt: null, partialExitPrice: null,
     partialQty: null, remainingQty: null, trailingHighWater: null,
     trailingStopPrice: null, scannerName: null, realizedPnl: null,
+    realizedFees: null,
     createdAt: '', updatedAt: '', ...o,
   };
 }

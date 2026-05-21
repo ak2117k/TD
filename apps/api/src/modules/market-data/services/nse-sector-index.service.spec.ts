@@ -124,6 +124,34 @@ describe('NseSectorIndexService', () => {
     expect(repo.upsertMany).not.toHaveBeenCalled();
   });
 
+  it('maps NSE rollup industry names to the right NIFTY sector token', async () => {
+    // NSE migrated its `Industry` taxonomy to broader rollup names. Each row
+    // here uses one of the seven rollups currently emitted by the NIFTY 500
+    // CSV but historically unmapped by INDUSTRY_TO_SECTOR_TOKEN.
+    const ROLLUP_CSV = `Company Name,Industry,Symbol,Series,ISIN Code
+ABB India Ltd.,Capital Goods,ABB,EQ,INE117A01022
+Mahindra CIE Automotive Ltd.,Automobile and Auto Components,MCIE,EQ,INE536H01010
+ITC Ltd.,Fast Moving Consumer Goods,ITC,EQ,INE154A01025
+Vedanta Ltd.,Metals & Mining,VEDL,EQ,INE205A01025
+Reliance Industries Ltd.,Oil Gas & Consumable Fuels,RELIANCE,EQ,INE002A01018
+Bharti Airtel Ltd.,Telecommunication,BHARTIARTL,EQ,INE397D01024
+Sun TV Network Ltd.,Media Entertainment & Publication,SUNTV,EQ,INE424H01027`;
+    mockHttp.get.mockReturnValue(of({ data: ROLLUP_CSV }));
+    await service.refresh();
+    const rows = repo.upsertMany.mock.calls[0][0] as Array<{
+      symbol: string;
+      sectorIndexToken: string | null;
+    }>;
+    const bySymbol = new Map(rows.map((r) => [r.symbol, r]));
+    expect(bySymbol.get('ABB')?.sectorIndexToken).toBe('99926029'); // INFRA
+    expect(bySymbol.get('MCIE')?.sectorIndexToken).toBe('99926021'); // AUTO
+    expect(bySymbol.get('ITC')?.sectorIndexToken).toBe('99926015'); // FMCG
+    expect(bySymbol.get('VEDL')?.sectorIndexToken).toBe('99926023'); // METAL
+    expect(bySymbol.get('RELIANCE')?.sectorIndexToken).toBe('99926019'); // ENERGY
+    expect(bySymbol.get('BHARTIARTL')?.sectorIndexToken).toBe('99926031'); // MEDIA
+    expect(bySymbol.get('SUNTV')?.sectorIndexToken).toBe('99926031'); // MEDIA
+  });
+
   // ─── getSectorIndexForSymbol(): Tier 1 = DB ─────────────────────────────
 
   it('Tier 1: resolves from the StockSector table', async () => {
