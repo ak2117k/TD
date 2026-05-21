@@ -59,6 +59,50 @@ export class WatchMonitorService {
       }
       if (i < entries.length - 1) await this.sleep(paceMs);
     }
+
+    // After rescore, retry any WATCHING entries whose auto-execute failed
+    // earlier (typically insufficient cash, race-condition with cap, etc.).
+    // The original failure may have cleared since: other positions could
+    // have closed and freed cash, or the position cap setting bumped up.
+    // No user click required.
+    await this.retryStuckWatchingExecutes(entries);
+  }
+
+  /**
+   * Re-attempt auto-execute on any WATCHING entry that was admitted but
+   * never managed to open its trade. Quiet about per-entry rejection
+   * reasons — same reasons that blocked it the first time often still
+   * apply (cash exhausted, dup symbol, etc.). Successes flip status to
+   * TRADED via the regular executeEntry path.
+   */
+  private async retryStuckWatchingExecutes(
+    entries: WatchEntry[],
+  ): Promise<void> {
+    const stuck = entries.filter(
+      (e) => e.status === WatchStatus.WATCHING && !e.paperTradeId && !e.liveTradeId,
+    );
+    if (stuck.length === 0) return;
+    let retried = 0;
+    let executed = 0;
+    for (const e of stuck) {
+      retried++;
+      try {
+        await this.watch.executeEntry(e.id, { mode: 'paper' });
+        executed++;
+        this.logger.log(
+          `retryStuckWatching: ${e.symbol} flipped WATCHING → TRADED on retry`,
+        );
+      } catch {
+        // Same blockers as before — silently keep WATCHING for the next
+        // tick. The original [trade-rejected] log line covers the first
+        // failure; we don't want to spam on every retry.
+      }
+    }
+    if (retried > 0) {
+      this.logger.debug(
+        `retryStuckWatching: attempted ${retried}, succeeded ${executed}`,
+      );
+    }
   }
 
   /**

@@ -119,6 +119,25 @@ export class UngatedWatchService {
   private readonly PARTIAL_EXIT_FRACTION = 0.5;
   private readonly TRAILING_STOP_PCT = 0.005;
 
+  /**
+   * Resubscribe every currently-TRADED ungated entry to the live feed.
+   * Called once at boot from UngatedTrackModule.onApplicationBootstrap.
+   * Idempotent — subscribeForWatch is safe to call repeatedly per
+   * (token, entryId) pair.
+   */
+  async resubscribeAllOpenEntries(): Promise<void> {
+    const active = await this.repo.findAllActive();
+    let count = 0;
+    for (const e of active) {
+      if (e.status !== 'TRADED') continue;
+      this.feed.subscribeForWatch(e.token, e.id);
+      count++;
+    }
+    if (count > 0) {
+      this.logger.log(`[ungated] re-subscribed ${count} open entries to the live feed`);
+    }
+  }
+
   // --- Public tick entrypoint ---
   async onTick(token: string, ltp: number, ts: Date): Promise<void> {
     const entries = await this.repo.findActiveByToken(token);

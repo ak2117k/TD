@@ -38,5 +38,11 @@ export class UngatedTrackModule implements OnApplicationBootstrap {
     this.feed.registerWatchTickHandler(async (token, ltp, ts) => {
       await this.watch.onTick(token, ltp, ts);
     });
+    // Re-subscribe every TRADED ungated entry that was opened in a prior
+    // process. Without this, restarting the API drops every existing
+    // entry off the feed — currentPrice freezes, loss-cut never triggers,
+    // P&L column shows stale data forever. Mirrors the gated
+    // WatchService's ensureFeedSubscription pattern.
+    await this.watch.resubscribeAllOpenEntries();
   }
 }
