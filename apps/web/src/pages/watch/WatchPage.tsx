@@ -2,8 +2,10 @@ import { useState } from 'react';
 import { useWatchEntries } from '../../hooks/useWatchEntries';
 import { WatchTable } from './WatchTable';
 import { PaperAccountBadge } from '../../components/trading/PaperAccountBadge';
+import { ComparisonStrip } from '../../components/trading/ComparisonStrip';
 import { pnlBreakdown, accountRealPnl, dayRealizedSummary } from '../../utils/watchPnl';
 import { usePaperAccount } from '../../hooks/usePaperAccount';
+import { useDailyComparison } from '../../hooks/useDailyComparison';
 import type { WatchStatus } from '../../types/watch.types';
 
 const FILTERS: Array<{ label: string; value: WatchStatus | undefined }> = [
@@ -25,6 +27,7 @@ export function WatchPage() {
   const [date, setDate] = useState<string>(todayIST());
   const { entries, loading, error } = useWatchEntries(filter, date);
   const { account } = usePaperAccount();
+  const { data: comparison } = useDailyComparison(date);
   const activeCount = entries.filter(e => e.status === 'WATCHING' || e.status === 'TRADED').length;
 
   return (
@@ -63,6 +66,7 @@ export function WatchPage() {
       {error && <div className="text-red-400">Error: {error}</div>}
       {!loading && !error && (
         <>
+          {comparison && <ComparisonStrip data={comparison} date={date} />}
           {(() => {
             // "Real P/L" is the authoritative paper-account result
             // (equity − startingCapital) — the single source of truth, no
