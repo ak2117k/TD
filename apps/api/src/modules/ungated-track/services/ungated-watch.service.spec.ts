@@ -81,3 +81,95 @@ describe('UngatedWatchService.createFromAlert', () => {
     }));
   });
 });
+
+describe('UngatedWatchService.onTick — transitions', () => {
+  let svc: UngatedWatchService;
+  let repo: any, account: any, exec: any;
+
+  function tradedEntry(overrides: Record<string, any> = {}) {
+    return {
+      id: 'uw1', token: '11536', symbol: 'TCS', side: 'BUY', status: 'TRADED',
+      initialPrice: 2000, executedPrice: 2000, profitTarget: 2040,
+      paperTradeId: 'ut1', quantity: 100, remainingQty: 100,
+      partialExitedAt: null, trailingHighWater: null, trailingStopPrice: null,
+      ...overrides,
+    };
+  }
+
+  beforeEach(async () => {
+    repo = {
+      findActiveByToken: jest.fn(),
+      findById:          jest.fn(),
+      createEvent:       jest.fn(),
+      update:            jest.fn().mockResolvedValue({}),
+    };
+    account = {};
+    exec = { closeTrade: jest.fn().mockResolvedValue({}) };
+    const mod = await Test.createTestingModule({
+      providers: [
+        UngatedWatchService,
+        { provide: UngatedWatchRepository, useValue: repo },
+        { provide: UngatedTradeRepository, useValue: { } },
+        { provide: UngatedPaperAccountService, useValue: account },
+        { provide: UngatedTradeExecutionService, useValue: exec },
+      ],
+    }).compile();
+    svc = mod.get(UngatedWatchService);
+  });
+
+  it('BUY: ltp >= profitTarget → target-hit, forwards exitPrice', async () => {
+    repo.findActiveByToken.mockResolvedValue([tradedEntry()]);
+    await svc.onTick('11536', 2045, new Date());
+    expect(exec.closeTrade).toHaveBeenCalledWith('ut1', expect.objectContaining({
+      reason: 'target-hit', exitPrice: 2045,
+    }));
+    expect(repo.update).toHaveBeenCalledWith('uw1', expect.objectContaining({
+      status: 'TARGET_HIT',
+    }));
+  });
+
+  it('hard loss-cut at -0.4% of deployed → forwards exitPrice', async () => {
+    repo.findActiveByToken.mockResolvedValue([tradedEntry()]);
+    await svc.onTick('11536', 1992, new Date());
+    expect(exec.closeTrade).toHaveBeenCalledWith('ut1', expect.objectContaining({
+      reason: 'sl-loss-cut', exitPrice: 1992,
+    }));
+    expect(repo.update).toHaveBeenCalledWith('uw1', expect.objectContaining({
+      status: 'STOPPED', closedReason: 'loss-cut',
+    }));
+  });
+
+  it('+1% favorable triggers partial exit, forwards exitPrice + sets trailing fields', async () => {
+    repo.findActiveByToken.mockResolvedValue([tradedEntry({ profitTarget: 9999 })]);
+    await svc.onTick('11536', 2020, new Date());
+    expect(exec.closeTrade).toHaveBeenCalledWith('ut1', expect.objectContaining({
+      reason: 'partial-exit', quantity: 50, exitPrice: 2020,
+    }));
+    expect(repo.update).toHaveBeenCalledWith('uw1', expect.objectContaining({
+      partialExitedAt: expect.any(Date),
+      partialExitPrice: 2020,
+      partialQty: 50,
+      remainingQty: 50,
+      trailingHighWater: 2020,
+      trailingStopPrice: 2020 * 0.995,
+    }));
+  });
+
+  it('post-partial: price drops below trail → trailing-stop fires, exitPrice forwarded', async () => {
+    repo.findActiveByToken.mockResolvedValue([
+      tradedEntry({
+        profitTarget: 9999, partialExitedAt: new Date(),
+        partialExitPrice: 2020, partialQty: 50, remainingQty: 50,
+        trailingHighWater: 2025, trailingStopPrice: 2025 * 0.995,
+      }),
+    ]);
+    const trailStop = 2025 * 0.995;
+    await svc.onTick('11536', trailStop - 1, new Date());
+    expect(exec.closeTrade).toHaveBeenCalledWith('ut1', expect.objectContaining({
+      reason: 'trailing-stop', exitPrice: trailStop - 1,
+    }));
+    expect(repo.update).toHaveBeenCalledWith('uw1', expect.objectContaining({
+      status: 'EXITED', closedReason: 'trailing-stop',
+    }));
+  });
+});

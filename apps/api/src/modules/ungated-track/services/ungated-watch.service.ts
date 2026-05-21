@@ -104,4 +104,141 @@ export class UngatedWatchService {
 
     return entry;
   }
+
+  // --- Constants ---
+  private readonly HARD_STOP_PCT = 0.004;
+  private readonly PARTIAL_EXIT_THRESHOLD_PCT = 0.01;
+  private readonly PARTIAL_EXIT_FRACTION = 0.5;
+  private readonly TRAILING_STOP_PCT = 0.005;
+
+  // --- Public tick entrypoint ---
+  async onTick(token: string, ltp: number, _ts: Date): Promise<void> {
+    const entries = await this.repo.findActiveByToken(token);
+    for (const entry of entries) {
+      if (entry.status !== 'TRADED') continue;
+      try {
+        await this.applyTick(entry, ltp);
+      } catch (err) {
+        this.logger.warn(
+          `[ungated] applyTick ${entry.symbol} threw: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+  }
+
+  private async applyTick(entry: any, ltp: number): Promise<void> {
+    const sideMul: 1 | -1 = entry.side === 'BUY' ? 1 : -1;
+
+    // 1. Target-hit wins first.
+    const isTargetHit =
+      entry.profitTarget != null &&
+      (sideMul === 1 ? ltp >= entry.profitTarget : ltp <= entry.profitTarget);
+    if (isTargetHit) return this.transitionTargetHit(entry, ltp);
+
+    // 2. Hard loss-cut (R5).
+    const openLoss = this.computeOpenPnl(entry, ltp);
+    const threshold = -this.HARD_STOP_PCT *
+      (entry.executedPrice ?? entry.initialPrice) *
+      (entry.remainingQty ?? entry.quantity ?? 0);
+    if (openLoss <= threshold) return this.transitionLossCut(entry, ltp, openLoss);
+
+    // 3. Partial-exit / trailing-stop.
+    if (!entry.partialExitedAt) {
+      await this.checkPartialExitTrigger(entry, ltp);
+    } else {
+      await this.updateTrailingStop(entry, ltp);
+    }
+  }
+
+  private computeOpenPnl(entry: any, ltp: number): number {
+    const ref = entry.executedPrice ?? entry.initialPrice;
+    const sideMul: 1 | -1 = entry.side === 'BUY' ? 1 : -1;
+    const qty = entry.remainingQty ?? entry.quantity ?? 0;
+    return (ltp - ref) * sideMul * qty;
+  }
+
+  private async transitionTargetHit(entry: any, price: number): Promise<void> {
+    await this.repo.createEvent({
+      watchEntryId: entry.id, eventType: WatchEventType.TARGET_HIT, price,
+    });
+    await this.exec.closeTrade(entry.paperTradeId, {
+      reason: 'target-hit', exitPrice: price,
+    });
+    await this.repo.update(entry.id, {
+      status: WatchStatus.TARGET_HIT, closedAt: new Date(), closedReason: 'target-hit',
+    });
+  }
+
+  private async transitionLossCut(entry: any, exitPrice: number, openLoss: number): Promise<void> {
+    await this.repo.createEvent({
+      watchEntryId: entry.id, eventType: WatchEventType.SL_HIT_PRICE, price: exitPrice,
+      notes: `cause:loss-cut loss:${Math.abs(openLoss).toFixed(0)}`,
+    });
+    await this.exec.closeTrade(entry.paperTradeId, {
+      reason: 'sl-loss-cut', exitPrice,
+    });
+    await this.repo.update(entry.id, {
+      status: WatchStatus.STOPPED, closedAt: new Date(), closedReason: 'loss-cut',
+    });
+  }
+
+  private async checkPartialExitTrigger(entry: any, ltp: number): Promise<void> {
+    const ref = entry.executedPrice ?? entry.initialPrice;
+    if (ref <= 0) return;
+    const sideMul: 1 | -1 = entry.side === 'BUY' ? 1 : -1;
+    const moveFavor = ((ltp - ref) / ref) * sideMul;
+    if (moveFavor < this.PARTIAL_EXIT_THRESHOLD_PCT) return;
+
+    const initialQty = entry.quantity ??
+      Math.max(1, Math.floor(2_00_000 / Math.max(ref, 1)));
+    const partialQty = Math.floor(initialQty * this.PARTIAL_EXIT_FRACTION);
+    const remainingQty = initialQty - partialQty;
+    const trailingStopPrice = sideMul === 1
+      ? ltp * (1 - this.TRAILING_STOP_PCT)
+      : ltp * (1 + this.TRAILING_STOP_PCT);
+
+    await this.exec.closeTrade(entry.paperTradeId, {
+      reason: 'partial-exit', quantity: partialQty, exitPrice: ltp,
+    });
+    await this.repo.createEvent({
+      watchEntryId: entry.id, eventType: WatchEventType.PARTIAL_EXIT, price: ltp,
+      notes: `partial 50% sold at +${(moveFavor * 100).toFixed(2)}%, trail @ ${trailingStopPrice.toFixed(2)}`,
+    });
+    await this.repo.update(entry.id, {
+      partialExitedAt: new Date(),
+      partialExitPrice: ltp,
+      partialQty,
+      remainingQty,
+      trailingHighWater: ltp,
+      trailingStopPrice,
+    });
+  }
+
+  private async updateTrailingStop(entry: any, ltp: number): Promise<void> {
+    const sideMul: 1 | -1 = entry.side === 'BUY' ? 1 : -1;
+    let highWater = entry.trailingHighWater;
+    let newStop = entry.trailingStopPrice;
+    const moves = sideMul === 1 ? ltp > highWater : ltp < highWater;
+    if (moves) {
+      highWater = ltp;
+      newStop = sideMul === 1 ? ltp * (1 - this.TRAILING_STOP_PCT) : ltp * (1 + this.TRAILING_STOP_PCT);
+      await this.repo.update(entry.id, {
+        trailingHighWater: highWater,
+        trailingStopPrice: newStop,
+      });
+    }
+    const hit = sideMul === 1 ? ltp <= newStop : ltp >= newStop;
+    if (hit) {
+      await this.exec.closeTrade(entry.paperTradeId, {
+        reason: 'trailing-stop', exitPrice: ltp,
+      });
+      await this.repo.createEvent({
+        watchEntryId: entry.id, eventType: WatchEventType.TRAILING_STOP_HIT, price: ltp,
+        notes: `trail stop fired (high-water ${highWater}, stop ${newStop.toFixed(2)})`,
+      });
+      await this.repo.update(entry.id, {
+        status: WatchStatus.EXITED, closedAt: new Date(), closedReason: 'trailing-stop',
+      });
+    }
+  }
 }
