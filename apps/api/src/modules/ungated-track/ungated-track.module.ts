@@ -8,10 +8,11 @@ import { UngatedWatchService } from './services/ungated-watch.service';
 import { UngatedComparisonService } from './services/ungated-comparison.service';
 import { UngatedTrackController } from './controllers/ungated-track.controller';
 import { PrismaModule } from '../../common/prisma/prisma.module';
+import { MarketDataModule } from '../market-data/market-data.module';
 import { MarketFeedService } from '../market-data/services/market-feed.service';
 
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, MarketDataModule],
   controllers: [UngatedTrackController],
   providers: [
     UngatedWatchRepository,
