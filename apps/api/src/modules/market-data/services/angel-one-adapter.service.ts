@@ -457,6 +457,43 @@ export class AngelOneAdapterService implements BrokerAdapter {
   // Market data — REST
   // ─────────────────────────────────────────────────────
 
+  /**
+   * Batch LTP fetch: one Angel One `marketData` call returns prices for
+   * many tokens. Used by paths that don't need the WS firehose — e.g.
+   * the ungated shadow-track polls all its open positions every 30s
+   * via this method, sidestepping the 50-token WS subscription cap.
+   *
+   * `mode: 'LTP'` keeps the payload small (just ltp + token).
+   * Returns a Map<token, ltp> with only the tokens that came back with
+   * a valid positive price. Missing tokens are silently dropped.
+   */
+  async getLtpsBatch(
+    exchange: string,
+    tokens: string[],
+  ): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    const uniq = [...new Set(tokens)];
+    if (uniq.length === 0) return out;
+    try {
+      const smartApi = this.authService.getSmartApi();
+      const response = await smartApi.marketData({
+        mode: 'LTP',
+        exchangeTokens: { [exchange]: uniq },
+      });
+      const fetched: any[] = response?.data?.fetched ?? [];
+      for (const d of fetched) {
+        const tok = String(d.symbolToken ?? d.symboltoken ?? '');
+        const ltp = Number(d.ltp ?? 0);
+        if (tok && ltp > 0) out.set(tok, ltp);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `getLtpsBatch(${exchange}, ${uniq.length} tokens) failed: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    return out;
+  }
+
   async getLiveQuote(token: string, exchange: string): Promise<TickData> {
     // Try the REST quote endpoint first. It returns the freshest snapshot
     // (with proper prev-close) for any token the API key is entitled to.

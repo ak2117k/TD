@@ -7,7 +7,6 @@ import {
   UngatedCapitalExhaustedError, UngatedPositionCapError,
 } from './ungated-paper-account.service';
 import { UngatedTradeExecutionService } from './ungated-trade-execution.service';
-import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { UngatedWatchGateway } from '../gateways/ungated-watch.gateway';
 
 describe('UngatedWatchService.createFromAlert', () => {
@@ -40,7 +39,6 @@ describe('UngatedWatchService.createFromAlert', () => {
     exec = {
       openTrade: jest.fn().mockResolvedValue({ id: 'ut1', entryPrice: 2000 }),
     };
-    const feed = { subscribeForWatch: jest.fn(), unsubscribeForWatch: jest.fn() };
     const gateway = { emitEntry: jest.fn() };
     const mod = await Test.createTestingModule({
       providers: [
@@ -49,7 +47,6 @@ describe('UngatedWatchService.createFromAlert', () => {
         { provide: UngatedTradeRepository, useValue: trades },
         { provide: UngatedPaperAccountService, useValue: account },
         { provide: UngatedTradeExecutionService, useValue: exec },
-        { provide: MarketFeedService, useValue: feed },
         { provide: UngatedWatchGateway, useValue: gateway },
       ],
     }).compile();
@@ -111,7 +108,6 @@ describe('UngatedWatchService.onTick — transitions', () => {
     };
     account = {};
     exec = { closeTrade: jest.fn().mockResolvedValue({}) };
-    const feed = { subscribeForWatch: jest.fn(), unsubscribeForWatch: jest.fn() };
     const gateway = { emitEntry: jest.fn() };
     const mod = await Test.createTestingModule({
       providers: [
@@ -120,7 +116,6 @@ describe('UngatedWatchService.onTick — transitions', () => {
         { provide: UngatedTradeRepository, useValue: { } },
         { provide: UngatedPaperAccountService, useValue: account },
         { provide: UngatedTradeExecutionService, useValue: exec },
-        { provide: MarketFeedService, useValue: feed },
         { provide: UngatedWatchGateway, useValue: gateway },
       ],
     }).compile();

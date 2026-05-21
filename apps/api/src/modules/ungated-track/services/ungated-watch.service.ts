@@ -6,8 +6,10 @@ import {
 import { UngatedTradeRepository } from '../repositories/ungated-trade.repository';
 import { UngatedPaperAccountService, TRADE_CAPITAL } from './ungated-paper-account.service';
 import { UngatedTradeExecutionService } from './ungated-trade-execution.service';
-import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { UngatedWatchGateway } from '../gateways/ungated-watch.gateway';
+// Note: NO MarketFeedService dependency — the ungated track uses
+// `UngatedTickPoller` (REST every 30s) to sidestep the broker's
+// ~50-token WebSocket cap. See specs/2026-05-20-ungated-shadow-track-design.md.
 
 export class UngatedSymbolDupError extends Error {
   constructor(public readonly symbol: string) {
@@ -46,7 +48,6 @@ export class UngatedWatchService {
     private readonly trades: UngatedTradeRepository,
     private readonly account: UngatedPaperAccountService,
     private readonly exec: UngatedTradeExecutionService,
-    private readonly feed: MarketFeedService,
     private readonly gateway: UngatedWatchGateway,
   ) {}
 
@@ -106,11 +107,8 @@ export class UngatedWatchService {
       quantity: qty,
     });
 
-    // Subscribe to live ticks so onTick fires for this token. Without this
-    // the entry sits TRADED forever with no currentPrice → frontend shows
-    // "—" in the live P&L columns AND transitions (target/loss-cut/partial/
-    // trail) never trigger.
-    this.feed.subscribeForWatch(input.token, entry.id);
+    // No feed.subscribeForWatch here: ungated entries are driven by the
+    // REST poller (UngatedTickPoller) on a 30-second cron, not WS.
 
     return entry;
   }
@@ -120,25 +118,6 @@ export class UngatedWatchService {
   private readonly PARTIAL_EXIT_THRESHOLD_PCT = 0.01;
   private readonly PARTIAL_EXIT_FRACTION = 0.5;
   private readonly TRAILING_STOP_PCT = 0.005;
-
-  /**
-   * Resubscribe every currently-TRADED ungated entry to the live feed.
-   * Called once at boot from UngatedTrackModule.onApplicationBootstrap.
-   * Idempotent — subscribeForWatch is safe to call repeatedly per
-   * (token, entryId) pair.
-   */
-  async resubscribeAllOpenEntries(): Promise<void> {
-    const active = await this.repo.findAllActive();
-    let count = 0;
-    for (const e of active) {
-      if (e.status !== 'TRADED') continue;
-      this.feed.subscribeForWatch(e.token, e.id);
-      count++;
-    }
-    if (count > 0) {
-      this.logger.log(`[ungated] re-subscribed ${count} open entries to the live feed`);
-    }
-  }
 
   // --- Public tick entrypoint ---
   async onTick(token: string, ltp: number, ts: Date): Promise<void> {
