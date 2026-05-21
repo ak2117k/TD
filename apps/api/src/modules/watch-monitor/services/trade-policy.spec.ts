@@ -18,9 +18,9 @@ describe('isStrictWindow — 11:45-14:00 IST, half-open', () => {
 });
 
 describe('evaluateTradePolicy — admission (R3)', () => {
-  it('outside the window admits score >= 60', () => {
-    expect(evaluateTradePolicy({ score: 60, at: istAt(10, 0) }).admitted).toBe(true);
-    expect(evaluateTradePolicy({ score: 59, at: istAt(10, 0) }).admitted).toBe(false);
+  it('outside the window admits score >= 45', () => {
+    expect(evaluateTradePolicy({ score: 45, at: istAt(10, 0) }).admitted).toBe(true);
+    expect(evaluateTradePolicy({ score: 44, at: istAt(10, 0) }).admitted).toBe(false);
   });
 
   it('inside the window admits only score >= 75', () => {
@@ -33,6 +33,8 @@ describe('evaluateTradePolicy — admission (R3)', () => {
 
 describe('evaluateTradePolicy — capital (R4)', () => {
   it('outside the window: tiered by score, half-open boundaries', () => {
+    // Tier-1 (₹1L) widened to [45, 65) after MIN_SCORE_NORMAL drop.
+    expect(evaluateTradePolicy({ score: 45, at: istAt(10, 0) }).capital).toBe(100_000);
     expect(evaluateTradePolicy({ score: 60, at: istAt(10, 0) }).capital).toBe(100_000);
     expect(evaluateTradePolicy({ score: 64, at: istAt(10, 0) }).capital).toBe(100_000);
     expect(evaluateTradePolicy({ score: 65, at: istAt(10, 0) }).capital).toBe(150_000);
@@ -46,7 +48,7 @@ describe('evaluateTradePolicy — capital (R4)', () => {
   });
 
   it('returns a valid capital even when not admitted (caller uses it unconditionally)', () => {
-    const r = evaluateTradePolicy({ score: 50, at: istAt(10, 0) });
+    const r = evaluateTradePolicy({ score: 30, at: istAt(10, 0) });
     expect(r.admitted).toBe(false);
     expect(r.capital).toBe(100_000);
   });

@@ -310,28 +310,28 @@ describe('ChartinkProcessService', () => {
       }));
     });
 
-    it('persists kind=scored-low and does NOT call watch.createFromAlert when score < 60', async () => {
-      scoring.score.mockResolvedValue({ score: 40, lotCount: 0, checks: [] });
+    it('persists kind=scored-low and does NOT call watch.createFromAlert when score < 45', async () => {
+      scoring.score.mockResolvedValue({ score: 30, lotCount: 0, checks: [] });
 
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
 
       expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
         kind: 'scored-low',
-        rejectReason: 'score 40 below 60',
-        score: 40,
+        rejectReason: 'score 30 below 45',
+        score: 30,
         lotCount: 0,
       }));
       expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
     });
 
-    it('persists kind=scored-low for a score of 55 (above old 50 floor, below new 60 floor)', async () => {
-      scoring.score.mockResolvedValue({ score: 55, lotCount: 0, checks: [macd5mCheck(true), supertrendCheck(true)] });
+    it('persists kind=scored-low for a score of 40 (below the lowered 45 floor)', async () => {
+      scoring.score.mockResolvedValue({ score: 40, lotCount: 0, checks: [macd5mCheck(true), supertrendCheck(true)] });
 
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
 
       expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
         kind: 'scored-low',
-        rejectReason: 'score 55 below 60',
+        rejectReason: 'score 40 below 45',
       }));
       expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
     });
@@ -444,16 +444,16 @@ describe('ChartinkProcessService', () => {
       expect(watchSvc.createFromAlert).toHaveBeenCalled();
     });
 
-    it('still rejects as scored-low when the 5m MACD passes but the total score is < 60', async () => {
+    it('still rejects as scored-low when the 5m MACD passes but the total score is < 45', async () => {
       scoring.score.mockResolvedValue({
-        score: 45, lotCount: 0, checks: [macd5mCheck(true), supertrendCheck(true)],
+        score: 35, lotCount: 0, checks: [macd5mCheck(true), supertrendCheck(true)],
       });
 
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
 
       expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
         kind: 'scored-low',
-        rejectReason: 'score 45 below 60',
+        rejectReason: 'score 35 below 45',
       }));
       expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
     });
@@ -514,8 +514,8 @@ describe('ChartinkProcessService', () => {
       }));
     });
 
-    it('does NOT call createFromAlert when score is exactly 59', async () => {
-      scoring.score.mockResolvedValue({ score: 59, lotCount: 0, checks: [macd5mCheck(true), supertrendCheck(true)] });
+    it('does NOT call createFromAlert when score is exactly 44 (just under the 45 floor)', async () => {
+      scoring.score.mockResolvedValue({ score: 44, lotCount: 0, checks: [macd5mCheck(true), supertrendCheck(true)] });
 
       await service.processOne('alert-A', { symbol: 'INFY', hitPrice: 1800 });
 
@@ -644,7 +644,7 @@ describe('ChartinkProcessService', () => {
       await service.processOne('alert-1', { symbol: 'RAYMOND', hitPrice: 496.6 }, 'ANAND HIGH GAINER');
 
       expect(logSpy).toHaveBeenCalledWith(
-        '[trade-rejected] RAYMOND | scan="ANAND HIGH GAINER" hit=496.6 side=BUY score=40 | stage=scoring reason="score 40 below 60"',
+        '[trade-rejected] RAYMOND | scan="ANAND HIGH GAINER" hit=496.6 side=BUY score=40 | stage=scoring reason="score 40 below 45"',
       );
     });
 
