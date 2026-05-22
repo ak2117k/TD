@@ -7,6 +7,7 @@ import { UngatedTradeRepository } from '../repositories/ungated-trade.repository
 import { UngatedPaperAccountService, TRADE_CAPITAL } from './ungated-paper-account.service';
 import { UngatedTradeExecutionService } from './ungated-trade-execution.service';
 import { UngatedWatchGateway } from '../gateways/ungated-watch.gateway';
+import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 // Note: NO MarketFeedService dependency — the ungated track uses
 // `UngatedTickPoller` (REST every 30s) to sidestep the broker's
 // ~50-token WebSocket cap. See specs/2026-05-20-ungated-shadow-track-design.md.
@@ -49,6 +50,7 @@ export class UngatedWatchService {
     private readonly account: UngatedPaperAccountService,
     private readonly exec: UngatedTradeExecutionService,
     private readonly gateway: UngatedWatchGateway,
+    private readonly adapter: AngelOneAdapterService,
   ) {}
 
   async createFromAlert(input: UngatedCreateFromAlertInput) {
@@ -99,13 +101,35 @@ export class UngatedWatchService {
       breakdown: input.initialBreakdown,
     });
 
-    // 5. Auto-execute.
-    const qty = Math.max(1, Math.floor(TRADE_CAPITAL / Math.max(input.initialPrice, 1)));
+    // 5. Auto-execute at the LIVE broker price, not the Chartink-reported
+    //    hit_price. Mirrors the gated WatchService.executeEntry pattern.
+    //
+    //    Why: Chartink's `hit.hitPrice` is frozen at the moment the scan
+    //    triggered. By the time our queue processes the alert (usually a
+    //    few seconds later), the live market price has moved. Using the
+    //    stale Chartink price for entry produces a divergent fill from
+    //    the gated track for the SAME symbol — same direction can show
+    //    opposite P&L sign just from entry slippage. Live quote on both
+    //    tracks keeps the A/B comparison clean.
+    let executedPrice = input.initialPrice;
+    try {
+      const live = await this.adapter.getLiveQuote(input.token, input.exchange);
+      if (live?.ltp && live.ltp > 0) executedPrice = live.ltp;
+      else this.logger.warn(
+        `[ungated] live quote unavailable for ${input.symbol}; falling back to Chartink hit price ₹${input.initialPrice}`,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `[ungated] live quote failed for ${input.symbol}: ${err instanceof Error ? err.message : err}; falling back to Chartink hit price`,
+      );
+    }
+
+    const qty = Math.max(1, Math.floor(TRADE_CAPITAL / Math.max(executedPrice, 1)));
     const trade = await this.exec.openTrade({
       instrumentId: entry.id,
       side: input.side,
       quantity: qty,
-      entryPrice: input.initialPrice,
+      entryPrice: executedPrice,
       exchange: input.exchange,
       target: profitTarget,
     });
@@ -113,7 +137,7 @@ export class UngatedWatchService {
       status: WatchStatus.TRADED,
       paperTradeId: trade.id,
       executedAt: new Date(),
-      executedPrice: input.initialPrice,
+      executedPrice,
       quantity: qty,
     });
 

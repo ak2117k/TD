@@ -8,6 +8,7 @@ import {
 } from './ungated-paper-account.service';
 import { UngatedTradeExecutionService } from './ungated-trade-execution.service';
 import { UngatedWatchGateway } from '../gateways/ungated-watch.gateway';
+import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 
 describe('UngatedWatchService.createFromAlert', () => {
   let svc: UngatedWatchService;
@@ -41,6 +42,10 @@ describe('UngatedWatchService.createFromAlert', () => {
       openTrade: jest.fn().mockResolvedValue({ id: 'ut1', entryPrice: 2000 }),
     };
     const gateway = { emitEntry: jest.fn() };
+    // Default: live quote returns the same price as Chartink hit so existing
+    // assertions still pass unchanged. Tests that want to assert divergent
+    // entry pricing override this mock per-case.
+    const adapter = { getLiveQuote: jest.fn().mockResolvedValue({ ltp: 2000 }) };
     const mod = await Test.createTestingModule({
       providers: [
         UngatedWatchService,
@@ -49,9 +54,11 @@ describe('UngatedWatchService.createFromAlert', () => {
         { provide: UngatedPaperAccountService, useValue: account },
         { provide: UngatedTradeExecutionService, useValue: exec },
         { provide: UngatedWatchGateway, useValue: gateway },
+        { provide: AngelOneAdapterService, useValue: adapter },
       ],
     }).compile();
     svc = mod.get(UngatedWatchService);
+    (svc as any).__adapter = adapter; // expose for per-test overrides
   });
 
   it('rejects when the same token already has a non-terminal entry (symbol-dup)', async () => {
@@ -83,8 +90,39 @@ describe('UngatedWatchService.createFromAlert', () => {
   });
 
   it('always sizes at least 1 share even when price exceeds TRADE_CAPITAL', async () => {
+    (svc as any).__adapter.getLiveQuote.mockResolvedValue({ ltp: 250_000 });
     await svc.createFromAlert({ ...baseInput, initialPrice: 250_000 });
     expect(exec.openTrade).toHaveBeenCalledWith(expect.objectContaining({ quantity: 1 }));
+  });
+
+  it('uses the LIVE broker quote (not Chartink hit price) for entryPrice + qty', async () => {
+    // Regression: HONASA 2026-05-22 — ungated entered at the stale Chartink
+    // hit price (₹389.35) while gated used a fresh live quote (₹393.12),
+    // producing opposite-sign P&L on the SAME trade. Both tracks must now
+    // anchor to the live broker quote at execute time for the A/B
+    // comparison to be apples-to-apples.
+    (svc as any).__adapter.getLiveQuote.mockResolvedValue({ ltp: 2050 }); // Chartink said 2000; live is 2050
+    await svc.createFromAlert(baseInput);
+    expect(exec.openTrade).toHaveBeenCalledWith(expect.objectContaining({
+      entryPrice: 2050, // live quote, not 2000
+      quantity: Math.floor(TRADE_CAPITAL / 2050),
+    }));
+  });
+
+  it('falls back to Chartink hit price when the live quote is unavailable', async () => {
+    (svc as any).__adapter.getLiveQuote.mockResolvedValue({ ltp: 0 });
+    await svc.createFromAlert(baseInput);
+    expect(exec.openTrade).toHaveBeenCalledWith(expect.objectContaining({
+      entryPrice: 2000, // back to initialPrice
+    }));
+  });
+
+  it('falls back to Chartink hit price when the live quote throws', async () => {
+    (svc as any).__adapter.getLiveQuote.mockRejectedValue(new Error('broker timeout'));
+    await svc.createFromAlert(baseInput);
+    expect(exec.openTrade).toHaveBeenCalledWith(expect.objectContaining({
+      entryPrice: 2000,
+    }));
   });
 
   it('sets the entry to TRADED and persists paperTradeId after openTrade', async () => {
@@ -119,6 +157,7 @@ describe('UngatedWatchService.onTick — transitions', () => {
     account = {};
     exec = { closeTrade: jest.fn().mockResolvedValue({}) };
     const gateway = { emitEntry: jest.fn() };
+    const adapter = { getLiveQuote: jest.fn().mockResolvedValue({ ltp: 2000 }) };
     const mod = await Test.createTestingModule({
       providers: [
         UngatedWatchService,
@@ -127,6 +166,7 @@ describe('UngatedWatchService.onTick — transitions', () => {
         { provide: UngatedPaperAccountService, useValue: account },
         { provide: UngatedTradeExecutionService, useValue: exec },
         { provide: UngatedWatchGateway, useValue: gateway },
+        { provide: AngelOneAdapterService, useValue: adapter },
       ],
     }).compile();
     svc = mod.get(UngatedWatchService);
