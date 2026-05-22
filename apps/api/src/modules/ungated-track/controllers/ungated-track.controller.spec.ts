@@ -4,6 +4,7 @@ import { UngatedWatchRepository } from '../repositories/ungated-watch.repository
 import { UngatedTradeRepository } from '../repositories/ungated-trade.repository';
 import { UngatedPaperAccountService, STARTING_BALANCE } from '../services/ungated-paper-account.service';
 import { UngatedComparisonService } from '../services/ungated-comparison.service';
+import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 
 describe('UngatedTrackController', () => {
   let ctrl: UngatedTrackController;
@@ -31,6 +32,10 @@ describe('UngatedTrackController', () => {
         { provide: UngatedTradeRepository, useValue: tradeRepo },
         { provide: UngatedPaperAccountService, useValue: account },
         { provide: UngatedComparisonService, useValue: comparison },
+        {
+          provide: AngelOneAdapterService,
+          useValue: { getLtpsBatch: jest.fn().mockResolvedValue(new Map()) },
+        },
       ],
     }).compile();
     ctrl = mod.get(UngatedTrackController);

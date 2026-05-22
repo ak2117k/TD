@@ -22,6 +22,7 @@ describe('UngatedWatchService.createFromAlert', () => {
   beforeEach(async () => {
     repo = {
       findActiveByToken: jest.fn().mockResolvedValue([]),
+      wasTokenExecutedSince: jest.fn().mockResolvedValue(false),
       countOpenTrades:   jest.fn().mockResolvedValue(0),
       createEntry:       jest.fn().mockResolvedValue({ id: 'uw1', token: '11536' }),
       createEvent:       jest.fn(),
@@ -56,6 +57,15 @@ describe('UngatedWatchService.createFromAlert', () => {
   it('rejects when the same token already has a non-terminal entry (symbol-dup)', async () => {
     repo.findActiveByToken.mockResolvedValue([{ id: 'prev', token: '11536' }]);
     await expect(svc.createFromAlert(baseInput)).rejects.toBeInstanceOf(UngatedSymbolDupError);
+  });
+
+  it('rejects with UngatedCooldownError when the token was executed within the last 30 min', async () => {
+    // Regression: ASHAPURMIN 2026-05-22 — 09:46:00 loss-cut, re-entered
+    // 09:50:17 (4 min later) and loss-cut again. The cooldown constant
+    // existed in code but the check wasn't wired into createFromAlert.
+    const { UngatedCooldownError } = await import('./ungated-watch.service');
+    repo.wasTokenExecutedSince.mockResolvedValue(true);
+    await expect(svc.createFromAlert(baseInput)).rejects.toBeInstanceOf(UngatedCooldownError);
   });
 
   it('forwards account.admit failures (capital / cap / kill-switch)', async () => {

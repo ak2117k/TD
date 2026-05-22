@@ -56,7 +56,17 @@ export class UngatedWatchService {
     const active = await this.repo.findActiveByToken(input.token);
     if (active.length > 0) throw new UngatedSymbolDupError(input.symbol);
 
-    // 2. Admission (capital + position cap + kill switch).
+    // 2. Cooldown — block re-entry on the same token within 30 minutes of
+    //    its last execution. Mirrors WatchService.createFromAlert. Without
+    //    this the ungated track would loss-cut, immediately re-enter on
+    //    the next scanner trigger, loss-cut again, and bleed cash on
+    //    repeat ASHAPURMIN-style scenarios.
+    const cooldownSince = new Date(Date.now() - TRADE_COOLDOWN_MS);
+    if (await this.repo.wasTokenExecutedSince(input.token, cooldownSince)) {
+      throw new UngatedCooldownError(input.symbol);
+    }
+
+    // 3. Admission (capital + position cap + kill switch).
     const openTrades = await this.repo.countOpenTrades();
     await this.account.admit({ openTrades });
 
