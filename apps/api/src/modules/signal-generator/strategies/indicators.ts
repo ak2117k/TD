@@ -248,3 +248,95 @@ export function supertrend(
 
   return { value: lastValue, direction: lastDirection };
 }
+
+/**
+ * Average Directional Index (ADX) — Wilder's formulation. Measures the
+ * STRENGTH of a trend (not its direction). Returns the latest ADX value,
+ * or null when there are insufficient candles.
+ *
+ * Interpretation (standard reference levels):
+ *   ADX < 20  → range-bound / weak trend
+ *   20-25     → developing trend
+ *   > 25      → strong trend (momentum entries work best here)
+ *   > 40      → very strong trend
+ *
+ * Needs at least `2 * period` bars to seed the +DI/-DI and then ADX
+ * smoothing — returns null below that.
+ */
+export function adx(
+  highs: number[],
+  lows: number[],
+  closes: number[],
+  period = 14,
+): number | null {
+  if (period <= 0) return null;
+  if (highs.length !== lows.length || lows.length !== closes.length) return null;
+  if (highs.length < 2 * period + 1) return null;
+
+  // 1. For each bar i >= 1, compute TR, +DM, -DM
+  const trs: number[] = [];
+  const plusDMs: number[] = [];
+  const minusDMs: number[] = [];
+  for (let i = 1; i < highs.length; i++) {
+    const upMove = highs[i] - highs[i - 1];
+    const downMove = lows[i - 1] - lows[i];
+    const plusDM = upMove > downMove && upMove > 0 ? upMove : 0;
+    const minusDM = downMove > upMove && downMove > 0 ? downMove : 0;
+    const hl = highs[i] - lows[i];
+    const hc = Math.abs(highs[i] - closes[i - 1]);
+    const lc = Math.abs(lows[i] - closes[i - 1]);
+    const tr = Math.max(hl, hc, lc);
+    trs.push(tr);
+    plusDMs.push(plusDM);
+    minusDMs.push(minusDM);
+  }
+
+  // 2. Wilder-smooth TR, +DM, -DM. First value = simple sum/avg of first
+  //    `period` items; subsequent: smoothed_t = ((p-1)*smoothed_{t-1} + raw_t) / p.
+  //    We also build the DX series so we can Wilder-smooth it into ADX.
+  let smoothedTR = 0;
+  let smoothedPlusDM = 0;
+  let smoothedMinusDM = 0;
+  for (let i = 0; i < period; i++) {
+    smoothedTR += trs[i];
+    smoothedPlusDM += plusDMs[i];
+    smoothedMinusDM += minusDMs[i];
+  }
+  smoothedTR /= period;
+  smoothedPlusDM /= period;
+  smoothedMinusDM /= period;
+
+  // DX at the seed bar (index = period - 1 in trs[], i.e. bar `period` of the
+  // original series). Then accumulate DX values across the rest of the series.
+  if (smoothedTR === 0) return null;
+  const computeDX = (sPlusDM: number, sMinusDM: number, sTR: number): number => {
+    const plusDI = 100 * (sPlusDM / sTR);
+    const minusDI = 100 * (sMinusDM / sTR);
+    const denom = plusDI + minusDI;
+    if (denom === 0) return 0;
+    return (100 * Math.abs(plusDI - minusDI)) / denom;
+  };
+
+  const dxSeries: number[] = [];
+  dxSeries.push(computeDX(smoothedPlusDM, smoothedMinusDM, smoothedTR));
+
+  for (let i = period; i < trs.length; i++) {
+    smoothedTR = ((period - 1) * smoothedTR + trs[i]) / period;
+    smoothedPlusDM = ((period - 1) * smoothedPlusDM + plusDMs[i]) / period;
+    smoothedMinusDM = ((period - 1) * smoothedMinusDM + minusDMs[i]) / period;
+    if (smoothedTR === 0) return null;
+    dxSeries.push(computeDX(smoothedPlusDM, smoothedMinusDM, smoothedTR));
+  }
+
+  // 5. ADX = Wilder-smoothed DX over `period` bars.
+  //    With highs.length >= 2*period + 1, trs has >= 2*period entries and
+  //    dxSeries has >= period entries — enough to seed the ADX average.
+  if (dxSeries.length < period) return null;
+  let adxVal = 0;
+  for (let i = 0; i < period; i++) adxVal += dxSeries[i];
+  adxVal /= period;
+  for (let i = period; i < dxSeries.length; i++) {
+    adxVal = ((period - 1) * adxVal + dxSeries[i]) / period;
+  }
+  return adxVal;
+}

@@ -25,6 +25,27 @@ export class UngatedCooldownError extends Error {
   }
 }
 
+export class UngatedLastLossError extends Error {
+  constructor(public readonly symbol: string, pnl: number) {
+    super(`ungated: ${symbol} last closed trade was a loss (₹${pnl.toFixed(0)}) — entry blocked`);
+    this.name = 'UngatedLastLossError';
+  }
+}
+
+export class UngatedSellDirectionError extends Error {
+  constructor(public readonly symbol: string) {
+    super(`ungated: ${symbol} side=SELL rejected — ungated track is BUY-only`);
+    this.name = 'UngatedSellDirectionError';
+  }
+}
+
+export class UngatedStaleEntryError extends Error {
+  constructor(public readonly symbol: string, public readonly dynamicRR: number) {
+    super(`ungated: ${symbol} stale entry — dynamic R:R ${dynamicRR.toFixed(2)} below minimum; move already consumed`);
+    this.name = 'UngatedStaleEntryError';
+  }
+}
+
 export interface UngatedCreateFromAlertInput {
   alertId: string | null;
   setupId: string | null;
@@ -37,8 +58,9 @@ export interface UngatedCreateFromAlertInput {
   initialBreakdown: Prisma.InputJsonValue;
 }
 
-const PROFIT_TARGET_PCT = 0.02; // 2% fallback — no indicator-sr on ungated (YAGNI)
-export const TRADE_COOLDOWN_MS = 30 * 60_000;
+const PROFIT_TARGET_PCT = 0.02; // 2% from fill price — no indicator-sr on ungated (YAGNI)
+export const TRADE_COOLDOWN_MS = 45 * 60_000;
+const HARD_STOP_PCT = 0.004;
 
 @Injectable()
 export class UngatedWatchService {
@@ -54,11 +76,14 @@ export class UngatedWatchService {
   ) {}
 
   async createFromAlert(input: UngatedCreateFromAlertInput) {
+    // 0. BUY-only gate — ungated track trades equities long only.
+    if (input.side !== 'BUY') throw new UngatedSellDirectionError(input.symbol);
+
     // 1. Symbol dedup — token-based, mirrors gated rule.
     const active = await this.repo.findActiveByToken(input.token);
     if (active.length > 0) throw new UngatedSymbolDupError(input.symbol);
 
-    // 2. Cooldown — block re-entry on the same token within 30 minutes of
+    // 2. Cooldown — block re-entry on the same token within 45 minutes of
     //    its last execution. Mirrors WatchService.createFromAlert. Without
     //    this the ungated track would loss-cut, immediately re-enter on
     //    the next scanner trigger, loss-cut again, and bleed cash on
@@ -68,16 +93,68 @@ export class UngatedWatchService {
       throw new UngatedCooldownError(input.symbol);
     }
 
-    // 3. Admission (capital + position cap + kill switch).
+    // 3. Green-only re-entry gate: block re-entry if the last closed trade
+    //    for this symbol TODAY was a loss. Same-day only — yesterday's loss
+    //    does not carry over to the next session.
+    const todayIst = new Date(
+      new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) + 'T00:00:00.000+05:30',
+    );
+    const lastPnl = await this.repo.getLastClosedPnlForToken(input.token, todayIst);
+    if (lastPnl !== null && lastPnl <= 0) {
+      this.logger.warn(
+        `[ungated] ${input.symbol}: last closed trade was a loss (₹${lastPnl.toFixed(0)}) — entry blocked`,
+      );
+      throw new UngatedLastLossError(input.symbol, lastPnl);
+    }
+
+    // 4. Fetch live quote early — used for both the dynamic R:R gate and
+    //    the actual entry price. One broker round-trip serves both purposes.
+    let liveQuote: number | null = null;
+    try {
+      const live = await this.adapter.getLiveQuote(input.token, input.exchange);
+      if (live?.ltp && live.ltp > 0) liveQuote = live.ltp;
+      else this.logger.warn(
+        `[ungated] live quote unavailable for ${input.symbol}; falling back to Chartink hit price ₹${input.initialPrice}`,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `[ungated] live quote failed for ${input.symbol}: ${err instanceof Error ? err.message : err}; falling back to Chartink hit price`,
+      );
+    }
+
+    // 5. Upside gate — only execute when the original alert target (initialPrice
+    //    × 1.02) is still > 2% above the current live price. If the stock has
+    //    already run up to or past the intended target since the Chartink candle
+    //    closed, there is no remaining upside — reject.
+    //    After this check, the actual profitTarget is RE-ANCHORED to the live
+    //    fill price so the stored target is always exactly 2% from where we
+    //    entered, not from the stale alert price.
+    //    Skip the check when the live quote is unavailable so a broker outage
+    //    doesn't silently block all entries.
+    const executedPrice = liveQuote ?? input.initialPrice;
+    const profitTarget = executedPrice * (1 + PROFIT_TARGET_PCT); // 2% from fill
+    if (liveQuote != null) {
+      const originalTarget = input.initialPrice * (1 + PROFIT_TARGET_PCT);
+      const remaining = originalTarget - liveQuote;
+      const remainingPct = liveQuote > 0 ? remaining / liveQuote : 0;
+      if (remainingPct < PROFIT_TARGET_PCT) {
+        const dynamicRR = remaining / (liveQuote * HARD_STOP_PCT);
+        this.logger.warn(
+          `[ungated] ${input.symbol}: stale entry blocked — only ${(remainingPct * 100).toFixed(2)}% remaining to original target ` +
+          `(live ₹${liveQuote}, original target ₹${originalTarget.toFixed(2)})`,
+        );
+        throw new UngatedStaleEntryError(input.symbol, dynamicRR);
+      }
+    }
+
+    // 6. Admission (capital + position cap + kill switch).
     const openTrades = await this.repo.countOpenTrades();
     await this.account.admit({ openTrades });
 
-    // 3. Compute the 2% fallback profit target.
-    const sideMul = input.side === 'BUY' ? 1 : -1;
-    const profitTarget =
-      input.initialPrice * (1 + sideMul * PROFIT_TARGET_PCT);
+    // 7. profitTarget and executedPrice are already set in step 5 above,
+    //    anchored to the live fill price so the target is always 2% from entry.
 
-    // 4. Create the WATCHING entry row.
+    // 8. Create the WATCHING entry row.
     const createInput: UngatedCreateEntryInput = {
       alertId: input.alertId,
       setupId: input.setupId,
@@ -90,7 +167,7 @@ export class UngatedWatchService {
       initialBreakdown: input.initialBreakdown,
       profitTarget,
       profitTargetSource: 'fallback-2pct',
-      stopLossScore: 50,
+      stopLossScore: 45,
     };
     const entry = await this.repo.createEntry(createInput);
     await this.repo.createEvent({
@@ -101,28 +178,9 @@ export class UngatedWatchService {
       breakdown: input.initialBreakdown,
     });
 
-    // 5. Auto-execute at the LIVE broker price, not the Chartink-reported
-    //    hit_price. Mirrors the gated WatchService.executeEntry pattern.
-    //
-    //    Why: Chartink's `hit.hitPrice` is frozen at the moment the scan
-    //    triggered. By the time our queue processes the alert (usually a
-    //    few seconds later), the live market price has moved. Using the
-    //    stale Chartink price for entry produces a divergent fill from
-    //    the gated track for the SAME symbol — same direction can show
-    //    opposite P&L sign just from entry slippage. Live quote on both
-    //    tracks keeps the A/B comparison clean.
-    let executedPrice = input.initialPrice;
-    try {
-      const live = await this.adapter.getLiveQuote(input.token, input.exchange);
-      if (live?.ltp && live.ltp > 0) executedPrice = live.ltp;
-      else this.logger.warn(
-        `[ungated] live quote unavailable for ${input.symbol}; falling back to Chartink hit price ₹${input.initialPrice}`,
-      );
-    } catch (err) {
-      this.logger.warn(
-        `[ungated] live quote failed for ${input.symbol}: ${err instanceof Error ? err.message : err}; falling back to Chartink hit price`,
-      );
-    }
+    // 9. Auto-execute at the LIVE broker price fetched in step 4 above.
+    //    executedPrice and profitTarget are already anchored to the same
+    //    live snapshot from step 5 — no second broker round-trip needed.
 
     const qty = Math.max(1, Math.floor(TRADE_CAPITAL / Math.max(executedPrice, 1)));
     const trade = await this.exec.openTrade({
@@ -193,7 +251,21 @@ export class UngatedWatchService {
     const threshold = -this.HARD_STOP_PCT *
       (entry.executedPrice ?? entry.initialPrice) *
       (entry.remainingQty ?? entry.quantity ?? 0);
-    if (openLoss <= threshold) return this.transitionLossCut(entry, ltp, openLoss);
+    if (openLoss <= threshold) {
+      // REST polling fires every 30s — by the time the poller observes the
+      // trigger, ltp may already be well below (BUY) or above (SELL) the
+      // theoretical SL price. Cap the exit at the threshold price so the
+      // recorded loss never exceeds the intended -0.4%, matching how a
+      // real stop-limit order would behave.
+      const ref = entry.executedPrice ?? entry.initialPrice;
+      const slPrice = sideMul === 1
+        ? ref * (1 - this.HARD_STOP_PCT)
+        : ref * (1 + this.HARD_STOP_PCT);
+      const cappedExitPrice = sideMul === 1
+        ? Math.max(ltp, slPrice)
+        : Math.min(ltp, slPrice);
+      return this.transitionLossCut(entry, cappedExitPrice, openLoss);
+    }
 
     // 3. Partial-exit / trailing-stop.
     if (!entry.partialExitedAt) {
@@ -232,6 +304,7 @@ export class UngatedWatchService {
     });
     await this.repo.update(entry.id, {
       status: WatchStatus.STOPPED, closedAt: new Date(), closedReason: 'loss-cut',
+      currentPrice: exitPrice,
     });
   }
 

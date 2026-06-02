@@ -4,17 +4,24 @@ import type { WatchEntry, WatchEntryWithEvents } from '../../types/watch.types';
 import { WatchEventLog } from './WatchEventLog';
 import { TrailingStopSection } from './TrailingStopSection';
 
-interface Props { entryId: string; entry?: WatchEntry; onClose?: () => void }
+interface Props {
+  entryId: string;
+  entry?: WatchEntry;
+  onClose?: () => void;
+  fetchEntry?: (id: string) => Promise<WatchEntryWithEvents>;
+}
 
-export function WatchDetailPanel({ entryId, entry: liveEntry, onClose }: Props) {
+export function WatchDetailPanel({ entryId, entry: liveEntry, onClose, fetchEntry }: Props) {
   const [detail, setDetail] = useState<WatchEntryWithEvents | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const doFetch = fetchEntry ?? watchApi.get.bind(watchApi);
+
   async function refresh() {
     setError(null);
     try {
-      const data = await watchApi.get(entryId);
+      const data = await doFetch(entryId);
       setDetail(data);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -66,9 +73,12 @@ export function WatchDetailPanel({ entryId, entry: liveEntry, onClose }: Props) 
         <div>
           <span className="font-mono text-lg text-[var(--color-text-primary)]">{view.symbol}</span>
           <span className="ml-2 text-[var(--color-text-secondary)]">{view.side}</span>
-          <span
-            className={`ml-2 px-2 py-0.5 rounded text-xs font-medium ${
-              view.status === 'WATCHING'
+          {(() => {
+            const isTrailing = view.status === 'TRADED' && view.partialExitedAt != null;
+            const label = isTrailing ? 'TRAILING' : view.status;
+            const cls = isTrailing
+              ? 'bg-amber-500/20 text-amber-300'
+              : view.status === 'WATCHING'
                 ? 'bg-blue-500/20 text-blue-300'
                 : view.status === 'TRADED'
                   ? 'bg-emerald-500/20 text-emerald-300'
@@ -76,11 +86,13 @@ export function WatchDetailPanel({ entryId, entry: liveEntry, onClose }: Props) 
                     ? 'bg-emerald-600/30 text-emerald-200'
                     : view.status === 'STOPPED'
                       ? 'bg-red-500/20 text-red-300'
-                      : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]'
-            }`}
-          >
-            {view.status}
-          </span>
+                      : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]';
+            return (
+              <span className={`ml-2 px-2 py-0.5 rounded text-xs font-medium ${cls}`}>
+                {label}
+              </span>
+            );
+          })()}
         </div>
         <div className="flex items-center gap-3">
           <span className="text-xs text-[var(--color-text-muted)]">

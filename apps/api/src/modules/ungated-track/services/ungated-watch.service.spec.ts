@@ -24,6 +24,7 @@ describe('UngatedWatchService.createFromAlert', () => {
     repo = {
       findActiveByToken: jest.fn().mockResolvedValue([]),
       wasTokenExecutedSince: jest.fn().mockResolvedValue(false),
+      getLastClosedPnlForToken: jest.fn().mockResolvedValue(null),
       countOpenTrades:   jest.fn().mockResolvedValue(0),
       createEntry:       jest.fn().mockResolvedValue({ id: 'uw1', token: '11536' }),
       createEvent:       jest.fn(),
@@ -66,13 +67,65 @@ describe('UngatedWatchService.createFromAlert', () => {
     await expect(svc.createFromAlert(baseInput)).rejects.toBeInstanceOf(UngatedSymbolDupError);
   });
 
-  it('rejects with UngatedCooldownError when the token was executed within the last 30 min', async () => {
+  it('rejects SELL-direction alerts (BUY-only gate)', async () => {
+    const { UngatedSellDirectionError } = await import('./ungated-watch.service');
+    await expect(svc.createFromAlert({ ...baseInput, side: 'SELL' }))
+      .rejects.toBeInstanceOf(UngatedSellDirectionError);
+    expect(repo.findActiveByToken).not.toHaveBeenCalled();
+    expect(repo.createEntry).not.toHaveBeenCalled();
+  });
+
+  it('rejects with UngatedStaleEntryError when live price leaves < 2% to original target', async () => {
+    // ltp = 2020 → originalTarget = 2040 → remaining = 20 → 20/2020 = 0.99% < 2% → blocked
+    const { UngatedStaleEntryError } = await import('./ungated-watch.service');
+    (svc as any).__adapter.getLiveQuote.mockResolvedValue({ ltp: 2020 });
+    await expect(svc.createFromAlert(baseInput)).rejects.toBeInstanceOf(UngatedStaleEntryError);
+    expect(repo.createEntry).not.toHaveBeenCalled();
+  });
+
+  it('rejects with UngatedStaleEntryError when the live price already reached the original target', async () => {
+    // ltp = 2040 = exactly the 2% target → remaining = 0 → blocked
+    const { UngatedStaleEntryError } = await import('./ungated-watch.service');
+    (svc as any).__adapter.getLiveQuote.mockResolvedValue({ ltp: 2040 });
+    await expect(svc.createFromAlert(baseInput)).rejects.toBeInstanceOf(UngatedStaleEntryError);
+    expect(repo.createEntry).not.toHaveBeenCalled();
+  });
+
+  it('anchors profitTarget to live fill price (not stale Chartink price)', async () => {
+    // ltp = 1990 (stock dipped below alert price) → passes gate
+    // profitTarget must be 1990 * 1.02 = 2029.8, not initialPrice * 1.02 = 2040
+    (svc as any).__adapter.getLiveQuote.mockResolvedValue({ ltp: 1990 });
+    await svc.createFromAlert(baseInput);
+    const createCall = repo.createEntry.mock.calls[0][0];
+    expect(createCall.profitTarget).toBeCloseTo(1990 * 1.02, 2);
+  });
+
+  it('rejects with UngatedCooldownError when the token was executed within the last 45 min', async () => {
     // Regression: ASHAPURMIN 2026-05-22 — 09:46:00 loss-cut, re-entered
     // 09:50:17 (4 min later) and loss-cut again. The cooldown constant
     // existed in code but the check wasn't wired into createFromAlert.
     const { UngatedCooldownError } = await import('./ungated-watch.service');
     repo.wasTokenExecutedSince.mockResolvedValue(true);
     await expect(svc.createFromAlert(baseInput)).rejects.toBeInstanceOf(UngatedCooldownError);
+  });
+
+  it('rejects with UngatedLastLossError when last closed trade was a loss', async () => {
+    const { UngatedLastLossError } = await import('./ungated-watch.service');
+    repo.getLastClosedPnlForToken.mockResolvedValue(-120);
+    await expect(svc.createFromAlert(baseInput)).rejects.toBeInstanceOf(UngatedLastLossError);
+    expect(repo.createEntry).not.toHaveBeenCalled();
+  });
+
+  it('allows entry when last closed trade was profitable', async () => {
+    repo.getLastClosedPnlForToken.mockResolvedValue(80);
+    await svc.createFromAlert(baseInput);
+    expect(exec.openTrade).toHaveBeenCalled();
+  });
+
+  it('allows entry when no prior closed trade exists (first time)', async () => {
+    repo.getLastClosedPnlForToken.mockResolvedValue(null);
+    await svc.createFromAlert(baseInput);
+    expect(exec.openTrade).toHaveBeenCalled();
   });
 
   it('forwards account.admit failures (capital / cap / kill-switch)', async () => {
@@ -101,11 +154,12 @@ describe('UngatedWatchService.createFromAlert', () => {
     // producing opposite-sign P&L on the SAME trade. Both tracks must now
     // anchor to the live broker quote at execute time for the A/B
     // comparison to be apples-to-apples.
-    (svc as any).__adapter.getLiveQuote.mockResolvedValue({ ltp: 2050 }); // Chartink said 2000; live is 2050
+    // ltp=1990 (slightly below initialPrice=2000): original target=2040, remaining=2.51% → gate passes.
+    (svc as any).__adapter.getLiveQuote.mockResolvedValue({ ltp: 1990 }); // Chartink said 2000; live is 1990
     await svc.createFromAlert(baseInput);
     expect(exec.openTrade).toHaveBeenCalledWith(expect.objectContaining({
-      entryPrice: 2050, // live quote, not 2000
-      quantity: Math.floor(TRADE_CAPITAL / 2050),
+      entryPrice: 1990, // live quote, not 2000
+      quantity: Math.floor(TRADE_CAPITAL / 1990),
     }));
   });
 
@@ -191,6 +245,17 @@ describe('UngatedWatchService.onTick — transitions', () => {
     }));
     expect(repo.update).toHaveBeenCalledWith('uw1', expect.objectContaining({
       status: 'STOPPED', closedReason: 'loss-cut',
+    }));
+  });
+
+  it('caps exit price at SL threshold when 30s poll already overshot below SL (BUY)', async () => {
+    // Regression: 30s REST polling gap — stock fell from 2000 to 1975 within one window.
+    // SL threshold is 2000 * 0.996 = 1992. Without the cap, exitPrice = 1975 → loss > 0.4%.
+    // With the cap, exitPrice is pinned at 1992 regardless of how far ltp fell.
+    repo.findActiveByToken.mockResolvedValue([tradedEntry()]);
+    await svc.onTick('11536', 1975, new Date());
+    expect(exec.closeTrade).toHaveBeenCalledWith('ut1', expect.objectContaining({
+      reason: 'sl-loss-cut', exitPrice: 1992,
     }));
   });
 

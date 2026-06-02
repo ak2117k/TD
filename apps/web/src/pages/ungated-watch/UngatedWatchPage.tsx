@@ -3,6 +3,7 @@ import { useUngatedWatchEntries } from '../../hooks/useUngatedWatchEntries';
 import { WatchTable } from '../watch/WatchTable';
 import { dayRealizedSummary } from '../../utils/watchPnl';
 import { useUngatedPaperAccount } from '../../hooks/useUngatedPaperAccount';
+import { getUngatedEntry } from '../../services/ungatedWatch';
 import type { WatchStatus } from '../../types/watch.types';
 
 const FILTERS: Array<{ label: string; value: WatchStatus | undefined }> = [
@@ -64,7 +65,7 @@ export function UngatedWatchPage() {
       {error && <div className="text-red-400">Error: {error}</div>}
       {!loading && !error && (
         <>
-          <WatchTable entries={entries} onSelect={setSelectedId} selectedId={selectedId} />
+          <WatchTable entries={entries} onSelect={setSelectedId} selectedId={selectedId} fetchEntry={getUngatedEntry} />
           {(() => {
             const s = dayRealizedSummary(entries);
             if (s.count === 0) return null;

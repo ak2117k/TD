@@ -1,5 +1,5 @@
 import { Fragment } from 'react';
-import type { WatchEntry } from '../../types/watch.types';
+import type { WatchEntry, WatchEntryWithEvents } from '../../types/watch.types';
 import { profitView, whatIfView, isClosed, breakdownChecks } from '../../utils/watchPnl';
 import { trailView, SL_AMBER_THRESHOLD_PCT } from '../../utils/trailView';
 import { WatchDetailPanel } from './WatchDetailPanel';
@@ -10,6 +10,7 @@ interface Props {
   entries: WatchEntry[];
   onSelect: (id: string | null) => void;
   selectedId: string | null;
+  fetchEntry?: (id: string) => Promise<WatchEntryWithEvents>;
 }
 
 function pctChange(curr: number | null, init: number): string {
@@ -18,8 +19,14 @@ function pctChange(curr: number | null, init: number): string {
   return `${d >= 0 ? '+' : ''}${d.toFixed(2)}%`;
 }
 
-function statusColor(status: string): string {
-  switch (status) {
+function statusLabel(entry: WatchEntry): string {
+  if (entry.status === 'TRADED' && entry.partialExitedAt) return 'TRAILING';
+  return entry.status;
+}
+
+function statusColor(entry: WatchEntry): string {
+  if (entry.status === 'TRADED' && entry.partialExitedAt) return 'text-amber-400';
+  switch (entry.status) {
     case 'WATCHING': return 'text-blue-400';
     case 'TRADED': return 'text-emerald-400';
     case 'TARGET_HIT': return 'text-emerald-300';
@@ -58,7 +65,7 @@ const FACTOR_STATE_CLASS: Record<FactorCellState, string> = {
   improved: 'text-emerald-300 font-medium bg-emerald-500/10 rounded',
 };
 
-export function WatchTable({ entries, onSelect, selectedId }: Props) {
+export function WatchTable({ entries, onSelect, selectedId, fetchEntry }: Props) {
   if (entries.length === 0) {
     return (
       <div className="p-6 text-center text-[var(--color-text-muted)]">
@@ -224,7 +231,7 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
               <td className="py-2 px-3 text-right text-[var(--color-text-secondary)]">
                 {e.profitTarget.toFixed(2)}
               </td>
-              <td className={`py-2 px-3 font-medium ${statusColor(e.status)}`}>{e.status}</td>
+              <td className={`py-2 px-3 font-medium ${statusColor(e)}`}>{statusLabel(e)}</td>
               <td className="py-2 px-3 text-right tabular-nums text-[var(--color-text-secondary)]">
                 {fmtTime(e.executedAt ?? e.initialAt)}
               </td>
@@ -281,6 +288,7 @@ export function WatchTable({ entries, onSelect, selectedId }: Props) {
                     entryId={e.id}
                     entry={e}
                     onClose={() => onSelect(null)}
+                    fetchEntry={fetchEntry}
                   />
                 </td>
               </tr>

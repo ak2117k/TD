@@ -86,6 +86,13 @@ export class UngatedWatchRepository {
     return this.prisma.ungatedWatchEntry.findUnique({ where: { id } });
   }
 
+  async findByIdWithEvents(id: string) {
+    return this.prisma.ungatedWatchEntry.findUnique({
+      where: { id },
+      include: { events: { orderBy: { createdAt: 'desc' }, take: 100 } },
+    });
+  }
+
   async findActiveByToken(token: string): Promise<UngatedWatchEntry[]> {
     return this.prisma.ungatedWatchEntry.findMany({
       where: { token, status: { notIn: CLOSED_STATES } },
@@ -130,6 +137,30 @@ export class UngatedWatchRepository {
       where,
       orderBy: { createdAt: 'desc' },
     });
+  }
+
+  /**
+   * Returns the realized P&L (₹) of the most recent closed trade for a token
+   * within the given `since` window (defaults to all-time when omitted).
+   * Returns null when no qualifying trade exists — first-time entry always allowed.
+   * Mirrors WatchRepository.getLastClosedPnlForToken.
+   */
+  async getLastClosedPnlForToken(token: string, since?: Date): Promise<number | null> {
+    const entry = await this.prisma.ungatedWatchEntry.findFirst({
+      where: {
+        token,
+        status: { in: [WatchStatus.TARGET_HIT, WatchStatus.STOPPED, WatchStatus.EXITED] },
+        closedAt: since ? { gte: since } : { not: null },
+      },
+      orderBy: { closedAt: 'desc' },
+      select: { paperTradeId: true },
+    });
+    if (!entry?.paperTradeId) return null;
+    const trade = await this.prisma.ungatedTrade.findUnique({
+      where: { id: entry.paperTradeId },
+      select: { pnl: true },
+    });
+    return trade?.pnl ?? null;
   }
 
   async update(id: string, data: Prisma.UngatedWatchEntryUpdateInput) {

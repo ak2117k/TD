@@ -1,4 +1,4 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Controller, Get, NotFoundException, Param, Query } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { WatchStatus } from '@prisma/client';
 import { UngatedWatchRepository } from '../repositories/ungated-watch.repository';
@@ -17,6 +17,16 @@ export class UngatedTrackController {
     private readonly _comparison: UngatedComparisonService,
     private readonly adapter: AngelOneAdapterService,
   ) {}
+
+  @Get('watch/:id')
+  async get(@Param('id') id: string) {
+    const entry = await this.watchRepo.findByIdWithEvents(id);
+    if (!entry) throw new NotFoundException(`UngatedWatchEntry ${id} not found`);
+    const r = entry.paperTradeId
+      ? (await this.tradeRepo.findRealization([entry.paperTradeId])).get(entry.paperTradeId)
+      : undefined;
+    return { ...entry, realizedPnl: r?.pnl ?? null, realizedFees: r?.fees ?? null };
+  }
 
   @Get('watch')
   async list(

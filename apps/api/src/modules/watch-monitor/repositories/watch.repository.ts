@@ -148,7 +148,7 @@ export class WatchRepository {
 
   /**
    * True if any watch entry for this token was EXECUTED at or after `since`.
-   * Backs the 30-minute re-entry cooldown (R2).
+   * Backs the 45-minute re-entry cooldown (R2).
    *
    * Deliberately does NOT filter on `status`: a closed trade's entry moves
    * to a terminal status (TARGET_HIT / STOPPED / EXITED) while `executedAt`
@@ -195,6 +195,36 @@ export class WatchRepository {
       where: { status: { in: [WatchStatus.WATCHING, WatchStatus.TRADED] } },
       orderBy: { createdAt: 'desc' },
     });
+  }
+
+  /**
+   * Returns the realized P&L (₹) of the most recent EXECUTED-and-CLOSED trade
+   * for a token within the given `since` window (defaults to all-time when
+   * omitted), or null when no qualifying trade exists (first-time entry always
+   * allowed). Used by the green-only re-entry gate in WatchService.
+   *
+   * Only terminal statuses with a known trade are considered:
+   * TARGET_HIT / STOPPED / EXITED. DISMISSED entries never have a linked
+   * trade (no executedAt) and are excluded.
+   */
+  async getLastClosedPnlForToken(token: string, since?: Date): Promise<number | null> {
+    const entry = await this.prisma.watchEntry.findFirst({
+      where: {
+        token,
+        status: { in: [WatchStatus.TARGET_HIT, WatchStatus.STOPPED, WatchStatus.EXITED] },
+        closedAt: since ? { gte: since } : { not: null },
+      },
+      orderBy: { closedAt: 'desc' },
+      select: { paperTradeId: true, liveTradeId: true },
+    });
+    if (!entry) return null;
+    const tradeId = entry.paperTradeId ?? entry.liveTradeId;
+    if (!tradeId) return null;
+    const trade = await this.prisma.trade.findUnique({
+      where: { id: tradeId },
+      select: { pnl: true },
+    });
+    return trade?.pnl ?? null;
   }
 
   async update(id: string, data: Prisma.WatchEntryUpdateInput): Promise<WatchEntry> {

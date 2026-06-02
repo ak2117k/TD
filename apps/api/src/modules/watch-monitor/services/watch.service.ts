@@ -23,6 +23,9 @@ const PARTIAL_EXIT_THRESHOLD_PCT = 0.01;
  *  Revised from 0.02 → 0.005 — tighter trail prevents giving back the 1% gain. */
 const TRAILING_STOP_PCT = 0.005;
 
+/** Hard price stop threshold: 0.4% of entry price (same rate as hardLossCutRupees). */
+const HARD_STOP_PCT = 0.004;
+
 /** Fraction of position to exit at the partial-exit threshold. (Unchanged.) */
 const PARTIAL_EXIT_FRACTION = 0.5;
 
@@ -64,12 +67,33 @@ export class WatchCapExceededError extends Error {
 
 /** Re-entry cooldown window (R2): no new trade for a symbol within this many
  *  ms of its last execution. */
-export const TRADE_COOLDOWN_MS = 30 * 60_000;
+export const TRADE_COOLDOWN_MS = 45 * 60_000;
 
 export class TradeCooldownError extends Error {
   constructor(symbol: string) {
-    super(`${symbol}: traded within the last 30 minutes - cooldown active`);
+    super(`${symbol}: traded within the last 45 minutes - cooldown active`);
     this.name = 'TradeCooldownError';
+  }
+}
+
+export class TradeSellDirectionError extends Error {
+  constructor(symbol: string) {
+    super(`${symbol}: side=SELL rejected — watch track is BUY-only`);
+    this.name = 'TradeSellDirectionError';
+  }
+}
+
+export class TradeLastLossError extends Error {
+  constructor(symbol: string, pnl: number) {
+    super(`${symbol}: last closed trade was a loss (₹${pnl.toFixed(0)}) — entry blocked until a winning trade clears it`);
+    this.name = 'TradeLastLossError';
+  }
+}
+
+export class TradeStaleEntryError extends Error {
+  constructor(symbol: string, dynamicRR: number) {
+    super(`${symbol}: stale entry — dynamic R:R ${dynamicRR.toFixed(2)} below minimum; move already consumed`);
+    this.name = 'TradeStaleEntryError';
   }
 }
 
@@ -147,6 +171,19 @@ export class WatchService {
   }
 
   async createFromAlert(input: CreateFromAlertInput): Promise<WatchEntry> {
+    // BUY-only gate — watch track trades equities long only.
+    if (input.side !== 'BUY') {
+      this.logger.warn(
+        formatTradeRejection({
+          symbol: input.symbol,
+          side: input.side,
+          stage: 'watch',
+          reason: 'side=SELL rejected — watch track is BUY-only',
+        }),
+      );
+      throw new TradeSellDirectionError(input.symbol);
+    }
+
     // Tier 1 dedup: same Chartink setup (retries / Bull job replays).
     const existingBySetup = await this.repo.findActiveBySetupId(input.setupId);
     if (existingBySetup) {
@@ -170,7 +207,7 @@ export class WatchService {
       return reused;
     }
 
-    // R2: 30-minute re-entry cooldown. A symbol executed in the last 30 min
+    // R2: 45-minute re-entry cooldown. A symbol executed in the last 45 min
     // may not be re-traded even though its prior trade has already closed
     // (which is why the active-token dedup above did not catch it).
     const cooldownSince = new Date(Date.now() - TRADE_COOLDOWN_MS);
@@ -180,10 +217,29 @@ export class WatchService {
           symbol: input.symbol,
           side: input.side,
           stage: 'watch',
-          reason: 'symbol traded within the last 30 min - cooldown active',
+          reason: 'symbol traded within the last 45 min - cooldown active',
         }),
       );
       throw new TradeCooldownError(input.symbol);
+    }
+
+    // Green-only re-entry gate: block re-entry if the last closed trade for
+    // this symbol TODAY was a loss. Same-day only — yesterday's loss does not
+    // carry over to the next session. Each day is a fresh slate.
+    const todayIst = new Date(
+      new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) + 'T00:00:00.000+05:30',
+    );
+    const lastPnl = await this.repo.getLastClosedPnlForToken(input.token, todayIst);
+    if (lastPnl !== null && lastPnl <= 0) {
+      this.logger.warn(
+        formatTradeRejection({
+          symbol: input.symbol,
+          side: input.side,
+          stage: 'watch',
+          reason: `last closed trade was a loss (₹${lastPnl.toFixed(0)}) — entry blocked`,
+        }),
+      );
+      throw new TradeLastLossError(input.symbol, lastPnl);
     }
 
     const active = await this.repo.countActive();
@@ -221,9 +277,9 @@ export class WatchService {
       profitTarget: targetResult.target,
       profitTargetSource: targetResult.source,
       // Score-decay stop fires when a re-score drops below this floor. Kept
-      // BELOW the 60 entry-admission floor so an entry admitted at 60-69 is
-      // not dead-on-arrival — the stop only fires on genuine decay under 50.
-      stopLossScore: 50,
+      // below the 47 entry-admission floor so a trade admitted at 47-49 is
+      // not dead-on-arrival — the stop only fires on genuine decay under 45.
+      stopLossScore: 45,
       optionsToken: picked?.optionsToken ?? null,
       optionsType: picked?.optionsType ?? null,
       optionsExpiry: picked?.optionsExpiry ?? null,
@@ -361,6 +417,28 @@ export class WatchService {
         return null;
       }
       referencePrice = resolved;
+    }
+
+    // Upside gate (equity only): only execute when the profit target is still
+    // > 2% above the current live price. entry.profitTarget was computed from
+    // initialPrice in createFromAlert — it represents the intended level. If
+    // the stock has already run most of the way there, the remaining reward
+    // is too small to justify the -0.4% SL risk. Block and leave WATCHING so
+    // the journal record is preserved.
+    if (!optionsLotSize) {
+      const remaining = (entry.profitTarget ?? 0) - referencePrice;
+      const remainingPct = referencePrice > 0 ? remaining / referencePrice : 0;
+      if (remainingPct < 0.02) {
+        this.logger.warn(
+          formatTradeRejection({
+            symbol: entry.symbol,
+            side: entry.side ?? undefined,
+            stage: 'execution',
+            reason: `stale entry — only ${(remainingPct * 100).toFixed(2)}% remaining to target (live ₹${referencePrice.toFixed(2)}, target ₹${(entry.profitTarget ?? 0).toFixed(2)}) — entry stays WATCHING`,
+          }),
+        );
+        return null;
+      }
     }
 
     // R4: equity quantity is sized off the score-tiered capital, not a flat
@@ -686,8 +764,17 @@ export class WatchService {
           );
           return;
         }
-        exitPrice = confirmPrice;
-        openPnl = confirmPnl;
+        // Cap exit at the theoretical SL price — the stock may have kept
+        // falling during the REST confirmation call, but the recorded loss
+        // must never exceed the -0.4% hard limit regardless.
+        const ref = (entry.executedPrice ?? entry.initialPrice ?? 0) as number;
+        const slPrice = entry.side === 'BUY'
+          ? ref * (1 - HARD_STOP_PCT)
+          : ref * (1 + HARD_STOP_PCT);
+        exitPrice = entry.side === 'BUY'
+          ? Math.max(confirmPrice, slPrice)
+          : Math.min(confirmPrice, slPrice);
+        openPnl = this.computeOpenPnl(entry, exitPrice);
       }
     }
 
@@ -710,6 +797,7 @@ export class WatchService {
       status: WatchStatus.STOPPED,
       closedAt: new Date(),
       closedReason: 'loss-cut',
+      currentPrice: exitPrice,
     });
     await this.unsubscribeEntry(entryId);
   }

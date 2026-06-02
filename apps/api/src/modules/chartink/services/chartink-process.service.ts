@@ -8,7 +8,7 @@ import { WatchService, WatchCapExceededError, TradeCooldownError } from '../../w
 import { formatTradeRejection } from '../../../common/utils/trade-rejection-log';
 import { isWithinEntryWindow } from '../../../common/utils/market-hours';
 import { evaluateTradePolicy } from '../../watch-monitor/services/trade-policy';
-import { UngatedWatchService, UngatedSymbolDupError, UngatedCooldownError } from '../../ungated-track/services/ungated-watch.service';
+import { UngatedWatchService, UngatedSymbolDupError, UngatedCooldownError, UngatedSellDirectionError, UngatedLastLossError, UngatedStaleEntryError } from '../../ungated-track/services/ungated-watch.service';
 import { UngatedRejectionRepository, UngatedRejectionReason } from '../../ungated-track/repositories/ungated-rejection.repository';
 import {
   UngatedCapitalExhaustedError, UngatedPositionCapError, UngatedKillSwitchError,
@@ -368,6 +368,9 @@ export class ChartinkProcessService {
     if (err instanceof UngatedSymbolDupError) return 'symbol-dup';
     if (err instanceof UngatedCooldownError) return 'cooldown';
     if (err instanceof UngatedKillSwitchError) return 'kill-switch';
+    if (err instanceof UngatedSellDirectionError) return 'sell-direction';
+    if (err instanceof UngatedLastLossError) return 'last-loss';
+    if (err instanceof UngatedStaleEntryError) return 'stale-entry';
     return null;
   }
 

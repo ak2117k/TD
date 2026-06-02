@@ -1,4 +1,4 @@
-import { ema, rsi, macd, bollinger, roc, atr, supertrend } from '../indicators';
+import { ema, rsi, macd, bollinger, roc, atr, supertrend, adx } from '../indicators';
 
 describe('indicators', () => {
   describe('ema', () => {
@@ -157,6 +157,66 @@ describe('indicators', () => {
       const r = supertrend(h, l, c, 10, 3);
       expect(r).not.toBeNull();
       expect(r!.direction).toBe('DOWN');
+    });
+  });
+
+  describe('adx', () => {
+    it('returns null when highs.length < 2 * period + 1', () => {
+      const period = 14;
+      const n = 2 * period; // one short of the seed requirement
+      const h = Array.from({ length: n }, (_, i) => 100 + i);
+      const l = Array.from({ length: n }, (_, i) => 99 + i);
+      const c = Array.from({ length: n }, (_, i) => 99.5 + i);
+      expect(adx(h, l, c, period)).toBeNull();
+    });
+
+    it('returns null when arrays have mismatched lengths', () => {
+      const h = Array.from({ length: 30 }, (_, i) => 100 + i);
+      const l = Array.from({ length: 29 }, (_, i) => 99 + i);
+      const c = Array.from({ length: 30 }, (_, i) => 99.5 + i);
+      expect(adx(h, l, c, 14)).toBeNull();
+    });
+
+    it('reports ADX > 25 on a strong uptrend (200 monotonically rising bars)', () => {
+      const n = 200;
+      const h = Array.from({ length: n }, (_, i) => 100 + i);
+      const l = Array.from({ length: n }, (_, i) => 99 + i);
+      const c = Array.from({ length: n }, (_, i) => 99.5 + i);
+      const v = adx(h, l, c, 14);
+      expect(v).not.toBeNull();
+      expect(v!).toBeGreaterThan(25);
+    });
+
+    it('reports ADX < 25 on a flat/choppy series', () => {
+      const n = 200;
+      const closes: number[] = [];
+      const highs: number[] = [];
+      const lows: number[] = [];
+      for (let i = 0; i < n; i++) {
+        const c = i % 2 === 0 ? 100 : 100.5;
+        closes.push(c);
+        highs.push(c + 0.1);
+        lows.push(c - 0.1);
+      }
+      const v = adx(highs, lows, closes, 14);
+      expect(v).not.toBeNull();
+      expect(v!).toBeLessThan(25);
+    });
+
+    it('is pure — same input yields same output', () => {
+      const n = 60;
+      const h = Array.from({ length: n }, (_, i) => 100 + i * 0.5);
+      const l = Array.from({ length: n }, (_, i) => 99 + i * 0.5);
+      const c = Array.from({ length: n }, (_, i) => 99.5 + i * 0.5);
+      const a = adx(h, l, c, 14);
+      const b = adx(h, l, c, 14);
+      expect(a).not.toBeNull();
+      expect(b).not.toBeNull();
+      expect(a!).toBe(b!);
+      // Inputs must not have been mutated.
+      expect(h.length).toBe(n);
+      expect(l.length).toBe(n);
+      expect(c.length).toBe(n);
     });
   });
 });

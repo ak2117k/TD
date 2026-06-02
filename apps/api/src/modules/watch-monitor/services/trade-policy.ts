@@ -4,7 +4,7 @@
  * admitted (R3) and how much capital to deploy (R4). One source of truth.
  */
 
-const MIN_SCORE_NORMAL = 45;
+const MIN_SCORE_NORMAL = 47;
 const MIN_SCORE_STRICT = 75;
 
 const CAPITAL_TIER_1 = 100_000; // score [45,65)

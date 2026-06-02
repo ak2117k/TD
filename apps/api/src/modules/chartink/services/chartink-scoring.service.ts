@@ -2,7 +2,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { NseSectorIndexService } from '../../market-data/services/nse-sector-index.service';
-import { ema, macd, atr, supertrend } from '../../signal-generator/strategies/indicators';
+import { ema, macd, atr, supertrend, rsi, adx } from '../../signal-generator/strategies/indicators';
 
 export type SetupSide = 'BUY' | 'SELL';
 
@@ -42,7 +42,7 @@ export interface ScoringInput {
   /**
    * Optional "as of" timestamp for backtest replay. When set, EVERY
    * historical-candle fetch ends at this instant instead of "now" — so the
-   * 10-check scoring sees only data that existed at `asOf`. When omitted,
+   * scoring sees only data that existed at `asOf`. When omitted,
    * behaviour is byte-identical to live scoring (windows end at `new Date()`).
    */
   asOf?: Date;
@@ -74,7 +74,12 @@ export interface ScoringResult {
 const NIFTY_TOKEN = '99926000';
 const NIFTY_EXCHANGE = 'NSE';
 
-const LOT_BAND_THRESHOLDS = [50, 65, 80] as const;
+// Lot bands under the new 15-check weighting:
+//   MACD-1m (22) + MACD-5m (18) = 40 — neither alone reaches 1 lot.
+//   42 → one more meaningful factor confirms (e.g. VWAP=15 or ADX=12 +
+//   something small). 60 / 75 preserve the original 2-lot / 3-lot shape
+//   relative to the new scored-points total of 100.
+const LOT_BAND_THRESHOLDS = [42, 60, 75] as const;
 
 @Injectable()
 export class ChartinkScoringService {
@@ -86,22 +91,26 @@ export class ChartinkScoringService {
   ) {}
 
   /**
-   * Score a Chartink setup against the 10-check table. Returns score 0-100
-   * plus per-check breakdown. Never throws — failed checks return points=0
-   * with detail.error.
+   * Score a Chartink setup against the 15-check table (10 scored + 5
+   * observability). Returns score 0-100 plus per-check breakdown. Never
+   * throws — failed checks return points=0 with detail.error.
+   *
+   * The 5 observability factors (Sector aligned, Relative strength, Index
+   * aligned, SuperTrend match, S/R room) carry pointsPossible=0 — they still
+   * execute and appear in `checks[]` so the frontend breakdown JSON shape
+   * stays stable, but they contribute 0 to the score sum.
    */
   async score(input: ScoringInput): Promise<ScoringResult> {
     const checks: ScoreCheckResult[] = [];
 
     // Reset the per-scoring-run candle cache. Each (token, exchange, tf) tuple
-    // is fetched at most once per score() call — typical scoring run makes
-    // 8-10 fetches with 3-4 duplicates (e.g. stock 15m used by Sector-RS,
-    // Price-vs-EMA, and SuperTrend). Cache cuts to ~5-6 unique fetches.
+    // is fetched at most once per score() call.
     // Safe because Bull's chartink-process worker runs serially (concurrency=1).
     this.candleCache.clear();
 
     // Run checks sequentially to respect the 350ms broker rate-limit pacer.
-    // Total worst case: 10 * 350ms = ~3.5s per setup. Acceptable for now.
+    // Observability factors first (kept in their historical UI column slots),
+    // then the scored factors.
     checks.push(await this.checkSectorAligned(input));
     await this.sleep(350);
     checks.push(await this.checkRelativeStrength(input));
@@ -114,13 +123,23 @@ export class ChartinkScoringService {
     await this.sleep(350);
     checks.push(await this.checkMacdFiveMin(input));
     await this.sleep(350);
-    checks.push(await this.checkPriceVs20Ema(input));
+    checks.push(await this.checkEma9OverEma20(input));
     await this.sleep(350);
     checks.push(await this.checkSupertrend(input));
     await this.sleep(350);
     checks.push(await this.checkSrRoom(input));
     await this.sleep(350);
     checks.push(await this.checkVolume(input));
+    await this.sleep(350);
+    checks.push(await this.checkVwapRelationship(input));
+    await this.sleep(350);
+    checks.push(await this.checkAdxTrendStrength(input));
+    await this.sleep(350);
+    checks.push(await this.checkRsi5mInZone(input));
+    await this.sleep(350);
+    checks.push(await this.checkAtrTargetFeasibility(input));
+    await this.sleep(350);
+    checks.push(await this.checkMultiDayBreakout(input));
 
     const score = checks.reduce((sum, c) => sum + c.points, 0);
     const lotCount = this.scoreToLotCount(score);
@@ -129,7 +148,7 @@ export class ChartinkScoringService {
   }
 
   /**
-   * Pre-fetch — ONCE each — every historical candle series the 10 checks
+   * Pre-fetch — ONCE each — every historical candle series the checks
    * consume, and return an in-memory {@link ScoringCandleSource} the caller
    * hands to subsequent `score({ candleSource })` calls.
    *
@@ -151,14 +170,12 @@ export class ChartinkScoringService {
    * pure data-access optimisation — scores/checks/dataStarved do not change.
    */
   async prefetch(token: string, symbol: string, exchange: string, from: Date, to: Date): Promise<ScoringCandleSource> {
-    // (timeframe, largest-lookback) the checks consume — see checkMacd* /
-    // checkVolume / the 15m checks. The warmup window for each series is
-    // sized so scoring AT `from` still has this many bars of lookback.
+    // (timeframe, largest-lookback) the checks consume.
     const STOCK_SERIES: Array<{ tf: string; lookback: number }> = [
       { tf: '1m', lookback: 500 }, // checkMacdOneMin
-      { tf: '5m', lookback: 350 }, // checkMacdFiveMin (> checkVolume's 100)
-      { tf: '15m', lookback: 50 }, // all 15m checks (RS uses 22)
-      { tf: '1d', lookback: 300 }, // checkMacdDaily (> checkVolume's 25)
+      { tf: '5m', lookback: 350 }, // checkMacdFiveMin (> checkVolume's 100, > RSI's 50)
+      { tf: '15m', lookback: 50 }, // all 15m checks (RS uses 22, ADX/ATR use 50)
+      { tf: '1d', lookback: 300 }, // checkMacdDaily (> checkVolume's 25, breakout's 25)
     ];
 
     const store = new Map<string, Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>>();
@@ -208,13 +225,17 @@ export class ChartinkScoringService {
    *     insufficient-candles guards in the checks below.
    *   - `error` carrying the throttle marker from the adapter (task 2:
    *     AngelThrottleError) or a generic candle-fetch failure.
+   *   - `no session candles` — asOf falls outside trading hours / before
+   *     the first session bar; treated as data-availability, not signal.
    */
   private static readonly DATA_STARVED_REASONS = [
     'insufficient candles',
     'insufficient sector candles',
     'insufficient nifty candles',
     'insufficient candles for atr',
+    'insufficient candles for adx',
     'insufficient daily candles',
+    'no session candles',
   ];
 
   private isCheckDataStarved(c: ScoreCheckResult): boolean {
@@ -254,7 +275,7 @@ export class ChartinkScoringService {
 
   private async checkSectorAligned(input: ScoringInput): Promise<ScoreCheckResult> {
     const name = 'Sector aligned';
-    const pointsPossible = 10;
+    const pointsPossible = 0;
     const sectorToken = await this.nseSectors.getSectorIndexForSymbol(input.symbol);
     if (!sectorToken) {
       return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'no sector mapping' } };
@@ -294,7 +315,7 @@ export class ChartinkScoringService {
    */
   private async checkRelativeStrength(input: ScoringInput): Promise<ScoreCheckResult> {
     const name = 'Relative strength';
-    const pointsPossible = 10;
+    const pointsPossible = 0;
     const sectorToken = await this.nseSectors.getSectorIndexForSymbol(input.symbol);
     if (!sectorToken) {
       return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'no sector mapping' } };
@@ -333,7 +354,7 @@ export class ChartinkScoringService {
 
   private async checkIndexAligned(input: ScoringInput): Promise<ScoreCheckResult> {
     const name = 'Index aligned';
-    const pointsPossible = 20;
+    const pointsPossible = 0;
     if (input.token === NIFTY_TOKEN) {
       return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'setup is on the index itself' } };
     }
@@ -404,12 +425,12 @@ export class ChartinkScoringService {
   // converge. Per-timeframe bar counts (1d→300, 1m→500, 5m→350) — see
   // checkMacdAtTf. macd() itself is correct, just starved on short windows.
   //
-  // Point weights (1d→5, 5m→10, 1m→10) favour the intraday timeframes that
-  // matter most for Chartink intraday setups; the daily MACD is a softer
-  // confirmation. The three weights sum to 25, keeping the table at 100.
-  private checkMacdDaily(input: ScoringInput) { return this.checkMacdAtTf(input, '1d', 5, 300); }
-  private checkMacdOneMin(input: ScoringInput) { return this.checkMacdAtTf(input, '1m', 10, 500); }
-  private checkMacdFiveMin(input: ScoringInput) { return this.checkMacdAtTf(input, '5m', 10, 350); }
+  // Point weights (1d→3, 5m→18, 1m→22) heavily favour the intraday timeframes
+  // — they are the load-bearing factors under the new 15-check table. The
+  // three MACD weights sum to 43, the largest single-indicator allocation.
+  private checkMacdDaily(input: ScoringInput) { return this.checkMacdAtTf(input, '1d', 3, 300); }
+  private checkMacdOneMin(input: ScoringInput) { return this.checkMacdAtTf(input, '1m', 22, 500); }
+  private checkMacdFiveMin(input: ScoringInput) { return this.checkMacdAtTf(input, '5m', 18, 350); }
 
   /**
    * Fast/slow EMA cross check on 15m candles. Compares the 9-EMA against the
@@ -417,11 +438,10 @@ export class ChartinkScoringService {
    * trend (this also covers the moment of a fresh upward cross).
    *   BUY  passes iff ema9 > ema20
    *   SELL passes iff ema9 < ema20
-   * Name kept as 'Price vs 20-EMA' — the frontend factor columns key on it.
    */
-  private async checkPriceVs20Ema(input: ScoringInput): Promise<ScoreCheckResult> {
-    const name = 'Price vs 20-EMA';
-    const pointsPossible = 10;
+  private async checkEma9OverEma20(input: ScoringInput): Promise<ScoreCheckResult> {
+    const name = 'EMA9 over EMA20';
+    const pointsPossible = 3;
     try {
       const candles = await this.fetch15mCandles(input.token, input.exchange, 50, input.asOf, input.candleSource);
       const closes = candles.map((c) => c.close);
@@ -445,7 +465,7 @@ export class ChartinkScoringService {
 
   private async checkSupertrend(input: ScoringInput): Promise<ScoreCheckResult> {
     const name = 'SuperTrend match';
-    const pointsPossible = 10;
+    const pointsPossible = 0;
     try {
       // SuperTrend is a recursive carrying-band indicator — its finalUpper/
       // finalLower bands and direction carry forward bar by bar, so a short
@@ -476,7 +496,7 @@ export class ChartinkScoringService {
 
   private async checkSrRoom(input: ScoringInput): Promise<ScoreCheckResult> {
     const name = 'S/R room';
-    const pointsPossible = 10;
+    const pointsPossible = 0;
     const lb = input.setupContext?.levelBookSnapshot;
     if (!lb) {
       return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'no level book' } };
@@ -514,23 +534,214 @@ export class ChartinkScoringService {
     }
   }
 
+  /**
+   * Time-adjusted intraday volume confirmation. Pro-rates the 20-day average
+   * daily volume by the fraction of the session elapsed (0-1) and passes
+   * when today's volume so far has run > 1.2x that pro-rata expectation.
+   */
   private async checkVolume(input: ScoringInput): Promise<ScoreCheckResult> {
     const name = 'Volume confirmation';
-    const pointsPossible = 5;
+    const pointsPossible = 7;
     try {
+      // Fetch today's 5m candles and the last ~20 daily candles for baseline.
       const todayCandles = await this.fetchCandles(input.token, input.exchange, '5m', 100, input.asOf, input.candleSource);
       const dailyCandles = await this.fetchCandles(input.token, input.exchange, '1d', 25, input.asOf, input.candleSource);
       if (dailyCandles.length < 20) {
         return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient daily candles' } };
       }
-      const todayVol = todayCandles.reduce((sum, c) => sum + (c.volume || 0), 0);
-      const avgDaily = dailyCandles.slice(-20).reduce((s, c) => s + (c.volume || 0), 0) / 20;
-      if (avgDaily === 0) {
+
+      // Restrict today's candles to the most recent session only — anything
+      // older than (asOf - 9 hours) belongs to a prior session.
+      const asOfEffective = input.asOf ?? new Date();
+      const sessionStart = new Date(asOfEffective.getTime() - 9 * 60 * 60 * 1000);
+      const sessionCandles = todayCandles.filter((c) => c.timestamp.getTime() >= sessionStart.getTime());
+      if (sessionCandles.length === 0) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'no session candles' } };
+      }
+
+      const volSoFar = sessionCandles.reduce((s, c) => s + (c.volume || 0), 0);
+      const avgDaily20 = dailyCandles.slice(-20).reduce((s, c) => s + (c.volume || 0), 0) / 20;
+      if (avgDaily20 === 0) {
         return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'avg daily volume zero' } };
       }
-      const ratio = todayVol / avgDaily;
+
+      // NSE session is 9:15 to 15:30 IST = 375 minutes. Pro-rata expected
+      // volume = avg-daily × (minutes elapsed / 375). Compute minutes elapsed
+      // from the first session candle to now (or asOf).
+      const minutesElapsed = Math.max(1,
+        Math.round((asOfEffective.getTime() - sessionCandles[0].timestamp.getTime()) / 60000),
+      );
+      const expectedSoFar = avgDaily20 * Math.min(1, minutesElapsed / 375);
+      const ratio = volSoFar / Math.max(expectedSoFar, 1);
       const passed = ratio > 1.2;
-      return { name, points: passed ? pointsPossible : 0, pointsPossible, passed, detail: { todayVol, avgDaily, ratio } };
+      return {
+        name, points: passed ? pointsPossible : 0, pointsPossible, passed,
+        detail: { volSoFar, expectedSoFar: Math.round(expectedSoFar), ratio: +ratio.toFixed(2), minutesElapsed },
+      };
+    } catch (err) {
+      return { name, points: 0, pointsPossible, passed: false, detail: { error: errMsg(err) } };
+    }
+  }
+
+  /**
+   * VWAP relationship — entry must sit on the right side of today's
+   * volume-weighted average price.
+   *   BUY  passes iff entryPrice > vwap   (buying above intraday fair value)
+   *   SELL passes iff entryPrice < vwap   (selling below intraday fair value)
+   * VWAP = Σ(typical_price × volume) / Σ(volume) over today's session bars,
+   * with typical_price = (high + low + close) / 3 per 5m bar.
+   */
+  private async checkVwapRelationship(input: ScoringInput): Promise<ScoreCheckResult> {
+    const name = 'VWAP relationship';
+    const pointsPossible = 15;
+    try {
+      const todayCandles = await this.fetchCandles(input.token, input.exchange, '5m', 100, input.asOf, input.candleSource);
+      const asOfEffective = input.asOf ?? new Date();
+      const sessionStart = new Date(asOfEffective.getTime() - 9 * 60 * 60 * 1000);
+      const sessionCandles = todayCandles.filter((c) => c.timestamp.getTime() >= sessionStart.getTime());
+      if (sessionCandles.length === 0) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'no session candles' } };
+      }
+      let pvSum = 0;
+      let volSum = 0;
+      for (const c of sessionCandles) {
+        const typical = (c.high + c.low + c.close) / 3;
+        const v = c.volume || 0;
+        pvSum += typical * v;
+        volSum += v;
+      }
+      if (volSum === 0) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'zero session volume' } };
+      }
+      const vwap = pvSum / volSum;
+      const passed = input.side === 'BUY' ? input.entryPrice > vwap : input.entryPrice < vwap;
+      return {
+        name, points: passed ? pointsPossible : 0, pointsPossible, passed,
+        detail: { vwap: +vwap.toFixed(2), entryPrice: input.entryPrice, sessionBars: sessionCandles.length },
+      };
+    } catch (err) {
+      return { name, points: 0, pointsPossible, passed: false, detail: { error: errMsg(err) } };
+    }
+  }
+
+  /**
+   * ADX trend strength on 15m candles — momentum entries work best when the
+   * market is genuinely trending. Pass when adx(14) > 22.
+   */
+  private async checkAdxTrendStrength(input: ScoringInput): Promise<ScoreCheckResult> {
+    const name = 'ADX trend strength';
+    const pointsPossible = 12;
+    try {
+      const candles = await this.fetch15mCandles(input.token, input.exchange, 50, input.asOf, input.candleSource);
+      const highs = candles.map((c) => c.high);
+      const lows = candles.map((c) => c.low);
+      const closes = candles.map((c) => c.close);
+      const value = adx(highs, lows, closes, 14);
+      if (value === null) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient candles for adx' } };
+      }
+      const passed = value > 22;
+      return {
+        name, points: passed ? pointsPossible : 0, pointsPossible, passed,
+        detail: { adx: +value.toFixed(2) },
+      };
+    } catch (err) {
+      return { name, points: 0, pointsPossible, passed: false, detail: { error: errMsg(err) } };
+    }
+  }
+
+  /**
+   * RSI on 5m candles must be in a healthy momentum zone — not so cold the
+   * move has no fuel, not so hot we're chasing a blow-off top.
+   *   BUY  passes iff rsi ∈ [45, 70]
+   *   SELL passes iff rsi ∈ [30, 55]
+   */
+  private async checkRsi5mInZone(input: ScoringInput): Promise<ScoreCheckResult> {
+    const name = 'RSI on 5m';
+    const pointsPossible = 10;
+    try {
+      const candles = await this.fetchCandles(input.token, input.exchange, '5m', 50, input.asOf, input.candleSource);
+      const closes = candles.map((c) => c.close);
+      const value = rsi(closes, 14);
+      if (value === null) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient candles' } };
+      }
+      const passed = input.side === 'BUY'
+        ? value >= 45 && value <= 70
+        : value >= 30 && value <= 55;
+      return {
+        name, points: passed ? pointsPossible : 0, pointsPossible, passed,
+        detail: { rsi: +value.toFixed(2) },
+      };
+    } catch (err) {
+      return { name, points: 0, pointsPossible, passed: false, detail: { error: errMsg(err) } };
+    }
+  }
+
+  /**
+   * ATR target feasibility on 15m candles — the stock must move enough per
+   * bar to give a reasonable target room before its stop is hit. Pass when
+   * atr(20) / entry_price >= 0.4%.
+   */
+  private async checkAtrTargetFeasibility(input: ScoringInput): Promise<ScoreCheckResult> {
+    const name = 'ATR target feasibility';
+    const pointsPossible = 5;
+    try {
+      const candles = await this.fetch15mCandles(input.token, input.exchange, 50, input.asOf, input.candleSource);
+      if (candles.length < 25) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient candles for atr' } };
+      }
+      const highs = candles.map((c) => c.high);
+      const lows = candles.map((c) => c.low);
+      const closes = candles.map((c) => c.close);
+      const atrVal = atr(highs, lows, closes, 20);
+      if (atrVal === null || atrVal <= 0) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'atr null/zero' } };
+      }
+      if (input.entryPrice <= 0) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'entry price non-positive' } };
+      }
+      const atrPct = atrVal / input.entryPrice;
+      const passed = atrPct >= 0.004;
+      return {
+        name, points: passed ? pointsPossible : 0, pointsPossible, passed,
+        detail: { atr: +atrVal.toFixed(2), atrPct },
+      };
+    } catch (err) {
+      return { name, points: 0, pointsPossible, passed: false, detail: { error: errMsg(err) } };
+    }
+  }
+
+  /**
+   * Multi-day breakout confirmation — entry should be at or very near the
+   * 20-day extreme of the trade's direction.
+   *   BUY  passes iff entry >= 0.98 × max(last 20 daily highs)
+   *   SELL passes iff entry <= 1.02 × min(last 20 daily lows)
+   */
+  private async checkMultiDayBreakout(input: ScoringInput): Promise<ScoreCheckResult> {
+    const name = 'Multi-day breakout confirmation';
+    const pointsPossible = 5;
+    try {
+      const dailyCandles = await this.fetchCandles(input.token, input.exchange, '1d', 25, input.asOf, input.candleSource);
+      if (dailyCandles.length < 20) {
+        return { name, points: 0, pointsPossible, passed: false, detail: { reason: 'insufficient daily candles' } };
+      }
+      const last20 = dailyCandles.slice(-20);
+      const highs20 = Math.max(...last20.map((c) => c.high));
+      const lows20 = Math.min(...last20.map((c) => c.low));
+      let passed: boolean;
+      let ratio: number;
+      if (input.side === 'BUY') {
+        ratio = highs20 === 0 ? 0 : input.entryPrice / highs20;
+        passed = ratio >= 0.98;
+      } else {
+        ratio = lows20 === 0 ? Infinity : input.entryPrice / lows20;
+        passed = ratio <= 1.02;
+      }
+      return {
+        name, points: passed ? pointsPossible : 0, pointsPossible, passed,
+        detail: { highs20: +highs20.toFixed(2), lows20: +lows20.toFixed(2), ratio: +ratio.toFixed(4) },
+      };
     } catch (err) {
       return { name, points: 0, pointsPossible, passed: false, detail: { error: errMsg(err) } };
     }
@@ -593,7 +804,7 @@ export class ChartinkScoringService {
     // Closed-only candle policy: the newest candle returned by the broker is
     // the currently-forming (partial) bar. Broker charts (Angel One / Groww /
     // TradingView) compute indicators on CLOSED candles, so we drop the
-    // forming bar before any check sees the data — making all 10 checks
+    // forming bar before any check sees the data — making all checks
     // consistent and removing a one-bar lookahead in backtest (`asOf`)
     // scoring. `slice(0, -1)` on a 0/1-element array yields [] — the checks
     // already treat [] as insufficient, so this is safe.

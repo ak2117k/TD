@@ -36,7 +36,7 @@ describe('ChartinkScoringService', () => {
 
   describe('scoreToLotCount', () => {
     it.each([
-      [0, 0], [49, 0], [50, 1], [64, 1], [65, 2], [79, 2], [80, 3], [100, 3],
+      [0, 0], [41, 0], [42, 1], [59, 1], [60, 2], [74, 2], [75, 3], [100, 3],
     ])('score=%d → %d lots', (score, expected) => {
       expect(service.scoreToLotCount(score)).toBe(expected);
     });
@@ -70,25 +70,33 @@ describe('ChartinkScoringService', () => {
       }));
     }
 
-    it('all checks rising → strong score with 10 checks (RELIANCE has sector mapping)', async () => {
+    it('all checks rising → 15 checks emitted (10 scored + 5 observability)', async () => {
       // 400 bars: enough warm-up for the MACD checks (>=120) and the 5m
       // SuperTrend check (>=120) to converge on this fixture.
       mockAdapter.getHistoricalData.mockResolvedValue(rising(400, 100, 0.5));
       const result = await service.score(baseInput);
-      // With identical stock+sector data: Sector passes (10), RS fails — RS=0
-      // doesn't satisfy strict > 0 (0). Index passes (20), Price vs EMA9>EMA20
-      // (10), ST UP (10), S/R fails — no level book (0), Vol passes (5). The
-      // MACD checks resolve on a constant-slope ramp where macd === signal
-      // (flat histogram → neither green nor red, strict comparison fails).
-      expect(result.score).toBeGreaterThanOrEqual(50);
-      expect(result.lotCount).toBeGreaterThanOrEqual(1);
-      expect(result.checks.length).toBe(10);
+      // The new table has 15 checks. Under the new weighting the 5 historical
+      // gates are observability-only (pointsPossible=0). On a constant-slope
+      // ramp the MACD line equals the signal line exactly (flat histogram →
+      // neither strictly green nor red), so all three MACD factors fail. The
+      // 9/20 EMA-cross still passes (3 pts). RSI on a steep ramp pegs near
+      // 100 — outside [45,70] → fails. ADX on a clean ramp gets the
+      // direction right and trips above 22 → passes (12 pts). ATR/price on a
+      // ramp that runs 100→300 with step 0.5: ATR ≈ 1 → atrPct ≈ 0.0005,
+      // well below 0.004 → fails. Breakout: entry 2880 >> max-high 300 →
+      // ratio >> 0.98 → passes (5 pts). VWAP / Volume use today's session
+      // window (now - 9h); the fixture timestamps are from 2026-04-12 → no
+      // session candles → both fail (data-starved). Net floor ≈ 3 + 12 + 5
+      // = 20 pts. Make the assertion a meaningful lower bound.
+      expect(result.checks.length).toBe(15);
+      expect(result.score).toBeGreaterThanOrEqual(15);
     });
 
     it('all checks falling on BUY setup → low score', async () => {
       mockAdapter.getHistoricalData.mockResolvedValue(falling(60, 100, 0.5));
       const result = await service.score(baseInput);
-      expect(result.score).toBeLessThan(50);
+      expect(result.checks.length).toBe(15);
+      expect(result.score).toBeLessThan(42);
       expect(result.lotCount).toBe(0);
     });
 
@@ -110,7 +118,7 @@ describe('ChartinkScoringService', () => {
         .mockRejectedValueOnce(new Error('Angel timeout'))
         .mockResolvedValue(rising(60, 100, 0.5));
       const result = await service.score(baseInput);
-      expect(result.checks.length).toBe(10);
+      expect(result.checks.length).toBe(15);
       const sector = result.checks.find((c) => c.name === 'Sector aligned');
       expect(sector?.detail?.error).toBe('Angel timeout');
     });
@@ -131,7 +139,7 @@ describe('ChartinkScoringService', () => {
       }));
     }
 
-    it('BUY: stock outperforming sector → RS check passes', async () => {
+    it('BUY: stock outperforming sector → RS check passes (observability-only, 0 pts)', async () => {
       // Stock rises faster (step 1.0) than sector (step 0.2)
       // RELIANCE token = '2885', sector token = '99926019' (NIFTY ENERGY)
       const stockBars = rising(30, 100, 1.0);
@@ -144,7 +152,9 @@ describe('ChartinkScoringService', () => {
       const result = await service.score(buyInput);
       const rs = result.checks.find((c) => c.name === 'Relative strength');
       expect(rs?.passed).toBe(true);
-      expect(rs?.points).toBe(10);
+      // Observability-only: pointsPossible is 0 so a pass also awards 0.
+      expect(rs?.points).toBe(0);
+      expect(rs?.pointsPossible).toBe(0);
       expect((rs?.detail?.rs as number)).toBeGreaterThan(0);
     });
 
@@ -162,7 +172,7 @@ describe('ChartinkScoringService', () => {
       expect((rs?.detail?.rs as number)).toBeLessThan(0);
     });
 
-    it('SELL: stock underperforming sector → RS check passes', async () => {
+    it('SELL: stock underperforming sector → RS check passes (observability-only, 0 pts)', async () => {
       // Stock rises slower than sector — stock is relatively weak → SELL passes
       const stockBars = rising(30, 100, 0.1);
       const sectorBars = rising(30, 100, 1.0);
@@ -172,7 +182,9 @@ describe('ChartinkScoringService', () => {
       const result = await service.score(sellInput);
       const rs = result.checks.find((c) => c.name === 'Relative strength');
       expect(rs?.passed).toBe(true);
-      expect(rs?.points).toBe(10);
+      // Observability-only.
+      expect(rs?.points).toBe(0);
+      expect(rs?.pointsPossible).toBe(0);
     });
 
     it('no sector mapping → RS check fails with reason: "no sector mapping"', async () => {
@@ -185,7 +197,7 @@ describe('ChartinkScoringService', () => {
     });
   });
 
-  describe('Price vs 20-EMA check (9-EMA / 20-EMA comparison)', () => {
+  describe('EMA9 over EMA20 check', () => {
     const buyInput: ScoringInput = {
       token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
       entryPrice: 2880, setupContext: null,
@@ -207,35 +219,35 @@ describe('ChartinkScoringService', () => {
       }));
     }
 
-    it('rising closes → EMA9 > EMA20 → BUY passes (10 pts), SELL fails', async () => {
+    it('rising closes → EMA9 > EMA20 → BUY passes (3 pts), SELL fails', async () => {
       // On a rising series the shorter 9-EMA lags less than the 20-EMA,
       // so EMA9 sits above EMA20 → BUY passes, SELL fails.
       mockAdapter.getHistoricalData.mockResolvedValue(rising(60, 100, 0.5));
       const buyResult = await service.score(buyInput);
-      const buyCheck = buyResult.checks.find((c) => c.name === 'Price vs 20-EMA');
+      const buyCheck = buyResult.checks.find((c) => c.name === 'EMA9 over EMA20');
       expect(buyCheck?.passed).toBe(true);
-      expect(buyCheck?.points).toBe(10);
-      expect(buyCheck?.pointsPossible).toBe(10);
+      expect(buyCheck?.points).toBe(3);
+      expect(buyCheck?.pointsPossible).toBe(3);
       expect(buyCheck?.detail?.ema9 as number).toBeGreaterThan(buyCheck?.detail?.ema20 as number);
 
       const sellResult = await service.score(sellInput);
-      const sellCheck = sellResult.checks.find((c) => c.name === 'Price vs 20-EMA');
+      const sellCheck = sellResult.checks.find((c) => c.name === 'EMA9 over EMA20');
       expect(sellCheck?.passed).toBe(false);
       expect(sellCheck?.points).toBe(0);
     });
 
-    it('falling closes → EMA9 < EMA20 → SELL passes (10 pts), BUY fails', async () => {
+    it('falling closes → EMA9 < EMA20 → SELL passes (3 pts), BUY fails', async () => {
       // On a falling series the 9-EMA tracks the drop faster than the
       // 20-EMA, so EMA9 sits below EMA20 → SELL passes, BUY fails.
       mockAdapter.getHistoricalData.mockResolvedValue(falling(60, 100, 0.5));
       const sellResult = await service.score(sellInput);
-      const sellCheck = sellResult.checks.find((c) => c.name === 'Price vs 20-EMA');
+      const sellCheck = sellResult.checks.find((c) => c.name === 'EMA9 over EMA20');
       expect(sellCheck?.passed).toBe(true);
-      expect(sellCheck?.points).toBe(10);
+      expect(sellCheck?.points).toBe(3);
       expect(sellCheck?.detail?.ema9 as number).toBeLessThan(sellCheck?.detail?.ema20 as number);
 
       const buyResult = await service.score(buyInput);
-      const buyCheck = buyResult.checks.find((c) => c.name === 'Price vs 20-EMA');
+      const buyCheck = buyResult.checks.find((c) => c.name === 'EMA9 over EMA20');
       expect(buyCheck?.passed).toBe(false);
       expect(buyCheck?.points).toBe(0);
     });
@@ -245,18 +257,18 @@ describe('ChartinkScoringService', () => {
       // remain → ema(closes, 20) returns null → insufficient candles.
       mockAdapter.getHistoricalData.mockResolvedValue(rising(15, 100, 0.5));
       const result = await service.score(buyInput);
-      const check = result.checks.find((c) => c.name === 'Price vs 20-EMA');
+      const check = result.checks.find((c) => c.name === 'EMA9 over EMA20');
       expect(check?.passed).toBe(false);
       expect(check?.points).toBe(0);
       expect(check?.detail?.reason).toBe('insufficient candles');
     });
 
-    it('keeps the factor name "Price vs 20-EMA" and pointsPossible 10', async () => {
+    it('uses the factor name "EMA9 over EMA20" with pointsPossible 3', async () => {
       mockAdapter.getHistoricalData.mockResolvedValue(rising(60, 100, 0.5));
       const result = await service.score(buyInput);
-      const check = result.checks.find((c) => c.name === 'Price vs 20-EMA');
+      const check = result.checks.find((c) => c.name === 'EMA9 over EMA20');
       expect(check).toBeDefined();
-      expect(check?.pointsPossible).toBe(10);
+      expect(check?.pointsPossible).toBe(3);
     });
   });
 
@@ -352,7 +364,7 @@ describe('ChartinkScoringService', () => {
       const macdDaily = result.checks.find((c) => c.name === 'MACD on 1d')!;
       expect(macdDaily.passed).toBe(true);
       expect(macdDaily.detail?.aboveZero).toBe(true);
-      expect(macdDaily.points).toBe(5);
+      expect(macdDaily.points).toBe(3);
     });
 
     it('BUY fails when MACD green but BELOW zero (recovering downtrend)', async () => {
@@ -382,7 +394,7 @@ describe('ChartinkScoringService', () => {
       const macdDaily = result.checks.find((c) => c.name === 'MACD on 1d')!;
       expect(macdDaily.passed).toBe(true);
       expect(macdDaily.detail?.belowZero).toBe(true);
-      expect(macdDaily.points).toBe(5);
+      expect(macdDaily.points).toBe(3);
     });
 
     it('SELL fails when MACD red but ABOVE zero (cooling uptrend)', async () => {
@@ -405,15 +417,15 @@ describe('ChartinkScoringService', () => {
       expect(macdDaily.detail?.belowZero).toBe(false);
     });
 
-    it('MACD factor weights: 1d→5, 5m→10, 1m→10 pointsPossible', async () => {
+    it('MACD factor weights: 1d→3, 5m→18, 1m→22 pointsPossible', async () => {
       mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(strongUp(400)));
       const result = await service.score(buyInput);
       const macd1d = result.checks.find((c) => c.name === 'MACD on 1d');
       const macd5m = result.checks.find((c) => c.name === 'MACD on 5m');
       const macd1m = result.checks.find((c) => c.name === 'MACD on 1m');
-      expect(macd1d?.pointsPossible).toBe(5);
-      expect(macd5m?.pointsPossible).toBe(10);
-      expect(macd1m?.pointsPossible).toBe(10);
+      expect(macd1d?.pointsPossible).toBe(3);
+      expect(macd5m?.pointsPossible).toBe(18);
+      expect(macd1m?.pointsPossible).toBe(22);
     });
 
     it('all three MACD checks request the longer warmup window worth of history', async () => {
@@ -482,22 +494,24 @@ describe('ChartinkScoringService', () => {
       expect(spanDays).toBeGreaterThanOrEqual(11);
     });
 
-    it('BUY passes when 5m SuperTrend direction is UP (10 pts)', async () => {
+    it('BUY passes when 5m SuperTrend direction is UP (observability-only, 0 pts)', async () => {
       mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(upCloses(400)));
       const result = await service.score(buyInput);
       const st = result.checks.find((c) => c.name === 'SuperTrend match')!;
       expect(st.detail?.direction).toBe('UP');
       expect(st.passed).toBe(true);
-      expect(st.points).toBe(10);
+      expect(st.points).toBe(0);
+      expect(st.pointsPossible).toBe(0);
     });
 
-    it('SELL passes when 5m SuperTrend direction is DOWN (10 pts)', async () => {
+    it('SELL passes when 5m SuperTrend direction is DOWN (observability-only, 0 pts)', async () => {
       mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(downCloses(400)));
       const result = await service.score(sellInput);
       const st = result.checks.find((c) => c.name === 'SuperTrend match')!;
       expect(st.detail?.direction).toBe('DOWN');
       expect(st.passed).toBe(true);
-      expect(st.points).toBe(10);
+      expect(st.points).toBe(0);
+      expect(st.pointsPossible).toBe(0);
     });
 
     it('SuperTrend reads the 5m series — uses 5m direction even when 15m disagrees', async () => {
@@ -513,7 +527,8 @@ describe('ChartinkScoringService', () => {
       const st = result.checks.find((c) => c.name === 'SuperTrend match')!;
       expect(st.detail?.direction).toBe('UP');
       expect(st.passed).toBe(true);
-      expect(st.points).toBe(10);
+      // Observability-only — pass still yields 0 pts.
+      expect(st.points).toBe(0);
     });
 
     it('insufficient 5m candles → fails with reason "insufficient candles"', async () => {
@@ -813,6 +828,292 @@ describe('ChartinkScoringService', () => {
       expect(tuples).toContain('99926000:NSE:15m');
       // No mapping was resolvable, so nothing other than NIFTY on a non-stock token.
       expect(tuples.filter((t: string) => t.startsWith('999260') && t !== '99926000:NSE:15m')).toEqual([]);
+    });
+  });
+
+  // ─── New scored factor: VWAP relationship ───────────────────────────────
+  describe('VWAP relationship check', () => {
+    // Build a session of 5m bars ending at `end`. Each bar's typical price is
+    // close ± a small high/low band; volume is uniform. With ascending
+    // closes the mean typical price (≈ vwap on uniform volume) is at the
+    // midpoint of the close range.
+    function sessionBars(end: Date, count: number, startPrice: number, step: number) {
+      return Array.from({ length: count }, (_, i) => {
+        const close = startPrice + i * step;
+        const ts = new Date(end.getTime() - (count - 1 - i) * 5 * 60_000);
+        return {
+          timestamp: ts,
+          open: close, high: close + 0.5, low: close - 0.5, close, volume: 1000,
+        };
+      });
+    }
+
+    it('BUY passes when entry price is above today\'s VWAP', async () => {
+      const asOf = new Date(Date.UTC(2026, 4, 22, 9, 30)); // mid-session
+      // 50 5m bars ascending 100→124.5 → VWAP ~ midpoint of close range ~112
+      const bars = sessionBars(asOf, 50, 100, 0.5);
+      mockAdapter.getHistoricalData.mockResolvedValue(bars);
+      const input: ScoringInput = {
+        token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
+        entryPrice: 200, setupContext: null, asOf,
+      };
+      const result = await service.score(input);
+      const vwap = result.checks.find((c) => c.name === 'VWAP relationship')!;
+      expect(vwap.passed).toBe(true);
+      expect(vwap.points).toBe(15);
+      expect(vwap.pointsPossible).toBe(15);
+      expect(vwap.detail?.vwap as number).toBeLessThan(input.entryPrice);
+    });
+
+    it('BUY fails when entry price is below VWAP', async () => {
+      const asOf = new Date(Date.UTC(2026, 4, 22, 9, 30));
+      const bars = sessionBars(asOf, 50, 100, 0.5);
+      mockAdapter.getHistoricalData.mockResolvedValue(bars);
+      const input: ScoringInput = {
+        token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
+        entryPrice: 50, setupContext: null, asOf,
+      };
+      const result = await service.score(input);
+      const vwap = result.checks.find((c) => c.name === 'VWAP relationship')!;
+      expect(vwap.passed).toBe(false);
+      expect(vwap.points).toBe(0);
+    });
+
+    it('returns reason "no session candles" when no bars fall inside the session window', async () => {
+      // No asOf supplied → asOfEffective = new Date(). The fixture timestamps
+      // are from 2026-04-12 — well before the session window (now - 9h).
+      mockAdapter.getHistoricalData.mockResolvedValue(
+        Array.from({ length: 50 }, (_, i) => ({
+          timestamp: new Date(Date.UTC(2026, 3, 12, 0, i * 5)),
+          open: 100, high: 100.5, low: 99.5, close: 100, volume: 1000,
+        })),
+      );
+      const input: ScoringInput = {
+        token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
+        entryPrice: 200, setupContext: null,
+      };
+      const result = await service.score(input);
+      const vwap = result.checks.find((c) => c.name === 'VWAP relationship')!;
+      expect(vwap.passed).toBe(false);
+      expect(vwap.detail?.reason).toBe('no session candles');
+    });
+  });
+
+  // ─── New scored factor: ADX trend strength ──────────────────────────────
+  describe('ADX trend strength check', () => {
+    function candlesFromCloses(closes: number[]) {
+      return closes.map((c, i) => ({
+        timestamp: new Date(Date.UTC(2026, 4, 12, 0, i)),
+        open: c, high: c + 0.5, low: c - 0.5, close: c, volume: 1000,
+      }));
+    }
+
+    it('passes on a strong trending series (adx > 22)', async () => {
+      // A steeply rising series produces a high ADX — directional movement
+      // dominates true range.
+      const closes = Array.from({ length: 80 }, (_, i) => 100 + i * 2);
+      mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(closes));
+      const input: ScoringInput = {
+        token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
+        entryPrice: 200, setupContext: null,
+      };
+      const result = await service.score(input);
+      const a = result.checks.find((c) => c.name === 'ADX trend strength')!;
+      expect(a.passed).toBe(true);
+      expect(a.points).toBe(12);
+      expect(a.pointsPossible).toBe(12);
+      expect(a.detail?.adx as number).toBeGreaterThan(22);
+    });
+
+    it('fails on a flat series (adx ≈ 0)', async () => {
+      // Constant closes → no directional movement → ADX 0.
+      const closes = Array.from({ length: 80 }, () => 100);
+      mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(closes));
+      const input: ScoringInput = {
+        token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
+        entryPrice: 200, setupContext: null,
+      };
+      const result = await service.score(input);
+      const a = result.checks.find((c) => c.name === 'ADX trend strength')!;
+      expect(a.passed).toBe(false);
+      expect(a.points).toBe(0);
+    });
+
+    it('returns reason "insufficient candles for adx" when not enough bars', async () => {
+      // Need >= 2*14+1 = 29 bars after the closed-only drop. 20 supplied → 19
+      // closed → adx() returns null.
+      const closes = Array.from({ length: 20 }, (_, i) => 100 + i);
+      mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(closes));
+      const input: ScoringInput = {
+        token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
+        entryPrice: 200, setupContext: null,
+      };
+      const result = await service.score(input);
+      const a = result.checks.find((c) => c.name === 'ADX trend strength')!;
+      expect(a.passed).toBe(false);
+      expect(a.detail?.reason).toBe('insufficient candles for adx');
+    });
+  });
+
+  // ─── New scored factor: RSI on 5m in zone ───────────────────────────────
+  describe('RSI on 5m check', () => {
+    function candlesFromCloses(closes: number[]) {
+      return closes.map((c, i) => ({
+        timestamp: new Date(Date.UTC(2026, 4, 12, 0, i)),
+        open: c, high: c + 0.5, low: c - 0.5, close: c, volume: 1000,
+      }));
+    }
+
+    it('BUY passes when rsi is in the [45, 70] zone (moderately rising series)', async () => {
+      // A mildly rising series with small wobbles keeps RSI in a balanced
+      // mid-range. We use a sequence that ends with a recent mix of
+      // up/down moves to keep RSI in the mid range.
+      const closes: number[] = [];
+      let p = 100;
+      for (let i = 0; i < 80; i++) {
+        // Net upward drift with periodic pullbacks → RSI stays in 45-70.
+        p += i % 3 === 0 ? -0.5 : 0.6;
+        closes.push(p);
+      }
+      mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(closes));
+      const input: ScoringInput = {
+        token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
+        entryPrice: 200, setupContext: null,
+      };
+      const result = await service.score(input);
+      const r = result.checks.find((c) => c.name === 'RSI on 5m')!;
+      const rsiVal = r.detail?.rsi as number;
+      expect(rsiVal).toBeGreaterThanOrEqual(45);
+      expect(rsiVal).toBeLessThanOrEqual(70);
+      expect(r.passed).toBe(true);
+      expect(r.points).toBe(10);
+      expect(r.pointsPossible).toBe(10);
+    });
+
+    it('BUY fails when rsi is overbought (> 70) on a sharp accelerating uptrend', async () => {
+      // Continuous strong up-only moves → no losses in the Wilder window → RSI → 100.
+      const closes = Array.from({ length: 80 }, (_, i) => 100 + i * 3);
+      mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(closes));
+      const input: ScoringInput = {
+        token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
+        entryPrice: 200, setupContext: null,
+      };
+      const result = await service.score(input);
+      const r = result.checks.find((c) => c.name === 'RSI on 5m')!;
+      expect(r.detail?.rsi as number).toBeGreaterThan(70);
+      expect(r.passed).toBe(false);
+      expect(r.points).toBe(0);
+    });
+
+    it('BUY fails when rsi is oversold (< 45) on a sharply falling series', async () => {
+      const closes = Array.from({ length: 80 }, (_, i) => 1000 - i * 3);
+      mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(closes));
+      const input: ScoringInput = {
+        token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
+        entryPrice: 200, setupContext: null,
+      };
+      const result = await service.score(input);
+      const r = result.checks.find((c) => c.name === 'RSI on 5m')!;
+      expect(r.detail?.rsi as number).toBeLessThan(45);
+      expect(r.passed).toBe(false);
+      expect(r.points).toBe(0);
+    });
+  });
+
+  // ─── New scored factor: ATR target feasibility ──────────────────────────
+  describe('ATR target feasibility check', () => {
+    it('passes when atr/entryPrice >= 0.4%', async () => {
+      // Volatile bars: each 15m bar swings about 2 around a ~100 close →
+      // ATR around 2-3 → atrPct on entry 100 ≈ 0.02-0.03, well above 0.004.
+      const candles = Array.from({ length: 60 }, (_, i) => ({
+        timestamp: new Date(Date.UTC(2026, 4, 12, 0, i)),
+        open: 100, high: 102, low: 98, close: 100 + (i % 2 === 0 ? 1 : -1), volume: 1000,
+      }));
+      mockAdapter.getHistoricalData.mockResolvedValue(candles);
+      const input: ScoringInput = {
+        token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
+        entryPrice: 100, setupContext: null,
+      };
+      const result = await service.score(input);
+      const a = result.checks.find((c) => c.name === 'ATR target feasibility')!;
+      expect(a.passed).toBe(true);
+      expect(a.points).toBe(5);
+      expect(a.pointsPossible).toBe(5);
+      expect(a.detail?.atrPct as number).toBeGreaterThanOrEqual(0.004);
+    });
+
+    it('fails when atr/entryPrice < 0.4% (very low volatility, expensive stock)', async () => {
+      // Tiny intraday range vs a high entry price → atrPct tiny.
+      const candles = Array.from({ length: 60 }, (_, i) => ({
+        timestamp: new Date(Date.UTC(2026, 4, 12, 0, i)),
+        open: 10000, high: 10000.05, low: 9999.95, close: 10000, volume: 1000,
+      }));
+      mockAdapter.getHistoricalData.mockResolvedValue(candles);
+      const input: ScoringInput = {
+        token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
+        entryPrice: 10000, setupContext: null,
+      };
+      const result = await service.score(input);
+      const a = result.checks.find((c) => c.name === 'ATR target feasibility')!;
+      expect(a.passed).toBe(false);
+      expect(a.points).toBe(0);
+      expect(a.detail?.atrPct as number).toBeLessThan(0.004);
+    });
+  });
+
+  // ─── New scored factor: multi-day breakout confirmation ─────────────────
+  describe('Multi-day breakout confirmation check', () => {
+    function candlesFromCloses(closes: number[]) {
+      return closes.map((c, i) => ({
+        timestamp: new Date(Date.UTC(2026, 4, 12, 0, i)),
+        open: c, high: c + 0.5, low: c - 0.5, close: c, volume: 1000,
+      }));
+    }
+
+    it('BUY passes when entry is within 2% of the 20d max-high', async () => {
+      // Rising daily series with closes 100→125, highs slightly above. Entry
+      // at the top → entry/highs20 ≈ 1.0 → >= 0.98.
+      const closes = Array.from({ length: 30 }, (_, i) => 100 + i);
+      mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(closes));
+      const input: ScoringInput = {
+        token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
+        // After closed-only + slice(-20) the highs20 max is ~128.5 (close+0.5).
+        entryPrice: 128, setupContext: null,
+      };
+      const result = await service.score(input);
+      const b = result.checks.find((c) => c.name === 'Multi-day breakout confirmation')!;
+      expect(b.passed).toBe(true);
+      expect(b.points).toBe(5);
+      expect(b.pointsPossible).toBe(5);
+      expect(b.detail?.ratio as number).toBeGreaterThanOrEqual(0.98);
+    });
+
+    it('BUY fails when entry sits well below the 20d max-high', async () => {
+      const closes = Array.from({ length: 30 }, (_, i) => 100 + i);
+      mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(closes));
+      const input: ScoringInput = {
+        token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
+        entryPrice: 80, setupContext: null,
+      };
+      const result = await service.score(input);
+      const b = result.checks.find((c) => c.name === 'Multi-day breakout confirmation')!;
+      expect(b.passed).toBe(false);
+      expect(b.points).toBe(0);
+      expect(b.detail?.ratio as number).toBeLessThan(0.98);
+    });
+
+    it('returns reason "insufficient daily candles" when fewer than 20 daily bars', async () => {
+      // 15 bars → 14 closed → < 20 → reason emitted.
+      const closes = Array.from({ length: 15 }, (_, i) => 100 + i);
+      mockAdapter.getHistoricalData.mockResolvedValue(candlesFromCloses(closes));
+      const input: ScoringInput = {
+        token: '2885', symbol: 'RELIANCE', exchange: 'NSE', side: 'BUY',
+        entryPrice: 120, setupContext: null,
+      };
+      const result = await service.score(input);
+      const b = result.checks.find((c) => c.name === 'Multi-day breakout confirmation')!;
+      expect(b.passed).toBe(false);
+      expect(b.detail?.reason).toBe('insufficient daily candles');
     });
   });
 });

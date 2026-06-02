@@ -6,7 +6,10 @@ export type UngatedRejectionReason =
   | 'position-cap'
   | 'symbol-dup'
   | 'cooldown'
-  | 'kill-switch';
+  | 'kill-switch'
+  | 'sell-direction'
+  | 'last-loss'
+  | 'stale-entry';
 
 export interface UngatedRecordRejectionInput {
   alertId: string | null;

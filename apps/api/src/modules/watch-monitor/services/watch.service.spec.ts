@@ -1,6 +1,6 @@
 import { Test } from '@nestjs/testing';
 import { Logger } from '@nestjs/common';
-import { WatchService, WatchCapExceededError, TradeCooldownError, TRADE_COOLDOWN_MS } from './watch.service';
+import { WatchService, WatchCapExceededError, TradeCooldownError, TradeSellDirectionError, TRADE_COOLDOWN_MS } from './watch.service';
 import { WatchRepository } from '../repositories/watch.repository';
 import { TargetCalculatorService } from './target-calculator.service';
 import { StrikeSelectorService } from './strike-selector.service';
@@ -35,6 +35,7 @@ describe('WatchService.createFromAlert', () => {
       createEntry: jest.fn().mockResolvedValue({ id: 'w1', token: '11536' }),
       createEvent: jest.fn().mockResolvedValue({ id: 'e1' }),
       wasTokenExecutedSince: jest.fn().mockResolvedValue(false),
+      getLastClosedPnlForToken: jest.fn().mockResolvedValue(null),
     };
     target = { compute: jest.fn().mockReturnValue({ target: 4150, source: 'indicator-sr' }) };
     strike = { pick: jest.fn().mockResolvedValue(null) };
@@ -99,7 +100,7 @@ describe('WatchService.createFromAlert', () => {
     repo.findById = jest.fn().mockResolvedValue({
       id: 'w1', token: '11536', symbol: 'TCS-EQ', side: 'BUY',
       status: 'WATCHING', initialPrice: 4000, initialBreakdown: { lotCount: 1 },
-      optionsToken: null, optionsLotSize: null,
+      optionsToken: null, optionsLotSize: null, profitTarget: 4150,
     });
     repo.update = jest.fn().mockResolvedValue({});
     mockTrade.executeTrade = jest.fn().mockRejectedValue(
@@ -151,6 +152,13 @@ describe('WatchService.createFromAlert', () => {
     expect(repo.createEntry).not.toHaveBeenCalled();
   });
 
+  it('rejects SELL-direction alerts (BUY-only gate)', async () => {
+    await expect(svc.createFromAlert({ ...baseInput, side: 'SELL' }))
+      .rejects.toBeInstanceOf(TradeSellDirectionError);
+    expect(repo.findActiveBySetupId).not.toHaveBeenCalled();
+    expect(repo.createEntry).not.toHaveBeenCalled();
+  });
+
   it('proceeds to create when no active entry exists for token (both dedups miss)', async () => {
     repo.findActiveBySetupId.mockResolvedValue(null);
     repo.findActiveByToken.mockResolvedValue([]); // no active watch for this token
@@ -158,7 +166,7 @@ describe('WatchService.createFromAlert', () => {
     expect(repo.createEntry).toHaveBeenCalled();
   });
 
-  it('rejects a symbol traded within the last 30 minutes (R2 cooldown)', async () => {
+  it('rejects a symbol traded within the last 45 minutes (R2 cooldown)', async () => {
     repo.findActiveBySetupId.mockResolvedValue(null);
     repo.findActiveByToken.mockResolvedValue([]);
     repo.wasTokenExecutedSince.mockResolvedValue(true);
@@ -167,7 +175,7 @@ describe('WatchService.createFromAlert', () => {
       TradeCooldownError,
     );
     expect(repo.createEntry).not.toHaveBeenCalled();
-    // the `since` argument must be ~30 min before now
+    // the `since` argument must be ~45 min before now
     const passedSince: Date = repo.wasTokenExecutedSince.mock.calls[0][1];
     expect(passedSince.getTime()).toBeCloseTo(Date.now() - TRADE_COOLDOWN_MS, -3); // +/-1s
   });
@@ -176,7 +184,7 @@ describe('WatchService.createFromAlert', () => {
     await svc.createFromAlert(baseInput);
     expect(repo.createEntry).toHaveBeenCalledWith(expect.objectContaining({
       symbol: 'TCS-EQ', side: 'BUY', initialPrice: 4000, initialScore: 72,
-      profitTarget: 4150, profitTargetSource: 'indicator-sr', stopLossScore: 50,
+      profitTarget: 4150, profitTargetSource: 'indicator-sr', stopLossScore: 45,
     }));
     expect(repo.createEvent).toHaveBeenCalledWith(expect.objectContaining({
       watchEntryId: 'w1', eventType: 'INITIAL', price: 4000, score: 72,
@@ -267,8 +275,8 @@ describe('WatchService.createFromAlert', () => {
     // The sized order value must never exceed the per-trade risk cap.
     repo.findById = jest.fn().mockResolvedValue({
       id: 'w1', token: '11536', symbol: 'BLUECHIP-EQ', side: 'BUY',
-      status: 'WATCHING', initialPrice: 2000, initialBreakdown: { lotCount: 1 },
-      optionsToken: null, optionsLotSize: null, profitTarget: 2100,
+      status: 'WATCHING', initialPrice: 4000, initialBreakdown: { lotCount: 1 },
+      optionsToken: null, optionsLotSize: null, profitTarget: 4150,
     });
     repo.update = jest.fn().mockResolvedValue({});
     mockTrade.executeTrade = jest.fn().mockResolvedValue({ id: 'pt1', entryPrice: 2000 });
@@ -307,7 +315,7 @@ describe('WatchService.createFromAlert', () => {
     repo.findById = jest.fn().mockResolvedValue({
       id: 'w1', token: '11536', symbol: 'TCS-EQ', side: 'BUY',
       status: 'WATCHING', initialPrice: 4000, initialBreakdown: { lotCount: 1 },
-      optionsToken: null, optionsLotSize: null,
+      optionsToken: null, optionsLotSize: null, profitTarget: 4150,
     });
     repo.update = jest.fn().mockResolvedValue({});
     mockTrade.executeTrade = jest.fn().mockRejectedValue(
