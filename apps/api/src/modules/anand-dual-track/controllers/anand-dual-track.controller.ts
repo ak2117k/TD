@@ -1,7 +1,12 @@
 import { Body, Controller, Get, NotFoundException, Param, Patch, Query } from '@nestjs/common';
+import { IsNotEmpty, IsString } from 'class-validator';
 import { AnandDualTrackRepository } from '../repositories/anand-dual-track.repository';
 import { ChartinkRepository } from '../../chartink/repositories/chartink.repository';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
+
+class UpdateCategoryDto {
+  @IsString() @IsNotEmpty() category!: string;
+}
 
 @Controller('api/anand')
 export class AnandDualTrackController {
@@ -52,7 +57,7 @@ export class AnandDualTrackController {
   @Patch('scanners/:id/category')
   async tagScanner(
     @Param('id') id: string,
-    @Body() body: { category: string },
+    @Body() body: UpdateCategoryDto,
   ) {
     const updated = await this.chartinkRepo.updateScannerCategory(id, body.category);
     if (!updated) throw new NotFoundException(`Scanner ${id} not found`);

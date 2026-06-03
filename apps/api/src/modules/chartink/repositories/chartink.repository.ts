@@ -164,8 +164,11 @@ export class ChartinkRepository {
         data: { category },
         select: { id: true, category: true },
       });
-    } catch {
-      return null;
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
+        return null;
+      }
+      throw err;
     }
   }
 
