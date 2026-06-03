@@ -474,6 +474,7 @@ model ChartinkScanner {
   firstSeenAt  DateTime         @default(now())
   lastFiredAt  DateTime?
   fireCount    Int              @default(0)
+  category     String           @default("OTHER")
   alerts       ChartinkAlert[]
 
   @@map("chartink_scanners")
@@ -753,4 +754,44 @@ model UngatedRejection {
   @@index([createdAt])
   @@index([reason])
   @@map("ungated_rejections")
+}
+
+// ============================================
+// Anand Dual-Track Analysis Logs
+// ============================================
+
+model IntradayEntry {
+  id             String    @id @default(cuid())
+  symbol         String
+  token          String?
+  entryPrice     Float
+  enteredAt      DateTime  @default(now())
+  targetPct      Float     @default(5.0)
+  stopPct        Float     @default(5.0)
+  status         String    @default("WATCHING")
+  exitPrice      Float?
+  exitedAt       DateTime?
+  alertId        String
+  scoreBreakdown Json?
+
+  @@index([status, enteredAt])
+  @@map("intraday_entries")
+}
+
+model SwingEntry {
+  id             String    @id @default(cuid())
+  symbol         String
+  token          String?
+  entryPrice     Float
+  enteredAt      DateTime  @default(now())
+  targetPct      Float     @default(10.0)
+  stopPct        Float     @default(10.0)
+  status         String    @default("WATCHING")
+  exitPrice      Float?
+  exitedAt       DateTime?
+  alertId        String
+  scoreBreakdown Json?
+
+  @@index([status, enteredAt])
+  @@map("swing_entries")
 }
