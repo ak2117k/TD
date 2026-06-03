@@ -12,12 +12,15 @@ import { ChartinkProcessWorker } from './workers/chartink-process.worker';
 import { ChartinkWebhookController } from './controllers/chartink-webhook.controller';
 import { ChartinkController } from './controllers/chartink.controller';
 import { UngatedTrackModule } from '../ungated-track/ungated-track.module';
+import { AnandDualTrackModule } from '../anand-dual-track/anand-dual-track.module';
 
 // @Global so ChartinkRepository and ChartinkScoringService are injectable
 // without consumers importing this module — avoids the circular dep that would
 // form if WatchMonitorModule imported ChartinkModule AND ChartinkModule
 // imported WatchMonitorModule.  WatchMonitorModule is @Global() so WatchService
 // is already visible to ChartinkProcessService without an explicit import here.
+// AnandDualTrackModule does NOT import ChartinkModule (relies on global providers)
+// so this import is safe (no circular dep).
 @Global()
 @Module({
   imports: [
@@ -25,6 +28,7 @@ import { UngatedTrackModule } from '../ungated-track/ungated-track.module';
     MarketDataModule,
     SignalGeneratorModule,
     UngatedTrackModule,
+    AnandDualTrackModule,
     BullModule.registerQueue({ name: 'chartink-process' }),
   ],
   controllers: [ChartinkWebhookController, ChartinkController],

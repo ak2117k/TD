@@ -8,11 +8,12 @@ import { WatchService, WatchCapExceededError, TradeCooldownError } from '../../w
 import { formatTradeRejection } from '../../../common/utils/trade-rejection-log';
 import { isWithinEntryWindow } from '../../../common/utils/market-hours';
 import { evaluateTradePolicy } from '../../watch-monitor/services/trade-policy';
-import { UngatedWatchService, UngatedSymbolDupError, UngatedCooldownError, UngatedSellDirectionError, UngatedLastLossError, UngatedStaleEntryError } from '../../ungated-track/services/ungated-watch.service';
+import { UngatedWatchService, UngatedSymbolDupError, UngatedCooldownError, UngatedSellDirectionError, UngatedLastLossError, UngatedStaleEntryError, UngatedNoQuoteError } from '../../ungated-track/services/ungated-watch.service';
 import { UngatedRejectionRepository, UngatedRejectionReason } from '../../ungated-track/repositories/ungated-rejection.repository';
 import {
   UngatedCapitalExhaustedError, UngatedPositionCapError, UngatedKillSwitchError,
 } from '../../ungated-track/services/ungated-paper-account.service';
+import { AnandDualTrackService } from '../../anand-dual-track/services/anand-dual-track.service';
 
 interface Hit {
   symbol: string;
@@ -58,17 +59,20 @@ export class ChartinkProcessService {
     private readonly watch: WatchService,
     private readonly ungatedWatch: UngatedWatchService,
     private readonly ungatedRejections: UngatedRejectionRepository,
+    private readonly anandDualTrack: AnandDualTrackService,
   ) {}
 
   async processAlert(alertId: string, hits: Hit[]): Promise<void> {
     this.logger.log(`Processing Chartink alert ${alertId} — ${hits.length} hits`);
-    // Resolve the Chartink scanner name once so every [trade-rejected] line
+    // Resolve the Chartink scanner name and category once so every [trade-rejected] line
     // can show which scan the stock came from. Best-effort — a lookup failure
     // must not block processing.
     let scanName: string | undefined;
+    let scannerCategory: string | undefined;
     try {
       const alert = await this.repo.getAlertWithSetups(alertId);
       scanName = alert?.scanner?.scanName ?? undefined;
+      scannerCategory = (alert?.scanner as any)?.category ?? undefined;
     } catch (err) {
       this.logger.warn(
         `could not resolve scanner name for alert ${alertId}: ${err instanceof Error ? err.message : err}`,
@@ -76,7 +80,7 @@ export class ChartinkProcessService {
     }
     for (let i = 0; i < hits.length; i++) {
       try {
-        await this.processOne(alertId, hits[i], scanName);
+        await this.processOne(alertId, hits[i], scanName, scannerCategory);
       } catch (err) {
         this.logger.warn(
           `processOne unexpected throw for ${hits[i].symbol}: ${err instanceof Error ? err.message : err}`,
@@ -111,7 +115,7 @@ export class ChartinkProcessService {
     else this.logger.log(line);
   }
 
-  async processOne(alertId: string, hit: Hit, scanName?: string): Promise<void> {
+  async processOne(alertId: string, hit: Hit, scanName?: string, scannerCategory?: string): Promise<void> {
     // === 0. ENTRY-WINDOW GATE (15:00 IST cutoff) ===
     // No new WATCHING entry may be opened after 15:00 IST (or before 09:15,
     // or on a weekend). Reject BEFORE any symbol resolution / scoring / broker
@@ -360,6 +364,22 @@ export class ChartinkProcessService {
         this.logger.warn(`[ungated] ${hit.symbol}: ${err instanceof Error ? err.message : err}`);
       }
     }
+
+    // === 6. ANAND DUAL TRACK — runs for ANAND_SWING scanners after scoring.
+    // Independent try/catch: failures here MUST NOT affect gated or ungated paths.
+    if (scannerCategory === 'ANAND_SWING') {
+      try {
+        await this.anandDualTrack.createEntries({
+          alertId,
+          symbol: hit.symbol,
+          token: instrument.token,
+          hitPrice: hit.hitPrice,
+          scoreBreakdown: scoringResult.checks,
+        });
+      } catch (err) {
+        this.logger.warn(`[anand-dual-track] createEntries failed for ${hit.symbol}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
   }
 
   private mapUngatedError(err: unknown): UngatedRejectionReason | null {
@@ -371,6 +391,7 @@ export class ChartinkProcessService {
     if (err instanceof UngatedSellDirectionError) return 'sell-direction';
     if (err instanceof UngatedLastLossError) return 'last-loss';
     if (err instanceof UngatedStaleEntryError) return 'stale-entry';
+    if (err instanceof UngatedNoQuoteError) return 'no-quote';
     return null;
   }
 

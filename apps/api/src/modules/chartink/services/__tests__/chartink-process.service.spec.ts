@@ -14,6 +14,7 @@ import { UngatedRejectionRepository } from '../../../ungated-track/repositories/
 import {
   UngatedCapitalExhaustedError, UngatedPositionCapError, UngatedKillSwitchError,
 } from '../../../ungated-track/services/ungated-paper-account.service';
+import { AnandDualTrackService } from '../../../anand-dual-track/services/anand-dual-track.service';
 
 /** A 5-min-MACD score-check entry, for exercising the MACD entry gate. */
 const macd5mCheck = (passed: boolean) => ({
@@ -44,6 +45,7 @@ describe('ChartinkProcessService', () => {
   let watchSvc: { createFromAlert: jest.Mock };
   let ungatedWatch: { createFromAlert: jest.Mock };
   let ungatedRejections: { record: jest.Mock };
+  let anandDualTrack: { createEntries: jest.Mock };
 
   // Default happy-path candles — 50 bars trending UP, enough for classifyTrend
   const UP_CANDLES = makeTrendingCloses('UP', 50).map((close) => ({ close, timestamp: new Date(), open: close, high: close, low: close, volume: 1000 }));
@@ -79,6 +81,7 @@ describe('ChartinkProcessService', () => {
     watchSvc = { createFromAlert: jest.fn().mockResolvedValue({ id: 'w1' }) };
     ungatedWatch = { createFromAlert: jest.fn().mockResolvedValue({ id: 'uw1' }) };
     ungatedRejections = { record: jest.fn().mockResolvedValue(undefined) };
+    anandDualTrack = { createEntries: jest.fn().mockResolvedValue(undefined) };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -92,6 +95,7 @@ describe('ChartinkProcessService', () => {
         { provide: WatchService, useValue: watchSvc },
         { provide: UngatedWatchService, useValue: ungatedWatch },
         { provide: UngatedRejectionRepository, useValue: ungatedRejections },
+        { provide: AnandDualTrackService, useValue: anandDualTrack },
       ],
     }).compile();
 
