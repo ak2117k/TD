@@ -775,6 +775,7 @@ model IntradayEntry {
   scoreBreakdown Json?
 
   @@index([status, enteredAt])
+  @@index([alertId])
   @@map("intraday_entries")
 }
 
@@ -793,5 +794,6 @@ model SwingEntry {
   scoreBreakdown Json?
 
   @@index([status, enteredAt])
+  @@index([alertId])
   @@map("swing_entries")
 }
