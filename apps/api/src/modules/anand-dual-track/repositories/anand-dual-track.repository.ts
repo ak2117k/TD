@@ -142,29 +142,32 @@ export class AnandDualTrackRepository {
   }
 
   async getPnlSummary(track: 'intraday' | 'swing'): Promise<PnlSummary> {
-    const now = new Date();
-    const startOf = (offsetDays: number) => {
-      const d = new Date(now);
-      d.setDate(d.getDate() - offsetDays);
-      d.setHours(0, 0, 0, 0);
-      return d;
+    // IST midnight N days ago. IST = UTC+05:30; this matches the pattern in
+    // UngatedRejectionRepository which pins the offset rather than using the
+    // process-local timezone (the server runs UTC in production).
+    const istMidnightDaysAgo = (days: number): Date => {
+      const now = new Date();
+      const istNow = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+      istNow.setUTCHours(0, 0, 0, 0);
+      istNow.setUTCDate(istNow.getUTCDate() - days);
+      return new Date(istNow.getTime() - 5.5 * 60 * 60 * 1000);
     };
+
+    // Fetch only the last year at the DB level — avoids loading the full
+    // history into memory on mature datasets.
+    const yearStart = istMidnightDaysAgo(365);
+    const exitStatuses =
+      track === 'intraday'
+        ? ['TARGET_HIT', 'STOPPED', 'EXPIRED']
+        : ['TARGET_HIT', 'STOPPED'];
 
     const exits = await (track === 'intraday'
       ? this.prisma.intradayEntry.findMany({
-          where: {
-            status: { in: ['TARGET_HIT', 'STOPPED', 'EXPIRED'] },
-            exitedAt: { not: null },
-            exitPrice: { not: null },
-          },
+          where: { status: { in: exitStatuses }, exitedAt: { gte: yearStart }, exitPrice: { not: null } },
           select: { exitedAt: true, entryPrice: true, exitPrice: true },
         })
       : this.prisma.swingEntry.findMany({
-          where: {
-            status: { in: ['TARGET_HIT', 'STOPPED'] },
-            exitedAt: { not: null },
-            exitPrice: { not: null },
-          },
+          where: { status: { in: exitStatuses }, exitedAt: { gte: yearStart }, exitPrice: { not: null } },
           select: { exitedAt: true, entryPrice: true, exitPrice: true },
         }));
 
@@ -180,16 +183,11 @@ export class AnandDualTrackRepository {
       return { avgExitPct: sum / rows.length, count: rows.length, winCount: wins };
     };
 
-    const daily = exits.filter(r => r.exitedAt! >= startOf(1));
-    const weekly = exits.filter(r => r.exitedAt! >= startOf(7));
-    const monthly = exits.filter(r => r.exitedAt! >= startOf(30));
-    const yearly = exits.filter(r => r.exitedAt! >= startOf(365));
-
     return {
-      daily: compute(daily),
-      weekly: compute(weekly),
-      monthly: compute(monthly),
-      yearly: compute(yearly),
+      daily: compute(exits.filter(r => r.exitedAt! >= istMidnightDaysAgo(1))),
+      weekly: compute(exits.filter(r => r.exitedAt! >= istMidnightDaysAgo(7))),
+      monthly: compute(exits.filter(r => r.exitedAt! >= istMidnightDaysAgo(30))),
+      yearly: compute(exits),
     };
   }
 }
