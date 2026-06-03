@@ -22,6 +22,8 @@ import {
   ChevronLeft,
   ChevronRight,
   GitCompareArrows,
+  Timer,
+  TrendingUp,
 } from 'lucide-react';
 import type { NavItem } from '@/types';
 
@@ -35,6 +37,8 @@ const navItems: NavItem[] = [
   { path: '/chartink', label: 'Chartink', icon: Radio },
   { path: '/watch', label: 'Watch', icon: Eye },
   { path: '/ungated-watch', label: 'Ungated Watch', icon: GitCompareArrows, badge: 'EXP' },
+  { path: '/intraday', label: 'Intraday', icon: Timer },
+  { path: '/swing', label: 'Swing', icon: TrendingUp },
   { path: '/auto-trade', label: 'Auto-Trade', icon: Bot },
   { path: '/positions', label: 'Positions', icon: Briefcase },
   { path: '/news', label: 'News', icon: Newspaper },
