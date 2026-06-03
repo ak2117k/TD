@@ -154,6 +154,21 @@ export class ChartinkRepository {
     });
   }
 
+  async updateScannerCategory(
+    id: string,
+    category: string,
+  ): Promise<{ id: string; category: string } | null> {
+    try {
+      return await this.prisma.chartinkScanner.update({
+        where: { id },
+        data: { category },
+        select: { id: true, category: true },
+      });
+    } catch {
+      return null;
+    }
+  }
+
   async findChartinkSourceForSetup(setupId: string) {
     const row = await this.prisma.chartinkAlertSetup.findFirst({
       where: { setupId },
