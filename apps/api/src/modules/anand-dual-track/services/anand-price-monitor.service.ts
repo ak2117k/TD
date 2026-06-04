@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { AnandDualTrackRepository } from '../repositories/anand-dual-track.repository';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
+import { supertrend } from '../../signal-generator/strategies/indicators';
 
 @Injectable()
 export class AnandPriceMonitorService {
@@ -20,7 +21,7 @@ export class AnandPriceMonitorService {
       this.repo.listWatchingSwing(),
     ]);
 
-    await this.checkEntries(intraday, 'intraday');
+    await this.checkIntraday(intraday as any);
     await this.checkEntries(swing, 'swing');
   }
 
@@ -84,6 +85,92 @@ export class AnandPriceMonitorService {
 
     const swing = await this.repo.listWatchingSwing();
     await this.checkEntries(swing, 'swing');
+  }
+
+  private static readonly TRAIL_GIVEBACK = 0.02; // 2% give-back fallback
+
+  /**
+   * Pure trailing decision for one intraday entry.
+   * @param stLine current Supertrend(10,3) 15m line value, or null if unavailable
+   */
+  static decideIntradayTrail(
+    entry: { entryPrice: number; targetPct: number; stopPct: number; trailing: boolean; peakPrice: number | null },
+    ltp: number,
+    stLine: number | null,
+  ):
+    | { action: 'HOLD'; peakPrice: number }
+    | { action: 'ARM_TRAIL'; peakPrice: number }
+    | { action: 'STOP' }
+    | { action: 'EXIT'; exitReason: 'TRAIL_ST' | 'TRAIL_GB'; peakPrice: number } {
+    const pnlPct = ((ltp - entry.entryPrice) / entry.entryPrice) * 100;
+
+    if (!entry.trailing) {
+      if (pnlPct >= entry.targetPct) return { action: 'ARM_TRAIL', peakPrice: ltp };
+      if (pnlPct <= -entry.stopPct) return { action: 'STOP' };
+      return { action: 'HOLD', peakPrice: ltp };
+    }
+
+    const peak = Math.max(entry.peakPrice ?? ltp, ltp);
+    if (stLine != null) {
+      if (ltp < stLine) return { action: 'EXIT', exitReason: 'TRAIL_ST', peakPrice: peak };
+      return { action: 'HOLD', peakPrice: peak };
+    }
+    // Fallback: 2% give-back from the running peak.
+    if (ltp <= peak * (1 - AnandPriceMonitorService.TRAIL_GIVEBACK)) {
+      return { action: 'EXIT', exitReason: 'TRAIL_GB', peakPrice: peak };
+    }
+    return { action: 'HOLD', peakPrice: peak };
+  }
+
+  /** Latest Supertrend(10,3) line on 15m candles, or null if not enough data. */
+  private async supertrend15m(token: string): Promise<number | null> {
+    const to = new Date();
+    const from = new Date(to.getTime() - 6 * 24 * 60 * 60 * 1000); // ~6 calendar days
+    const candles = await this.adapter
+      .getHistoricalData(token, 'NSE', '15m', from, to)
+      .catch(() => [] as any[]);
+    if (!Array.isArray(candles) || candles.length < 11) return null;
+    const highs = candles.map((c) => Number(c.high));
+    const lows = candles.map((c) => Number(c.low));
+    const closes = candles.map((c) => Number(c.close));
+    const st = supertrend(highs, lows, closes, 10, 3);
+    return st ? st.value : null;
+  }
+
+  /** Intraday checking with trailing. Replaces the generic path for intraday. */
+  private async checkIntraday(
+    entries: Array<{ id: string; token: string | null; entryPrice: number; targetPct: number; stopPct: number; trailing: boolean; peakPrice: number | null }>,
+  ): Promise<void> {
+    const withToken = entries.filter((e) => e.token);
+    if (withToken.length === 0) return;
+    const tokens = [...new Set(withToken.map((e) => e.token as string))];
+    const ltpMap = await this.adapter.getLtpsBatch('NSE', tokens).catch(() => new Map<string, number>());
+    const now = new Date();
+
+    for (const entry of withToken) {
+      const ltp = ltpMap.get(entry.token as string);
+      if (ltp === undefined) continue;
+
+      // Only fetch candles when the entry is (or is about to be) trailing —
+      // keeps rate-limited candle calls to a minimum.
+      const pnlPct = ((ltp - entry.entryPrice) / entry.entryPrice) * 100;
+      const willTrail = entry.trailing || pnlPct >= entry.targetPct;
+      const stLine = entry.trailing && willTrail ? await this.supertrend15m(entry.token as string) : null;
+
+      const d = AnandPriceMonitorService.decideIntradayTrail(entry, ltp, stLine);
+      if (d.action === 'STOP') {
+        this.logger.log(`[anand-intraday] ${entry.id} STOPPED at ${ltp} (${pnlPct.toFixed(2)}%)`);
+        await this.repo.updateIntradayStatus(entry.id, { status: 'STOPPED', exitPrice: ltp, exitedAt: now });
+      } else if (d.action === 'ARM_TRAIL') {
+        this.logger.log(`[anand-intraday] ${entry.id} reached +${pnlPct.toFixed(2)}% — arming trail`);
+        await this.repo.setIntradayTrailing(entry.id, { trailing: true, peakPrice: d.peakPrice });
+      } else if (d.action === 'EXIT') {
+        this.logger.log(`[anand-intraday] ${entry.id} TARGET_HIT via ${d.exitReason} at ${ltp} (+${pnlPct.toFixed(2)}%)`);
+        await this.repo.updateIntradayStatus(entry.id, { status: 'TARGET_HIT', exitPrice: ltp, exitedAt: now, exitReason: d.exitReason });
+      } else if (entry.trailing && d.peakPrice > (entry.peakPrice ?? 0)) {
+        await this.repo.setIntradayTrailing(entry.id, { trailing: true, peakPrice: d.peakPrice });
+      }
+    }
   }
 
   private async checkEntries(

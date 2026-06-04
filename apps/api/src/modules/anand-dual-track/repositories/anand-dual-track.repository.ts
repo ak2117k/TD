@@ -16,6 +16,7 @@ export interface UpdateStatusInput {
   status: string;
   exitPrice?: number;
   exitedAt?: Date;
+  exitReason?: string;
 }
 
 export interface ListEntriesFilter {
@@ -134,6 +135,10 @@ export class AnandDualTrackRepository {
 
   async updateSwingStatus(id: string, data: UpdateStatusInput): Promise<void> {
     await this.prisma.swingEntry.update({ where: { id }, data });
+  }
+
+  async setIntradayTrailing(id: string, data: { trailing: boolean; peakPrice: number }): Promise<void> {
+    await this.prisma.intradayEntry.update({ where: { id }, data });
   }
 
   async findActiveTradedBySymbol(
