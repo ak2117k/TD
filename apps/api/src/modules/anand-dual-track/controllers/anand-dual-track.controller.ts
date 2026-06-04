@@ -27,7 +27,8 @@ export class AnandDualTrackController {
       from: from ? new Date(from) : undefined,
       to: to ? new Date(to) : undefined,
     });
-    return this.enrichWithLivePrice(entries);
+    const enriched = await this.enrichWithLivePrice(entries);
+    return this.enrichWithScannerName(enriched);
   }
 
   @Get('swing/entries')
@@ -41,7 +42,8 @@ export class AnandDualTrackController {
       from: from ? new Date(from) : undefined,
       to: to ? new Date(to) : undefined,
     });
-    return this.enrichWithLivePrice(entries);
+    const enriched = await this.enrichWithLivePrice(entries);
+    return this.enrichWithScannerName(enriched);
   }
 
   @Get('intraday/pnl-summary')
@@ -78,5 +80,16 @@ export class AnandDualTrackController {
       const targetLeftPct = e.targetPct - pnlPct;
       return { ...e, currentPrice, pnlPct, targetLeftPct };
     });
+  }
+
+  private async enrichWithScannerName<T extends { alertId?: string | null; [key: string]: unknown }>(
+    entries: T[],
+  ): Promise<Array<T & { scannerName: string | null }>> {
+    const alertIds = entries.map((e) => e.alertId).filter((id): id is string => !!id);
+    const scannerMap = await this.repo.findScannerNamesByAlertIds(alertIds).catch(() => new Map<string, string>());
+    return entries.map((e) => ({
+      ...e,
+      scannerName: (e.alertId ? scannerMap.get(e.alertId) : undefined) ?? null,
+    }));
   }
 }
