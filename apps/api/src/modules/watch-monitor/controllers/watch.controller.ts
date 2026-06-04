@@ -62,6 +62,7 @@ export class WatchController {
       const trade = await this.watch.executeEntry(id, {
         mode: body.mode,
         quantityOverride: body.quantity,
+        force: body.force,
       });
       return { trade, entryId: id };
     } catch (err) {

@@ -594,6 +594,11 @@ model WatchEntry {
   remainingQty          Int?       // shares still open and trailing
   trailingHighWater     Float?     // most favorable price seen since partial exit
   trailingStopPrice     Float?     // current stop level (updates as high-water moves)
+  // Two-strike stop-hunt guard: counts consecutive WS ticks where LTP
+  // breaches the hard SL threshold. Exit fires only on the 2nd consecutive
+  // breach. Resets to 0 when price recovers above the SL level between ticks.
+  // Run `npx prisma db push` from the project root after this schema change.
+  slBreachCount         Int      @default(0)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   events                WatchEvent[]
@@ -666,6 +671,12 @@ model UngatedWatchEntry {
   remainingQty          Int?
   trailingHighWater     Float?
   trailingStopPrice     Float?
+  // Two-strike stop-hunt guard: counts consecutive 30s polls where LTP
+  // breaches the hard SL threshold. Exit fires only on the 2nd consecutive
+  // breach (slBreachCount reaches 1 after first poll, exits on second poll).
+  // Resets to 0 when price recovers above the SL level between polls.
+  // Run `npx prisma db push` from the project root after this schema change.
+  slBreachCount         Int      @default(0)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   events                UngatedWatchEvent[]

@@ -71,10 +71,10 @@
       ]
     },
     "moduleNameMapper": {
-      "^@td/shared/types$": "<rootDir>/../node_modules/@td/shared/dist/types/index.js",
-      "^@td/shared/constants$": "<rootDir>/../node_modules/@td/shared/dist/constants/index.js",
-      "^@td/shared/utils$": "<rootDir>/../node_modules/@td/shared/dist/utils/index.js",
-      "^@td/shared$": "<rootDir>/../node_modules/@td/shared/dist/index.js"
+      "^@td/shared/types$": "<rootDir>/../../../packages/shared/src/types/index.ts",
+      "^@td/shared/constants$": "<rootDir>/../../../packages/shared/src/constants/index.ts",
+      "^@td/shared/utils$": "<rootDir>/../../../packages/shared/src/utils/index.ts",
+      "^@td/shared$": "<rootDir>/../../../packages/shared/src/index.ts"
     },
     "testEnvironment": "node"
   }

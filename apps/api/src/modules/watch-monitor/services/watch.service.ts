@@ -362,7 +362,7 @@ export class WatchService {
    */
   async executeEntry(
     entryId: string,
-    options: { mode?: 'paper' | 'live'; quantityOverride?: number } = {},
+    options: { mode?: 'paper' | 'live'; quantityOverride?: number; force?: boolean } = {},
   ): Promise<any> {
     const mode = options.mode ?? 'paper';
     const entry = await this.repo.findById(entryId);
@@ -419,22 +419,24 @@ export class WatchService {
       referencePrice = resolved;
     }
 
-    // Upside gate (equity only): only execute when the profit target is still
-    // > 2% above the current live price. entry.profitTarget was computed from
-    // initialPrice in createFromAlert — it represents the intended level. If
-    // the stock has already run most of the way there, the remaining reward
-    // is too small to justify the -0.4% SL risk. Block and leave WATCHING so
-    // the journal record is preserved.
-    if (!optionsLotSize) {
-      const remaining = (entry.profitTarget ?? 0) - referencePrice;
-      const remainingPct = referencePrice > 0 ? remaining / referencePrice : 0;
-      if (remainingPct < 0.02) {
+    // Upside gate (equity only): block when the stock has already moved > 1%
+    // above the Chartink alert price before we can execute. This covers the
+    // genuine "already ran away" case while tolerating the normal 0–0.5% drift
+    // between candle close (initialPrice) and our live-quote fetch a few
+    // seconds later. The old "remaining < 2%" check fired on ANY upward tick
+    // from the alert price, blocking SYRMA-pattern entries where the stock had
+    // moved only +0.18% — far too sensitive.
+    // `force: true` bypasses this gate for manual overrides.
+    if (!optionsLotSize && !options.force) {
+      const alertPrice = (entry.initialPrice ?? referencePrice);
+      const moveFromAlert = alertPrice > 0 ? (referencePrice - alertPrice) / alertPrice : 0;
+      if (moveFromAlert > 0.01) {
         this.logger.warn(
           formatTradeRejection({
             symbol: entry.symbol,
             side: entry.side ?? undefined,
             stage: 'execution',
-            reason: `stale entry — only ${(remainingPct * 100).toFixed(2)}% remaining to target (live ₹${referencePrice.toFixed(2)}, target ₹${(entry.profitTarget ?? 0).toFixed(2)}) — entry stays WATCHING`,
+            reason: `stale entry — already moved +${(moveFromAlert * 100).toFixed(2)}% from alert price ₹${alertPrice.toFixed(2)} (live ₹${referencePrice.toFixed(2)}) — entry stays WATCHING`,
           }),
         );
         return null;
@@ -648,16 +650,40 @@ export class WatchService {
       return;
     }
 
-    // Hard loss-cut: any TRADED entry whose open loss reaches ₹1,000 is cut
-    // immediately. This is a price-based stop — a real, hard fact — so it
-    // fires regardless of the 10-minute score-decay grace window, and before
-    // the partial-exit / trailing-stop logic so a loss is never left to ride.
+    // Hard loss-cut: any TRADED entry whose open loss reaches the threshold is
+    // cut. This is a price-based stop — a real, hard fact — so it fires
+    // regardless of the 10-minute score-decay grace window, and before the
+    // partial-exit / trailing-stop logic so a loss is never left to ride.
     // Only the target-hit check above is allowed to win first (a profit exit).
+    //
+    // Two-strike stop-hunt guard: require 2 consecutive ticks below the SL
+    // threshold before exiting. A single bad WS tick or a brief stop-hunt
+    // spike must not cut the position — genuine breakdowns stay broken for
+    // at least 2 ticks, so the cost of waiting is negligible vs. the benefit
+    // of avoiding a false exit on noise.
     if (entry.status === 'TRADED') {
       const openPnl = this.computeOpenPnl(entry, ltp);
       if (openPnl <= -hardLossCutRupees(entry)) {
+        const currentBreachCount: number = (entry as any).slBreachCount ?? 0;
+        if (currentBreachCount < 1) {
+          // First breach — increment counter, do NOT exit yet.
+          this.logger.warn(
+            `[watch] ${entry.symbol}: first SL breach (stop-hunt guard) — ltp=${ltp} ` +
+            `loss=₹${Math.abs(openPnl).toFixed(0)}, awaiting confirmation on next tick`,
+          );
+          await this.repo.update(entry.id, { slBreachCount: currentBreachCount + 1 } as any);
+          return;
+        }
+        // Second consecutive breach — confirmed breakdown, exit.
         await this.transitionLossCut(entry.id, ltp, openPnl);
         return;
+      }
+      // Price is ABOVE the SL level — reset breach counter if it was non-zero.
+      if ((entry as any).slBreachCount > 0) {
+        this.logger.log(
+          `[watch] ${entry.symbol}: SL breach count reset (price recovered above SL, ltp=${ltp})`,
+        );
+        await this.repo.update(entry.id, { slBreachCount: 0 } as any);
       }
     }
 

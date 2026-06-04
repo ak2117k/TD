@@ -1,8 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
+import { WatchStatus } from '@prisma/client';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { UngatedWatchRepository } from '../repositories/ungated-watch.repository';
 import { UngatedWatchService } from './ungated-watch.service';
+import { UngatedTradeExecutionService } from './ungated-trade-execution.service';
 
 /**
  * REST-poll ungated open positions every 30 seconds during market hours.
@@ -31,6 +33,7 @@ export class UngatedTickPoller {
     private readonly adapter: AngelOneAdapterService,
     private readonly repo: UngatedWatchRepository,
     private readonly watch: UngatedWatchService,
+    private readonly exec: UngatedTradeExecutionService,
   ) {}
 
   // Every 30s, Mon–Fri, 09:15–15:30 IST. The cron format is
@@ -76,5 +79,58 @@ export class UngatedTickPoller {
         `[ungated-poll] ${dispatched} ticks dispatched across ${traded.length} open entries`,
       );
     }
+  }
+
+  /**
+   * EOD square-off at 15:25 IST Mon–Fri.
+   * Closes every TRADED ungated entry so stale open positions never
+   * carry over to the next session and block tomorrow's re-entries
+   * via the symbol-dup gate.
+   */
+  @Cron('0 25 15 * * 1-5', { timeZone: 'Asia/Kolkata' })
+  async eodSquareOff(): Promise<void> {
+    this.logger.warn('[ungated-eod] EOD square-off starting');
+    const all = await this.repo.findAllActive();
+    const traded = all.filter((e) => e.status === WatchStatus.TRADED);
+    if (traded.length === 0) {
+      this.logger.log('[ungated-eod] no open positions to close');
+      return;
+    }
+
+    // Fetch live prices for a fair exit; fall back to last known price.
+    const tokens = [...new Set(traded.map((e) => e.token))];
+    const ltpMap = await this.adapter.getLtpsBatch('NSE', tokens).catch(() => new Map<string, number>());
+
+    let closed = 0;
+    let errors = 0;
+    for (const entry of traded) {
+      try {
+        const exitPrice =
+          ltpMap.get(entry.token) ??
+          (entry as any).currentPrice ??
+          (entry as any).executedPrice ??
+          0;
+        if (exitPrice <= 0) {
+          this.logger.warn(`[ungated-eod] no exit price for ${entry.symbol} — skipping`);
+          continue;
+        }
+        if (entry.paperTradeId) {
+          await this.exec.closeTrade(entry.paperTradeId, { reason: 'eod-square-off', exitPrice });
+        }
+        await this.repo.update(entry.id, {
+          status: WatchStatus.EXITED,
+          closedAt: new Date(),
+          closedReason: 'eod-square-off',
+        });
+        closed++;
+        this.logger.log(`[ungated-eod] closed ${entry.symbol} @ ₹${exitPrice}`);
+      } catch (err) {
+        this.logger.warn(
+          `[ungated-eod] failed to close ${entry.symbol}: ${err instanceof Error ? err.message : err}`,
+        );
+        errors++;
+      }
+    }
+    this.logger.warn(`[ungated-eod] done — closed=${closed} errors=${errors}`);
   }
 }

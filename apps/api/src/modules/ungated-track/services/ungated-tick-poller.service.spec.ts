@@ -3,6 +3,7 @@ import { UngatedTickPoller } from './ungated-tick-poller.service';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { UngatedWatchRepository } from '../repositories/ungated-watch.repository';
 import { UngatedWatchService } from './ungated-watch.service';
+import { UngatedTradeExecutionService } from './ungated-trade-execution.service';
 
 describe('UngatedTickPoller.pollOpenPositions', () => {
   let poller: UngatedTickPoller;
@@ -20,6 +21,7 @@ describe('UngatedTickPoller.pollOpenPositions', () => {
         { provide: AngelOneAdapterService, useValue: adapter },
         { provide: UngatedWatchRepository, useValue: repo },
         { provide: UngatedWatchService, useValue: watch },
+        { provide: UngatedTradeExecutionService, useValue: { closeTrade: jest.fn() } },
       ],
     }).compile();
     poller = mod.get(UngatedTickPoller);

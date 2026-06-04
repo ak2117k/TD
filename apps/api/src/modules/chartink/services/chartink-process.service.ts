@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ChartinkRepository, CreateAlertSetupInput } from '../repositories/chartink.repository';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { ChartinkScoringService, classifyTrend } from './chartink-scoring.service';
@@ -14,6 +14,7 @@ import {
   UngatedCapitalExhaustedError, UngatedPositionCapError, UngatedKillSwitchError,
 } from '../../ungated-track/services/ungated-paper-account.service';
 import { AnandDualTrackService } from '../../anand-dual-track/services/anand-dual-track.service';
+import { LevelBookService } from '../../signal-generator/services/level-book.service';
 
 interface Hit {
   symbol: string;
@@ -60,6 +61,7 @@ export class ChartinkProcessService {
     private readonly ungatedWatch: UngatedWatchService,
     private readonly ungatedRejections: UngatedRejectionRepository,
     private readonly anandDualTrack: AnandDualTrackService,
+    @Optional() private readonly levelBook?: LevelBookService,
   ) {}
 
   async processAlert(alertId: string, hits: Hit[]): Promise<void> {
@@ -252,6 +254,32 @@ export class ChartinkProcessService {
     }
 
     // === 3. SCORING ===
+    // Build setupContext from the level book so the S/R Room factor has the
+    // PDH/PDL/ORH/ORL/VWAP it needs. Best-effort: a missing or stale level
+    // book means setupContext stays null, which causes S/R room to log
+    // "no level book" (points=0, pointsPossible=0 — no score impact).
+    let setupContext: { levelBookSnapshot: { pdh: number; pdl: number; orh: number | null; orl: number | null; vwap: number } } | null = null;
+    if (this.levelBook) {
+      try {
+        const lb = await this.levelBook.lazyLoad(instrument.token, 'NSE', hit.symbol);
+        if (lb) {
+          setupContext = {
+            levelBookSnapshot: {
+              pdh: lb.pdh,
+              pdl: lb.pdl,
+              orh: lb.orh,
+              orl: lb.orl,
+              vwap: lb.vwap,
+            },
+          };
+        }
+      } catch (err) {
+        this.logger.debug(
+          `[scoring] level book unavailable for ${hit.symbol}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
     let scoringResult: Awaited<ReturnType<typeof this.scoring.score>>;
     try {
       scoringResult = await this.scoring.score({
@@ -260,7 +288,7 @@ export class ChartinkProcessService {
         exchange: 'NSE',
         side,
         entryPrice: hit.hitPrice,
-        setupContext: null,
+        setupContext,
       });
     } catch (err) {
       await this.rejectSetup(

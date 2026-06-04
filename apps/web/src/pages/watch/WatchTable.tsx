@@ -160,10 +160,10 @@ export function WatchTable({ entries, onSelect, selectedId, fetchEntry }: Props)
                 {p.qty.toLocaleString('en-IN')}
               </td>
               <td className="py-2 px-3 text-right text-[var(--color-text-primary)]">
-                {e.currentPrice?.toFixed(2) ?? e.initialPrice.toFixed(2)}
+                {e.currentPrice?.toFixed(2) ?? (e.executedPrice ?? e.initialPrice).toFixed(2)}
               </td>
               <td className="py-2 px-3 text-right text-[var(--color-text-secondary)]">
-                {pctChange(e.currentPrice, e.initialPrice)}
+                {pctChange(e.currentPrice, e.executedPrice ?? e.initialPrice)}
               </td>
               {isClosed(e.status) ? (
                 e.realizedPnl != null ? (

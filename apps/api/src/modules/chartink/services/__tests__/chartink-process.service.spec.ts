@@ -15,6 +15,7 @@ import {
   UngatedCapitalExhaustedError, UngatedPositionCapError, UngatedKillSwitchError,
 } from '../../../ungated-track/services/ungated-paper-account.service';
 import { AnandDualTrackService } from '../../../anand-dual-track/services/anand-dual-track.service';
+import { LevelBookService } from '../../../signal-generator/services/level-book.service';
 
 /** A 5-min-MACD score-check entry, for exercising the MACD entry gate. */
 const macd5mCheck = (passed: boolean) => ({
@@ -46,6 +47,7 @@ describe('ChartinkProcessService', () => {
   let ungatedWatch: { createFromAlert: jest.Mock };
   let ungatedRejections: { record: jest.Mock };
   let anandDualTrack: { createEntries: jest.Mock };
+  let levelBook: { lazyLoad: jest.Mock };
 
   // Default happy-path candles — 50 bars trending UP, enough for classifyTrend
   const UP_CANDLES = makeTrendingCloses('UP', 50).map((close) => ({ close, timestamp: new Date(), open: close, high: close, low: close, volume: 1000 }));
@@ -82,6 +84,9 @@ describe('ChartinkProcessService', () => {
     ungatedWatch = { createFromAlert: jest.fn().mockResolvedValue({ id: 'uw1' }) };
     ungatedRejections = { record: jest.fn().mockResolvedValue(undefined) };
     anandDualTrack = { createEntries: jest.fn().mockResolvedValue(undefined) };
+    // Default: lazyLoad returns null so setupContext stays null in tests that
+    // don't care about S/R room. Individual tests can override this.
+    levelBook = { lazyLoad: jest.fn().mockResolvedValue(null) };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -96,6 +101,7 @@ describe('ChartinkProcessService', () => {
         { provide: UngatedWatchService, useValue: ungatedWatch },
         { provide: UngatedRejectionRepository, useValue: ungatedRejections },
         { provide: AnandDualTrackService, useValue: anandDualTrack },
+        { provide: LevelBookService, useValue: levelBook },
       ],
     }).compile();
 
@@ -374,8 +380,9 @@ describe('ChartinkProcessService', () => {
       expect(repo.createAlertSetup).toHaveBeenCalledTimes(1);
     });
 
-    it('scores with correct token, symbol, exchange, entryPrice from hit', async () => {
+    it('scores with correct token, symbol, exchange, entryPrice from hit (no level book → setupContext null)', async () => {
       scoring.score.mockResolvedValue({ score: 60, lotCount: 1, checks: [] });
+      // Default mock: lazyLoad returns null → setupContext null
 
       await service.processOne('alert-99', { symbol: 'TCS', hitPrice: 3500 });
 
@@ -387,6 +394,25 @@ describe('ChartinkProcessService', () => {
         entryPrice: 3500,
         setupContext: null,
       });
+    });
+
+    it('passes levelBookSnapshot setupContext to scoring when level book is available', async () => {
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [] });
+      levelBook.lazyLoad.mockResolvedValue({
+        token: '2885', symbol: 'TCS', exchange: 'NSE', asOf: new Date(),
+        pdh: 3600, pdl: 3400, orh: 3550, orl: 3450, vwap: 3500,
+        prevClose: 3480, orLocked: true, prevOrh: null, prevOrl: null,
+        spot: 3500, todayHigh: 3580, todayLow: 3420, atr14: 60,
+        lastTickAt: new Date(), roundNumbers: [], topVolStrikes: undefined,
+      });
+
+      await service.processOne('alert-99', { symbol: 'TCS', hitPrice: 3500 });
+
+      expect(scoring.score).toHaveBeenCalledWith(expect.objectContaining({
+        setupContext: {
+          levelBookSnapshot: { pdh: 3600, pdl: 3400, orh: 3550, orl: 3450, vwap: 3500 },
+        },
+      }));
     });
 
     // ─── Pure score-based: MACD-5m and SuperTrend no longer veto ────────────

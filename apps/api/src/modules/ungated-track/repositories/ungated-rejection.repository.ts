@@ -9,7 +9,8 @@ export type UngatedRejectionReason =
   | 'kill-switch'
   | 'sell-direction'
   | 'last-loss'
-  | 'stale-entry';
+  | 'stale-entry'
+  | 'no-quote';
 
 export interface UngatedRecordRejectionInput {
   alertId: string | null;

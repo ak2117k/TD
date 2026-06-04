@@ -84,13 +84,20 @@ describe('LevelsContextStrategy.analyze', () => {
   });
 
   // ---- Breakout pass ----
-  it('emits BREAKOUT signal when 5m close > level + 0.1·ATR with volume confirm', () => {
+  it('emits BREAKOUT signal when 5m close > level + 0.15·ATR with volume confirm', () => {
     const book = baseLevelBook({ spot: 24190 });
-    // 25 bars: first 20 average ~100k volume, last bars spike to 200k
-    const candles = buildCandles(25, {
-      closes: [...Array(24).fill(24100), 24195],
-      volumes: [...Array(20).fill(100_000), ...Array(5).fill(200_000)],
+    // 24 filler bars + explicit trigger candle whose close (24197) is strictly
+    // above PDH+0.15·ATR (24180+15=24195). Tight upper wick (high=24199) keeps
+    // upperWick/range = 2/12 = 0.17 < BREAKOUT_WICK_MAX_RATIO(0.3).
+    const filler = buildCandles(24, {
+      closes: Array(24).fill(24100),
+      volumes: [...Array(20).fill(100_000), ...Array(4).fill(200_000)],
     });
+    const trigger: CandleData = {
+      timestamp: new Date('2026-04-27T10:24:00+05:30'),
+      open: 24192, high: 24199, low: 24187, close: 24197, volume: 200_000,
+    };
+    const candles = [...filler, trigger];
     const out = strategy.analyze({ candles, levelBook: book, nowIst: '10:30' });
     expect(out).not.toBeNull();
     expect(out!.metadata!.setupType).toBe('BREAKOUT');
@@ -148,16 +155,22 @@ describe('LevelsContextStrategy.analyze', () => {
 
   // ---- Grade A: confluence ----
   it('grades A when level is in confluence with another level (within 0.1·ATR)', () => {
-    // PDH 24180 + round number 24150 within 0.3·ATR; spot interacts with PDH
+    // PDH 24180 + round number 24180 in confluence; spot interacts with PDH.
+    // Trigger close 24197 > PDH+0.15·ATR(24195). Tight upper wick passes wick gate.
     const book = baseLevelBook({
       spot: 24190,
       pdh: 24180,
       roundNumbers: [24150, 24180, 24200, 24250],
     });
-    const candles = buildCandles(25, {
-      closes: [...Array(24).fill(24100), 24195],
-      volumes: [...Array(20).fill(100_000), ...Array(5).fill(160_000)],
+    const filler = buildCandles(24, {
+      closes: Array(24).fill(24100),
+      volumes: [...Array(20).fill(100_000), ...Array(4).fill(160_000)],
     });
+    const trigger: CandleData = {
+      timestamp: new Date('2026-04-27T10:24:00+05:30'),
+      open: 24192, high: 24199, low: 24187, close: 24197, volume: 160_000,
+    };
+    const candles = [...filler, trigger];
     const out = strategy.analyze({ candles, levelBook: book, nowIst: '10:00' });
     expect(out).not.toBeNull();
     expect(out!.metadata!.grade).toBe('A');
@@ -177,16 +190,22 @@ describe('LevelsContextStrategy.analyze', () => {
       v += i % 2 === 0 ? 4 : -1;
       closes.push(v);
     }
-    closes.push(24195); // breakout above PDH 24180
+    // Trigger close 24197 > PDH+0.15·ATR(24195). Tight upper wick (high=24199)
+    // keeps upperWick/range = 2/12 = 0.17 < BREAKOUT_WICK_MAX_RATIO(0.3).
     const book = baseLevelBook({
-      spot: 24195,
+      spot: 24197,
       pdh: 24180,
       roundNumbers: [24000, 24050, 24100],
     });
-    const candles = buildCandles(40, {
+    const filler = buildCandles(39, {
       closes,
-      volumes: [...Array(35).fill(100_000), ...Array(5).fill(150_000)],
+      volumes: [...Array(35).fill(100_000), ...Array(4).fill(150_000)],
     });
+    const trigger: CandleData = {
+      timestamp: new Date('2026-04-27T10:39:00+05:30'),
+      open: 24192, high: 24199, low: 24187, close: 24197, volume: 150_000,
+    };
+    const candles = [...filler, trigger];
     const out = strategy.analyze({ candles, levelBook: book, nowIst: '11:00' });
     expect(out).not.toBeNull();
     const meta = out!.metadata as { indicators: { agreement: number }; grade: string };
@@ -202,17 +221,23 @@ describe('LevelsContextStrategy.analyze', () => {
     // window) would be A → demoted by the agreement penalty.
     const closes: number[] = [];
     for (let i = 0; i < 39; i++) closes.push(24600 - i * 5); // 24600 → 24410
-    closes.push(24395); // last bar above PDH+0.1·ATR=24390 but still below recent EMAs
     const book = baseLevelBook({
-      spot: 24395,
+      spot: 24397,
       pdh: 24380,
       orh: 24380,
       roundNumbers: [24380, 24400, 24500],
     });
-    const candles = buildCandles(40, {
+    // 39 filler bars + explicit trigger: close 24397 > PDH+0.15·ATR(24395).
+    // Tight upper wick (high=24399) keeps upperWick/range = 2/12 = 0.17 < 0.3.
+    const filler = buildCandles(39, {
       closes,
-      volumes: [...Array(35).fill(100_000), ...Array(5).fill(160_000)],
+      volumes: [...Array(35).fill(100_000), ...Array(4).fill(160_000)],
     });
+    const trigger: CandleData = {
+      timestamp: new Date('2026-04-27T10:39:00+05:30'),
+      open: 24392, high: 24399, low: 24387, close: 24397, volume: 160_000,
+    };
+    const candles = [...filler, trigger];
     const out = strategy.analyze({ candles, levelBook: book, nowIst: '10:00' });
     expect(out).not.toBeNull();
     const meta = out!.metadata as { indicators: { agreement: number }; grade: string };
@@ -448,16 +473,21 @@ describe('LevelsContextStrategy.analyze', () => {
       v += i % 2 === 0 ? 4 : -1;
       closes.push(v);
     }
-    closes.push(24195);
+    // Trigger close 24197 > PDH+0.15·ATR(24195). Tight upper wick passes wick gate.
     const book = baseLevelBook({
-      spot: 24195,
+      spot: 24197,
       pdh: 24180,
       roundNumbers: [24000, 24050, 24100],
     });
-    const candles = buildCandles(40, {
+    const filler = buildCandles(39, {
       closes,
-      volumes: [...Array(35).fill(100_000), ...Array(5).fill(160_000)],
+      volumes: [...Array(35).fill(100_000), ...Array(4).fill(160_000)],
     });
+    const trigger: CandleData = {
+      timestamp: new Date('2026-04-27T10:39:00+05:30'),
+      open: 24192, high: 24199, low: 24187, close: 24197, volume: 160_000,
+    };
+    const candles = [...filler, trigger];
     const out = strategy.analyze({ candles, levelBook: book, nowIst: '10:00' });
     expect(out).not.toBeNull();
     const ind = (out!.metadata as { indicators: Record<string, unknown> }).indicators;

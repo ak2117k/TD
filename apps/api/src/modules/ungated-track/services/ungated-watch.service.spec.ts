@@ -75,20 +75,19 @@ describe('UngatedWatchService.createFromAlert', () => {
     expect(repo.createEntry).not.toHaveBeenCalled();
   });
 
-  it('rejects with UngatedStaleEntryError when live price leaves < 2% to original target', async () => {
-    // ltp = 2020 → originalTarget = 2040 → remaining = 20 → 20/2020 = 0.99% < 2% → blocked
+  it('rejects with UngatedStaleEntryError when live price has moved > 1% above alert price', async () => {
+    // initialPrice = 2000, ltp = 2021 → moveFromAlert = 1.05% > 1% → blocked
     const { UngatedStaleEntryError } = await import('./ungated-watch.service');
-    (svc as any).__adapter.getLiveQuote.mockResolvedValue({ ltp: 2020 });
+    (svc as any).__adapter.getLiveQuote.mockResolvedValue({ ltp: 2021 });
     await expect(svc.createFromAlert(baseInput)).rejects.toBeInstanceOf(UngatedStaleEntryError);
     expect(repo.createEntry).not.toHaveBeenCalled();
   });
 
-  it('rejects with UngatedStaleEntryError when the live price already reached the original target', async () => {
-    // ltp = 2040 = exactly the 2% target → remaining = 0 → blocked
-    const { UngatedStaleEntryError } = await import('./ungated-watch.service');
-    (svc as any).__adapter.getLiveQuote.mockResolvedValue({ ltp: 2040 });
-    await expect(svc.createFromAlert(baseInput)).rejects.toBeInstanceOf(UngatedStaleEntryError);
-    expect(repo.createEntry).not.toHaveBeenCalled();
+  it('allows entry when live price moved < 1% above alert price (normal delay)', async () => {
+    // initialPrice = 2000, ltp = 2019 → moveFromAlert = 0.95% < 1% → passes gate
+    (svc as any).__adapter.getLiveQuote.mockResolvedValue({ ltp: 2019 });
+    await svc.createFromAlert(baseInput);
+    expect(repo.createEntry).toHaveBeenCalled();
   });
 
   it('anchors profitTarget to live fill price (not stale Chartink price)', async () => {
@@ -163,20 +162,18 @@ describe('UngatedWatchService.createFromAlert', () => {
     }));
   });
 
-  it('falls back to Chartink hit price when the live quote is unavailable', async () => {
+  it('rejects with UngatedNoQuoteError when the live quote returns 0', async () => {
+    const { UngatedNoQuoteError } = await import('./ungated-watch.service');
     (svc as any).__adapter.getLiveQuote.mockResolvedValue({ ltp: 0 });
-    await svc.createFromAlert(baseInput);
-    expect(exec.openTrade).toHaveBeenCalledWith(expect.objectContaining({
-      entryPrice: 2000, // back to initialPrice
-    }));
+    await expect(svc.createFromAlert(baseInput)).rejects.toBeInstanceOf(UngatedNoQuoteError);
+    expect(exec.openTrade).not.toHaveBeenCalled();
   });
 
-  it('falls back to Chartink hit price when the live quote throws', async () => {
+  it('rejects with UngatedNoQuoteError when the live quote throws', async () => {
+    const { UngatedNoQuoteError } = await import('./ungated-watch.service');
     (svc as any).__adapter.getLiveQuote.mockRejectedValue(new Error('broker timeout'));
-    await svc.createFromAlert(baseInput);
-    expect(exec.openTrade).toHaveBeenCalledWith(expect.objectContaining({
-      entryPrice: 2000,
-    }));
+    await expect(svc.createFromAlert(baseInput)).rejects.toBeInstanceOf(UngatedNoQuoteError);
+    expect(exec.openTrade).not.toHaveBeenCalled();
   });
 
   it('sets the entry to TRADED and persists paperTradeId after openTrade', async () => {
@@ -197,6 +194,10 @@ describe('UngatedWatchService.onTick — transitions', () => {
       initialPrice: 2000, executedPrice: 2000, profitTarget: 2040,
       paperTradeId: 'ut1', quantity: 100, remainingQty: 100,
       partialExitedAt: null, trailingHighWater: null, trailingStopPrice: null,
+      // Default to slBreachCount=1 so existing SL tests still exercise the
+      // exit path (second breach). New two-strike-specific tests override
+      // slBreachCount explicitly to assert first-breach behaviour.
+      slBreachCount: 1,
       ...overrides,
     };
   }
@@ -290,6 +291,55 @@ describe('UngatedWatchService.onTick — transitions', () => {
     }));
     expect(repo.update).toHaveBeenCalledWith('uw1', expect.objectContaining({
       status: 'EXITED', closedReason: 'trailing-stop',
+    }));
+  });
+
+  // ── Two-strike stop-hunt guard ───────────────────────────────────────────
+
+  it('two-strike: does NOT exit on first SL breach — increments slBreachCount to 1', async () => {
+    // slBreachCount starts at 0 → first breach must not exit, only increment.
+    repo.findActiveByToken.mockResolvedValue([tradedEntry({ slBreachCount: 0 })]);
+    // ltp=1992 is exactly at the SL threshold (2000*0.996=1992), loss = -800
+    await svc.onTick('11536', 1992, new Date());
+    // No exit should have been triggered
+    expect(exec.closeTrade).not.toHaveBeenCalled();
+    // slBreachCount must be incremented to 1
+    expect(repo.update).toHaveBeenCalledWith('uw1', expect.objectContaining({
+      slBreachCount: 1,
+    }));
+    // Entry must NOT be closed/stopped
+    expect(repo.update).not.toHaveBeenCalledWith('uw1', expect.objectContaining({
+      status: 'STOPPED',
+    }));
+  });
+
+  it('two-strike: exits on second consecutive SL breach (slBreachCount=1 → exit)', async () => {
+    // slBreachCount=1 means we already saw one breach; this tick is the second.
+    repo.findActiveByToken.mockResolvedValue([tradedEntry({ slBreachCount: 1 })]);
+    await svc.onTick('11536', 1992, new Date());
+    // Should have exited on this tick
+    expect(exec.closeTrade).toHaveBeenCalledWith('ut1', expect.objectContaining({
+      reason: 'sl-loss-cut',
+    }));
+    expect(repo.update).toHaveBeenCalledWith('uw1', expect.objectContaining({
+      status: 'STOPPED', closedReason: 'loss-cut',
+    }));
+  });
+
+  it('two-strike: resets slBreachCount to 0 when price recovers above SL between breaches', async () => {
+    // slBreachCount=1 (had one breach), but now ltp=2000 (above SL threshold 1992)
+    // → price recovered, counter must be reset to 0, no exit.
+    repo.findActiveByToken.mockResolvedValue([tradedEntry({ slBreachCount: 1 })]);
+    // ltp=2000 is above the SL threshold so no breach this tick
+    await svc.onTick('11536', 2000, new Date());
+    // No exit
+    expect(exec.closeTrade).not.toHaveBeenCalled();
+    // slBreachCount reset to 0
+    expect(repo.update).toHaveBeenCalledWith('uw1', expect.objectContaining({
+      slBreachCount: 0,
+    }));
+    expect(repo.update).not.toHaveBeenCalledWith('uw1', expect.objectContaining({
+      status: 'STOPPED',
     }));
   });
 });

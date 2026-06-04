@@ -46,6 +46,13 @@ export class UngatedStaleEntryError extends Error {
   }
 }
 
+export class UngatedNoQuoteError extends Error {
+  constructor(public readonly symbol: string) {
+    super(`ungated: ${symbol} rejected — live quote unavailable, cannot enter at stale Chartink price`);
+    this.name = 'UngatedNoQuoteError';
+  }
+}
+
 export interface UngatedCreateFromAlertInput {
   alertId: string | null;
   setupId: string | null;
@@ -107,45 +114,42 @@ export class UngatedWatchService {
       throw new UngatedLastLossError(input.symbol, lastPnl);
     }
 
-    // 4. Fetch live quote early — used for both the dynamic R:R gate and
-    //    the actual entry price. One broker round-trip serves both purposes.
+    // 4. Fetch live quote — required for entry price and upside gate.
+    //    Reject the trade when unavailable: executing at a stale Chartink price
+    //    (potentially 10–30% away from the real market) is worse than skipping.
     let liveQuote: number | null = null;
     try {
       const live = await this.adapter.getLiveQuote(input.token, input.exchange);
       if (live?.ltp && live.ltp > 0) liveQuote = live.ltp;
-      else this.logger.warn(
-        `[ungated] live quote unavailable for ${input.symbol}; falling back to Chartink hit price ₹${input.initialPrice}`,
-      );
     } catch (err) {
       this.logger.warn(
-        `[ungated] live quote failed for ${input.symbol}: ${err instanceof Error ? err.message : err}; falling back to Chartink hit price`,
+        `[ungated] live quote failed for ${input.symbol}: ${err instanceof Error ? err.message : err}`,
       );
     }
-
-    // 5. Upside gate — only execute when the original alert target (initialPrice
-    //    × 1.02) is still > 2% above the current live price. If the stock has
-    //    already run up to or past the intended target since the Chartink candle
-    //    closed, there is no remaining upside — reject.
-    //    After this check, the actual profitTarget is RE-ANCHORED to the live
-    //    fill price so the stored target is always exactly 2% from where we
-    //    entered, not from the stale alert price.
-    //    Skip the check when the live quote is unavailable so a broker outage
-    //    doesn't silently block all entries.
-    const executedPrice = liveQuote ?? input.initialPrice;
-    const profitTarget = executedPrice * (1 + PROFIT_TARGET_PCT); // 2% from fill
-    if (liveQuote != null) {
-      const originalTarget = input.initialPrice * (1 + PROFIT_TARGET_PCT);
-      const remaining = originalTarget - liveQuote;
-      const remainingPct = liveQuote > 0 ? remaining / liveQuote : 0;
-      if (remainingPct < PROFIT_TARGET_PCT) {
-        const dynamicRR = remaining / (liveQuote * HARD_STOP_PCT);
-        this.logger.warn(
-          `[ungated] ${input.symbol}: stale entry blocked — only ${(remainingPct * 100).toFixed(2)}% remaining to original target ` +
-          `(live ₹${liveQuote}, original target ₹${originalTarget.toFixed(2)})`,
-        );
-        throw new UngatedStaleEntryError(input.symbol, dynamicRR);
-      }
+    if (liveQuote == null) {
+      this.logger.warn(
+        `[ungated] ${input.symbol}: rejected — live quote unavailable (Chartink alert price ₹${input.initialPrice} may be stale)`,
+      );
+      throw new UngatedNoQuoteError(input.symbol);
     }
+
+    // 5. Upside gate — block when the stock has already moved > 1% above the
+    //    Chartink alert price before we can execute. Covers the genuine "already
+    //    ran away" case while tolerating the normal 0–0.5% candle-close-to-
+    //    execution drift. The old "remaining < 2%" check fired on any upward
+    //    tick from alert price — too sensitive for intraday momentum signals.
+    //    After this check, profitTarget is anchored to the live fill price so
+    //    the target is always 2% from actual entry.
+    const moveFromAlert = input.initialPrice > 0 ? (liveQuote - input.initialPrice) / input.initialPrice : 0;
+    if (moveFromAlert > 0.01) {
+      this.logger.warn(
+        `[ungated] ${input.symbol}: stale entry blocked — already moved +${(moveFromAlert * 100).toFixed(2)}% ` +
+        `from alert ₹${input.initialPrice} (live ₹${liveQuote})`,
+      );
+      throw new UngatedStaleEntryError(input.symbol, moveFromAlert / HARD_STOP_PCT);
+    }
+    const executedPrice = liveQuote;
+    const profitTarget = executedPrice * (1 + PROFIT_TARGET_PCT); // 2% from fill
 
     // 6. Admission (capital + position cap + kill switch).
     const openTrades = await this.repo.countOpenTrades();
@@ -246,12 +250,28 @@ export class UngatedWatchService {
       (sideMul === 1 ? ltp >= entry.profitTarget : ltp <= entry.profitTarget);
     if (isTargetHit) return this.transitionTargetHit(entry, ltp);
 
-    // 2. Hard loss-cut (R5).
+    // 2. Hard loss-cut (R5) — two-strike stop-hunt guard.
+    // REST polling fires every 30s. A brief fake selloff (stop-hunt) within
+    // one 30s window would trigger an immediate cut even though the price
+    // recovers in the next poll. Require 2 consecutive breach polls before
+    // exiting so genuine breakdowns are still caught while stop-hunts that
+    // recover within 30s are ignored.
     const openLoss = this.computeOpenPnl(entry, ltp);
     const threshold = -this.HARD_STOP_PCT *
       (entry.executedPrice ?? entry.initialPrice) *
       (entry.remainingQty ?? entry.quantity ?? 0);
     if (openLoss <= threshold) {
+      const currentBreachCount: number = entry.slBreachCount ?? 0;
+      if (currentBreachCount < 1) {
+        // First breach — increment counter, do NOT exit yet.
+        this.logger.warn(
+          `[ungated] ${entry.symbol}: first SL breach (stop-hunt guard) — ltp=${ltp} ` +
+          `loss=₹${Math.abs(openLoss).toFixed(0)}, awaiting confirmation on next poll`,
+        );
+        await this.repo.update(entry.id, { slBreachCount: currentBreachCount + 1 });
+        return;
+      }
+      // Second consecutive breach — confirmed breakdown, exit.
       // REST polling fires every 30s — by the time the poller observes the
       // trigger, ltp may already be well below (BUY) or above (SELL) the
       // theoretical SL price. Cap the exit at the threshold price so the
@@ -265,6 +285,15 @@ export class UngatedWatchService {
         ? Math.max(ltp, slPrice)
         : Math.min(ltp, slPrice);
       return this.transitionLossCut(entry, cappedExitPrice, openLoss);
+    }
+
+    // Price is ABOVE the SL level — reset breach counter if it was non-zero
+    // so a price recovery between two polls clears the strike count.
+    if ((entry.slBreachCount ?? 0) > 0) {
+      this.logger.log(
+        `[ungated] ${entry.symbol}: SL breach count reset (price recovered above SL, ltp=${ltp})`,
+      );
+      await this.repo.update(entry.id, { slBreachCount: 0 });
     }
 
     // 3. Partial-exit / trailing-stop.
