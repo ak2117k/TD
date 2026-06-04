@@ -147,6 +147,27 @@ export class AnandDualTrackRepository {
     });
   }
 
+  /** IST midnight of the current day, returned as a UTC Date. */
+  private istMidnightTodayUtc(): Date {
+    const now = new Date();
+    const istNow = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+    istNow.setUTCHours(0, 0, 0, 0);
+    return new Date(istNow.getTime() - 5.5 * 60 * 60 * 1000);
+  }
+
+  /** True if the symbol already hit its target today (IST) on the given track. */
+  async hasTargetHitTodayBySymbol(
+    track: 'intraday' | 'swing',
+    symbol: string,
+  ): Promise<boolean> {
+    const model = track === 'intraday' ? this.prisma.intradayEntry : this.prisma.swingEntry;
+    const hit = await (model as any).findFirst({
+      where: { symbol, status: 'TARGET_HIT', exitedAt: { gte: this.istMidnightTodayUtc() } },
+      select: { id: true },
+    });
+    return hit != null;
+  }
+
   /**
    * Record one "lead" occurrence for a symbol+track. Increments count and
    * appends the current ISO timestamp to the lossless `dates` log. Called on
