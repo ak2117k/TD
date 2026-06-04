@@ -490,7 +490,7 @@ describe('WatchService — exits close the linked paper trade', () => {
     repo = {
       findById: jest.fn().mockResolvedValue({
         id: 'w1', token: '11536', symbol: 'TCS-EQ', status: 'TRADED',
-        optionsToken: null, paperTradeId: 'pt-1',
+        optionsToken: null, paperTradeId: 'pt-1', currentPrice: 1990,
       }),
       createEvent: jest.fn().mockResolvedValue({ id: 'e1' }),
       update: jest.fn().mockResolvedValue({}),
@@ -540,6 +540,26 @@ describe('WatchService — exits close the linked paper trade', () => {
     // No broker-adapter override on this describe block, so fetchLivePrice
     // returns null and the loss-cut keeps the original price argument.
     await svc.transitionLossCut('w1', 1990, -1200);
+    expect(mockTrade.closeTrade).toHaveBeenCalledWith(
+      'pt-1',
+      expect.objectContaining({ exitPrice: 1990 }),
+    );
+  });
+
+  // Score-decay / EOD / manual closes are NOT price-triggered, but they must
+  // still forward the last mark (the entry's currentPrice tick) so a feed-blind
+  // close marks the trade to that price instead of falling back to entryPrice
+  // (which would book a real loss as ₹0 and understate realised losses).
+  it('transitionStopped forwards the last mark price as opts.exitPrice', async () => {
+    await svc.transitionStopped('w1', 55, 'score-decay');
+    expect(mockTrade.closeTrade).toHaveBeenCalledWith(
+      'pt-1',
+      expect.objectContaining({ exitPrice: 1990 }),
+    );
+  });
+
+  it('closeTraded forwards the last mark price as opts.exitPrice', async () => {
+    await svc.closeTraded('w1', 'eod-square-off');
     expect(mockTrade.closeTrade).toHaveBeenCalledWith(
       'pt-1',
       expect.objectContaining({ exitPrice: 1990 }),

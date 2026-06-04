@@ -749,8 +749,9 @@ export class WatchService {
       score,
       notes: `cause:${cause}`,
     });
-    // Close the linked trade so deployed capital is returned to cash.
-    await this.closeLinkedTrade(entry, `sl-${cause}`);
+    // Close the linked trade so deployed capital is returned to cash. Forward
+    // the last mark so a feed-blind close is priced, not booked at ₹0.
+    await this.closeLinkedTrade(entry, `sl-${cause}`, this.lastMarkPrice(entry));
     await this.repo.update(entryId, {
       status: WatchStatus.STOPPED,
       closedAt: new Date(),
@@ -855,6 +856,18 @@ export class WatchService {
    * which can drift several rupees from the actual trigger and silently
    * under-/over-reports realised P&L on the Trade row.
    */
+  /**
+   * Best last-known mark for a NON-price-triggered close (score-decay, EOD
+   * square-off, manual). Returns the entry's last WS tick (`currentPrice`) when
+   * usable, else undefined. Forwarding it spares the trade-engine's final
+   * entryPrice fallback — which would book a real loss as ₹0 — when the live
+   * quote is unavailable at close time.
+   */
+  private lastMarkPrice(entry: any): number | undefined {
+    const px = entry?.currentPrice;
+    return typeof px === 'number' && px > 0 ? px : undefined;
+  }
+
   private async closeLinkedTrade(
     entry: any,
     reason: string,
@@ -955,7 +968,7 @@ export class WatchService {
       throw new Error(`Cannot closeTraded on entry in status ${entry.status}`);
     }
 
-    await this.closeLinkedTrade(entry, reason);
+    await this.closeLinkedTrade(entry, reason, this.lastMarkPrice(entry));
 
     await this.repo.createEvent({
       watchEntryId: entryId,

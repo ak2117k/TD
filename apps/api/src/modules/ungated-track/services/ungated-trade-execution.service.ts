@@ -84,18 +84,22 @@ export class UngatedTradeExecutionService {
       exchange: 'NSE',
     });
 
-    const slicePnl =
-      sideMul * (opts.exitPrice - (trade.entryPrice ?? 0)) * closeQty;
+    const entryPrice = trade.entryPrice ?? 0;
+    const slicePnl = sideMul * (opts.exitPrice - entryPrice) * closeQty;
+    const cumulativePnl = (trade.pnl ?? 0) + slicePnl;
+    // Cumulative shares closed so far, across every leg of this position.
+    const closedQuantity = ((trade as any).closedQuantity ?? 0) + closeQty;
+    // Position-level return: cumulative P&L over the cost basis of ALL shares
+    // closed so far (entry × closedQuantity), not just this leg. After a
+    // partial exit this correctly blends each leg instead of showing only the
+    // final leg's percent.
     const pnlPercent =
-      (trade.entryPrice ?? 0) > 0
-        ? (sideMul * (opts.exitPrice - (trade.entryPrice ?? 0))) /
-            (trade.entryPrice ?? 1) *
-            100
-        : 0;
+      entryPrice > 0 ? (cumulativePnl / (entryPrice * closedQuantity)) * 100 : 0;
 
     const updateData: any = {
-      pnl: (trade.pnl ?? 0) + slicePnl,
+      pnl: cumulativePnl,
       pnlPercent,
+      closedQuantity,
       fees: (trade.fees ?? 0) + exitCharges.total,
       exitReasonTag: opts.reason,
       exitNotes: opts.reason,

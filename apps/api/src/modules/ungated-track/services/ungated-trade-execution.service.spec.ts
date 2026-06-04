@@ -57,5 +57,25 @@ describe('UngatedTradeExecutionService', () => {
     });
     expect(out.status).toBe('PARTIALLY_FILLED');
     expect(account.applyExit).toHaveBeenCalledWith(expect.objectContaining({ quantity: 50 }));
+    // First leg: 50 shares @ +2.5% on a 100-share position. pnlPercent is the
+    // position-level return on the cost basis closed so far: 2500 / (2000×50).
+    expect(out.pnlPercent).toBeCloseTo(2.5, 4);
+    expect(out.closedQuantity).toBe(50);
+  });
+
+  it('closeTrade blends pnlPercent across legs (cumulative position return, not last leg)', async () => {
+    // Position already 50% exited at +5% → pnl 5000, 50 shares closed, 50 remain.
+    trades.getTradeById.mockResolvedValue({
+      id: 'ut1', side: 'BUY', quantity: 50, entryPrice: 2000,
+      status: 'PARTIALLY_FILLED', isPaperTrade: true, pnl: 5000,
+      closedQuantity: 50, fees: 40,
+    });
+    // Close the remaining 50 at +2.5%.
+    const out = await svc.closeTrade('ut1', { reason: 'trailing-stop', exitPrice: 2050 });
+    // Cumulative pnl = 5000 + (2050-2000)×50 = 7500 over 100 shares @ ₹2000.
+    expect(out.pnl).toBeCloseTo(7500, 2);
+    expect(out.closedQuantity).toBe(100);
+    // Blended return = 7500 / (2000×100) = 3.75% — NOT the final leg's 2.5%.
+    expect(out.pnlPercent).toBeCloseTo(3.75, 4);
   });
 });

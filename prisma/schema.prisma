@@ -715,6 +715,10 @@ model UngatedTrade {
   orderType       String
   positionType    String
   quantity        Int
+  // Cumulative shares closed across all (partial + final) exit legs. Lets
+  // pnlPercent blend every leg's cost basis into a position-level return,
+  // instead of being overwritten with only the final leg's percent.
+  closedQuantity  Int      @default(0)
   entryPrice      Float?
   exitPrice       Float?
   stoploss        Float?
