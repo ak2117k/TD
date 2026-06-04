@@ -779,7 +779,7 @@ model IntradayEntry {
   enteredAt      DateTime  @default(now())
   targetPct      Float     @default(5.0)
   stopPct        Float     @default(5.0)
-  status         String    @default("WATCHING")
+  status         String    @default("TRADED")
   exitPrice      Float?
   exitedAt       DateTime?
   alertId        String
@@ -798,7 +798,7 @@ model SwingEntry {
   enteredAt      DateTime  @default(now())
   targetPct      Float     @default(10.0)
   stopPct        Float     @default(10.0)
-  status         String    @default("WATCHING")
+  status         String    @default("TRADED")
   exitPrice      Float?
   exitedAt       DateTime?
   alertId        String
