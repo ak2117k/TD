@@ -147,6 +147,43 @@ export class AnandDualTrackRepository {
     });
   }
 
+  /**
+   * Record one "lead" occurrence for a symbol+track. Increments count and
+   * appends the current ISO timestamp to the lossless `dates` log. Called on
+   * EVERY scanner fire — even when no new entry is created — so the count is
+   * true lead frequency.
+   */
+  async bumpLeadStat(track: 'swing' | 'intraday', symbol: string): Promise<void> {
+    const nowIso = new Date().toISOString();
+    const existing = await this.prisma.symbolLeadStat.findFirst({
+      where: { symbol, track },
+      select: { dates: true },
+    });
+    const dates = Array.isArray(existing?.dates) ? (existing!.dates as string[]) : [];
+    await this.prisma.symbolLeadStat.upsert({
+      where: { symbol_track: { symbol, track } },
+      create: { symbol, track, count: 1, dates: [nowIso], lastLedAt: new Date() },
+      update: { count: { increment: 1 }, dates: [...dates, nowIso], lastLedAt: new Date() },
+    });
+  }
+
+  /** Map symbol → { count, dates } for the given symbols on a track. */
+  async getLeadStats(
+    track: 'swing' | 'intraday',
+    symbols: string[],
+  ): Promise<Map<string, { count: number; dates: string[] }>> {
+    const out = new Map<string, { count: number; dates: string[] }>();
+    if (symbols.length === 0) return out;
+    const rows = await this.prisma.symbolLeadStat.findMany({
+      where: { track, symbol: { in: [...new Set(symbols)] } },
+      select: { symbol: true, count: true, dates: true },
+    });
+    for (const r of rows) {
+      out.set(r.symbol, { count: r.count, dates: Array.isArray(r.dates) ? (r.dates as string[]) : [] });
+    }
+    return out;
+  }
+
   async findScannerNamesByAlertIds(alertIds: string[]): Promise<Map<string, string>> {
     if (alertIds.length === 0) return new Map();
     const rows = await this.prisma.chartinkAlert.findMany({
