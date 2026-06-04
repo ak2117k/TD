@@ -14,6 +14,7 @@ export interface AnandEntry {
   currentPrice: number;
   pnlPct: number;
   targetLeftPct: number;
+  scannerName: string | null;   // resolved from alertId on the backend
   scoreBreakdown: Array<{ name: string; points: number; pointsPossible: number; passed: boolean }> | null;
 }
 
@@ -21,6 +22,7 @@ export interface PnlPeriod {
   avgExitPct: number;
   count: number;
   winCount: number;
+  totalPnlRs: number;
 }
 
 export interface PnlSummary {
