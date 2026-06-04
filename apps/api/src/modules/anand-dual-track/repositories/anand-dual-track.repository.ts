@@ -163,7 +163,7 @@ export class AnandDualTrackRepository {
     });
     const map = new Map<string, string>();
     for (const row of rows) {
-      map.set(row.id, row.scanner.scanName);
+      if (row.scanner) map.set(row.id, row.scanner.scanName);
     }
     return map;
   }
