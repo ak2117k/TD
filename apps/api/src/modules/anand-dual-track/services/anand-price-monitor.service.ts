@@ -3,6 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import { AnandDualTrackRepository } from '../repositories/anand-dual-track.repository';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { supertrend } from '../../signal-generator/strategies/indicators';
+import { ReinvestmentService } from './reinvestment.service';
 
 @Injectable()
 export class AnandPriceMonitorService {
@@ -11,6 +12,7 @@ export class AnandPriceMonitorService {
   constructor(
     private readonly repo: AnandDualTrackRepository,
     private readonly adapter: AngelOneAdapterService,
+    private readonly reinvest: ReinvestmentService,
   ) {}
 
   // Poll both tracks every 30s during market hours Mon–Fri 09:15–15:15 IST.
@@ -23,6 +25,7 @@ export class AnandPriceMonitorService {
 
     await this.checkIntraday(intraday as any);
     await this.checkEntries(swing, 'swing');
+    await this.checkReinvestmentLots();
   }
 
   // Expire all open intraday entries at 15:15 IST (market close), marking each
@@ -85,6 +88,7 @@ export class AnandPriceMonitorService {
 
     const swing = await this.repo.listWatchingSwing();
     await this.checkEntries(swing, 'swing');
+    await this.checkReinvestmentLots();
   }
 
   private static readonly TRAIL_GIVEBACK = 0.02; // 2% give-back fallback
@@ -174,7 +178,7 @@ export class AnandPriceMonitorService {
   }
 
   private async checkEntries(
-    entries: Array<{ id: string; token: string | null; entryPrice: number; targetPct: number; stopPct: number }>,
+    entries: Array<{ id: string; symbol: string; token: string | null; entryPrice: number; targetPct: number; stopPct: number }>,
     track: 'intraday' | 'swing',
   ): Promise<void> {
     const withToken = entries.filter((e) => e.token);
@@ -192,14 +196,45 @@ export class AnandPriceMonitorService {
 
       if (pnlPct >= entry.targetPct) {
         this.logger.log(`[anand-${track}] ${entry.id} TARGET_HIT at ${ltp} (+${pnlPct.toFixed(2)}%)`);
-        await (track === 'intraday'
-          ? this.repo.updateIntradayStatus(entry.id, { status: 'TARGET_HIT', exitPrice: ltp, exitedAt: now })
-          : this.repo.updateSwingStatus(entry.id, { status: 'TARGET_HIT', exitPrice: ltp, exitedAt: now }));
+        if (track === 'intraday') {
+          await this.repo.updateIntradayStatus(entry.id, { status: 'TARGET_HIT', exitPrice: ltp, exitedAt: now });
+        } else {
+          await this.repo.updateSwingStatus(entry.id, { status: 'TARGET_HIT', exitPrice: ltp, exitedAt: now });
+          await this.reinvest
+            .onSwingTargetHit({ swingEntryId: entry.id, symbol: entry.symbol, exitPrice: ltp })
+            .catch((err) => this.logger.warn(`[reinvest] failed for ${entry.id}: ${err instanceof Error ? err.message : err}`));
+        }
       } else if (pnlPct <= -entry.stopPct) {
         this.logger.log(`[anand-${track}] ${entry.id} STOPPED at ${ltp} (${pnlPct.toFixed(2)}%)`);
         await (track === 'intraday'
           ? this.repo.updateIntradayStatus(entry.id, { status: 'STOPPED', exitPrice: ltp, exitedAt: now })
           : this.repo.updateSwingStatus(entry.id, { status: 'STOPPED', exitPrice: ltp, exitedAt: now }));
+      }
+    }
+  }
+
+  private async checkReinvestmentLots(): Promise<void> {
+    const lots = await this.repo.listOpenReinvestmentLots();
+    const withToken = lots.filter((l) => l.symbol);
+    if (withToken.length === 0) return;
+    // Lots store symbol but not token; resolve the token via the most-recent
+    // swing entry for each symbol.
+    const symbols = [...new Set(withToken.map((l) => l.symbol))];
+    const tokenMap = await this.repo.resolveTokens(symbols).catch(() => new Map<string, string>());
+    const tokens = [...new Set([...tokenMap.values()])];
+    const ltpMap = tokens.length
+      ? await this.adapter.getLtpsBatch('NSE', tokens).catch(() => new Map<string, number>())
+      : new Map<string, number>();
+
+    for (const lot of lots) {
+      const token = tokenMap.get(lot.symbol);
+      const ltp = token ? ltpMap.get(token) : undefined;
+      if (ltp === undefined) continue;
+      const pnlPct = ((ltp - lot.entryPrice) / lot.entryPrice) * 100;
+      if (pnlPct >= lot.targetPct) {
+        await this.reinvest.closeLot({ id: lot.id, capital: lot.capital, entryPrice: lot.entryPrice }, ltp, 'TARGET_HIT');
+      } else if (pnlPct <= -lot.stopPct) {
+        await this.reinvest.closeLot({ id: lot.id, capital: lot.capital, entryPrice: lot.entryPrice }, ltp, 'STOPPED');
       }
     }
   }

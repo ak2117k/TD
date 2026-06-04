@@ -2,7 +2,7 @@ import { ReinvestmentService, SWING_PROFIT } from '../reinvestment.service';
 
 function makeRepo() {
   return {
-    createReinvestmentLot: jest.fn(async () => ({ id: 'lot1' })),
+    createReinvestmentLot: jest.fn(async (): Promise<{ id: string } | null> => ({ id: 'lot1' })),
     applyPoolDelta: jest.fn(async () => {}),
     closeReinvestmentLot: jest.fn(async () => {}),
   };

@@ -4,6 +4,7 @@ import { MarketDataModule } from '../market-data/market-data.module';
 import { AnandDualTrackRepository } from './repositories/anand-dual-track.repository';
 import { AnandDualTrackService } from './services/anand-dual-track.service';
 import { AnandPriceMonitorService } from './services/anand-price-monitor.service';
+import { ReinvestmentService } from './services/reinvestment.service';
 import { AnandDualTrackController } from './controllers/anand-dual-track.controller';
 
 // ChartinkModule is @Global(), so ChartinkRepository is available without importing it here.
@@ -11,7 +12,7 @@ import { AnandDualTrackController } from './controllers/anand-dual-track.control
 @Module({
   imports: [PrismaModule, MarketDataModule],
   controllers: [AnandDualTrackController],
-  providers: [AnandDualTrackRepository, AnandDualTrackService, AnandPriceMonitorService],
+  providers: [AnandDualTrackRepository, AnandDualTrackService, AnandPriceMonitorService, ReinvestmentService],
   exports: [AnandDualTrackService],
 })
 export class AnandDualTrackModule {}

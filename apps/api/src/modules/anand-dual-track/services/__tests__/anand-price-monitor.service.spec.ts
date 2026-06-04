@@ -2,13 +2,16 @@ import { Test } from '@nestjs/testing';
 import { AnandPriceMonitorService } from '../anand-price-monitor.service';
 import { AnandDualTrackRepository } from '../../repositories/anand-dual-track.repository';
 import { AngelOneAdapterService } from '../../../market-data/services/angel-one-adapter.service';
+import { ReinvestmentService } from '../reinvestment.service';
 
 const makeEntry = (overrides: Partial<{
   id: string; symbol: string; token: string; entryPrice: number;
   targetPct: number; stopPct: number; status: string;
+  trailing: boolean; peakPrice: number | null;
 }> = {}) => ({
   id: 'i1', symbol: 'RELIANCE', token: '2885', entryPrice: 2500,
   targetPct: 5, stopPct: 5, status: 'WATCHING', exitPrice: null, exitedAt: null,
+  trailing: false, peakPrice: null,
   ...overrides,
 });
 
@@ -19,8 +22,12 @@ describe('AnandPriceMonitorService', () => {
     listWatchingSwing: jest.Mock;
     updateIntradayStatus: jest.Mock;
     updateSwingStatus: jest.Mock;
+    setIntradayTrailing: jest.Mock;
+    listOpenReinvestmentLots: jest.Mock;
+    resolveTokens: jest.Mock;
   };
-  let adapter: { getLtpsBatch: jest.Mock };
+  let adapter: { getLtpsBatch: jest.Mock; getHistoricalData: jest.Mock };
+  let reinvest: { onSwingTargetHit: jest.Mock; closeLot: jest.Mock };
 
   beforeEach(async () => {
     repo = {
@@ -28,25 +35,51 @@ describe('AnandPriceMonitorService', () => {
       listWatchingSwing: jest.fn().mockResolvedValue([]),
       updateIntradayStatus: jest.fn().mockResolvedValue(undefined),
       updateSwingStatus: jest.fn().mockResolvedValue(undefined),
+      setIntradayTrailing: jest.fn().mockResolvedValue(undefined),
+      listOpenReinvestmentLots: jest.fn().mockResolvedValue([]),
+      resolveTokens: jest.fn().mockResolvedValue(new Map()),
     };
-    adapter = { getLtpsBatch: jest.fn().mockResolvedValue(new Map()) };
+    adapter = {
+      getLtpsBatch: jest.fn().mockResolvedValue(new Map()),
+      getHistoricalData: jest.fn().mockResolvedValue([]),
+    };
+    reinvest = {
+      onSwingTargetHit: jest.fn().mockResolvedValue(undefined),
+      closeLot: jest.fn().mockResolvedValue(undefined),
+    };
 
     const mod = await Test.createTestingModule({
       providers: [
         AnandPriceMonitorService,
         { provide: AnandDualTrackRepository, useValue: repo },
         { provide: AngelOneAdapterService, useValue: adapter },
+        { provide: ReinvestmentService, useValue: reinvest },
       ],
     }).compile();
 
     service = mod.get(AnandPriceMonitorService);
   });
 
-  it('marks intraday entry TARGET_HIT when ltp >= entryPrice * 1.05', async () => {
+  it('arms trailing (not TARGET_HIT) when intraday first reaches +5%', async () => {
     repo.listWatchingIntraday.mockResolvedValue([makeEntry({ entryPrice: 2500, targetPct: 5 })]);
     adapter.getLtpsBatch.mockResolvedValue(new Map([['2885', 2625]])); // +5%
     await service.pollMarketHours();
-    expect(repo.updateIntradayStatus).toHaveBeenCalledWith('i1', expect.objectContaining({ status: 'TARGET_HIT', exitPrice: 2625 }));
+    expect(repo.setIntradayTrailing).toHaveBeenCalledWith('i1', { trailing: true, peakPrice: 2625 });
+    expect(repo.updateIntradayStatus).not.toHaveBeenCalled();
+  });
+
+  it('exits trailing intraday TARGET_HIT via give-back when ST unavailable', async () => {
+    // Already trailing with peak 2700; -2% give-back = 2646; 2640 < 2646 → exit.
+    repo.listWatchingIntraday.mockResolvedValue([
+      makeEntry({ entryPrice: 2500, targetPct: 5, trailing: true, peakPrice: 2700 }),
+    ]);
+    adapter.getLtpsBatch.mockResolvedValue(new Map([['2885', 2640]]));
+    adapter.getHistoricalData.mockResolvedValue([]); // no candles → ST null
+    await service.pollMarketHours();
+    expect(repo.updateIntradayStatus).toHaveBeenCalledWith(
+      'i1',
+      expect.objectContaining({ status: 'TARGET_HIT', exitPrice: 2640, exitReason: 'TRAIL_GB' }),
+    );
   });
 
   it('marks intraday entry STOPPED when ltp <= entryPrice * 0.95', async () => {
@@ -68,6 +101,7 @@ describe('AnandPriceMonitorService', () => {
     adapter.getLtpsBatch.mockResolvedValue(new Map([['2885', 3300]])); // +10%
     await service.pollMarketHours();
     expect(repo.updateSwingStatus).toHaveBeenCalledWith('s1', expect.objectContaining({ status: 'TARGET_HIT', exitPrice: 3300 }));
+    expect(reinvest.onSwingTargetHit).toHaveBeenCalledWith({ swingEntryId: 's1', symbol: 'RELIANCE', exitPrice: 3300 });
   });
 
   it('expireIntradayAtClose marks each entry EXPIRED at its last traded price', async () => {

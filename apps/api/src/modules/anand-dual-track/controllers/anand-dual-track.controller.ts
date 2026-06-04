@@ -43,7 +43,14 @@ export class AnandDualTrackController {
       to: to ? new Date(to) : undefined,
     });
     const enriched = await this.enrichWithLivePrice(entries);
-    return this.enrichWithScannerName(enriched);
+    const withScanner = await this.enrichWithScannerName(enriched);
+    const leadMap = await this.repo
+      .getLeadStats('swing', withScanner.map((e) => e.symbol as string))
+      .catch(() => new Map<string, { count: number; dates: string[] }>());
+    return withScanner.map((e) => {
+      const lead = leadMap.get(e.symbol as string);
+      return { ...e, leadCount: lead?.count ?? 0, leadDates: lead?.dates ?? [] };
+    });
   }
 
   @Get('intraday/pnl-summary')
@@ -54,6 +61,28 @@ export class AnandDualTrackController {
   @Get('swing/pnl-summary')
   async swingPnl() {
     return this.repo.getPnlSummary('swing');
+  }
+
+  @Get('reinvest/pool')
+  async reinvestPool() {
+    return this.repo.getPool();
+  }
+
+  @Get('reinvest/lots')
+  async reinvestLots(@Query('status') status?: string) {
+    const lots = await this.repo.listReinvestmentLots(status || undefined);
+    const tokenMap = await this.repo.resolveTokens(lots.map((l) => l.symbol)).catch(() => new Map<string, string>());
+    const tokens = [...new Set([...tokenMap.values()])];
+    const ltpMap = tokens.length
+      ? await this.adapter.getLtpsBatch('NSE', tokens).catch(() => new Map<string, number>())
+      : new Map<string, number>();
+    return lots.map((l) => {
+      const token = tokenMap.get(l.symbol);
+      const currentPrice = (token ? ltpMap.get(token) : undefined) ?? l.exitPrice ?? l.entryPrice;
+      const pnlPct = ((currentPrice - l.entryPrice) / l.entryPrice) * 100;
+      const pnlRs = (pnlPct / 100) * l.capital;
+      return { ...l, currentPrice, pnlPct, pnlRs };
+    });
   }
 
   @Patch('scanners/:id/category')
@@ -67,7 +96,7 @@ export class AnandDualTrackController {
   }
 
   private async enrichWithLivePrice(
-    entries: Array<{ id: string; token: string | null; entryPrice: number; targetPct: number; stopPct: number; status: string; [key: string]: unknown }>,
+    entries: Array<{ id: string; symbol: string; token: string | null; entryPrice: number; targetPct: number; stopPct: number; status: string; [key: string]: unknown }>,
   ) {
     const tokens = [...new Set(entries.map((e) => e.token).filter(Boolean) as string[])];
     const ltpMap = tokens.length
