@@ -136,14 +136,6 @@ export class AnandDualTrackRepository {
     await this.prisma.swingEntry.update({ where: { id }, data });
   }
 
-  async expireAllWatchingIntraday(): Promise<number> {
-    const result = await this.prisma.intradayEntry.updateMany({
-      where: { status: 'TRADED' },
-      data: { status: 'EXPIRED', exitedAt: new Date() },
-    });
-    return result.count;
-  }
-
   async findActiveTradedBySymbol(
     track: 'intraday' | 'swing',
     symbol: string,

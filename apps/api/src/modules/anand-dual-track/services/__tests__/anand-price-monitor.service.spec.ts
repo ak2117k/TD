@@ -19,7 +19,6 @@ describe('AnandPriceMonitorService', () => {
     listWatchingSwing: jest.Mock;
     updateIntradayStatus: jest.Mock;
     updateSwingStatus: jest.Mock;
-    expireAllWatchingIntraday: jest.Mock;
   };
   let adapter: { getLtpsBatch: jest.Mock };
 
@@ -29,7 +28,6 @@ describe('AnandPriceMonitorService', () => {
       listWatchingSwing: jest.fn().mockResolvedValue([]),
       updateIntradayStatus: jest.fn().mockResolvedValue(undefined),
       updateSwingStatus: jest.fn().mockResolvedValue(undefined),
-      expireAllWatchingIntraday: jest.fn().mockResolvedValue(0),
     };
     adapter = { getLtpsBatch: jest.fn().mockResolvedValue(new Map()) };
 
@@ -72,10 +70,28 @@ describe('AnandPriceMonitorService', () => {
     expect(repo.updateSwingStatus).toHaveBeenCalledWith('s1', expect.objectContaining({ status: 'TARGET_HIT', exitPrice: 3300 }));
   });
 
-  it('expireIntradayAtClose calls expireAllWatchingIntraday', async () => {
-    repo.expireAllWatchingIntraday.mockResolvedValue(4);
+  it('expireIntradayAtClose marks each entry EXPIRED at its last traded price', async () => {
+    repo.listWatchingIntraday.mockResolvedValue([
+      makeEntry({ id: 'i1', token: '2885', entryPrice: 2500 }),
+    ]);
+    adapter.getLtpsBatch.mockResolvedValue(new Map([['2885', 2550]])); // +2% at close
     await service.expireIntradayAtClose();
-    expect(repo.expireAllWatchingIntraday).toHaveBeenCalled();
+    expect(repo.updateIntradayStatus).toHaveBeenCalledWith(
+      'i1',
+      expect.objectContaining({ status: 'EXPIRED', exitPrice: 2550 }),
+    );
+  });
+
+  it('expireIntradayAtClose falls back to entryPrice (breakeven) when no LTP', async () => {
+    repo.listWatchingIntraday.mockResolvedValue([
+      makeEntry({ id: 'i2', token: '9999', entryPrice: 2500 }),
+    ]);
+    adapter.getLtpsBatch.mockResolvedValue(new Map()); // no price available
+    await service.expireIntradayAtClose();
+    expect(repo.updateIntradayStatus).toHaveBeenCalledWith(
+      'i2',
+      expect.objectContaining({ status: 'EXPIRED', exitPrice: 2500 }),
+    );
   });
 
   it('pollOvernight only processes swing entries', async () => {

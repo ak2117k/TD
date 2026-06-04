@@ -102,15 +102,6 @@ describe('AnandDualTrackRepository', () => {
     });
   });
 
-  it('expireAllWatchingIntraday updates all TRADED rows to EXPIRED', async () => {
-    prisma.intradayEntry.updateMany.mockResolvedValue({ count: 3 });
-    const count = await repo.expireAllWatchingIntraday();
-    expect(count).toBe(3);
-    expect(prisma.intradayEntry.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { status: 'TRADED' }, data: expect.objectContaining({ status: 'EXPIRED' }) }),
-    );
-  });
-
   it('getPnlSummary returns daily/weekly/monthly/yearly stats', async () => {
     const exits = [
       { exitedAt: new Date(), entryPrice: 100, exitPrice: 105 },

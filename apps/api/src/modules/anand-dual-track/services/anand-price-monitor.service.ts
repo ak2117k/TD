@@ -24,11 +24,45 @@ export class AnandPriceMonitorService {
     await this.checkEntries(swing, 'swing');
   }
 
-  // Expire all WATCHING intraday entries at 15:15 IST (market close).
+  // Expire all open intraday entries at 15:15 IST (market close), marking each
+  // to its last traded price. Recording exitPrice (rather than leaving it null)
+  // is what makes an expired trade count toward realized P&L as its true
+  // gain/loss — without it, only TARGET_HIT winners ever carried an exitPrice,
+  // so the P&L summary silently summed winners only (100% win rate, inflated).
   @Cron('15 15 15 * * 1-5', { timeZone: 'Asia/Kolkata' })
   async expireIntradayAtClose(): Promise<void> {
-    const count = await this.repo.expireAllWatchingIntraday();
-    this.logger.log(`[anand-intraday] expired ${count} WATCHING entries at market close`);
+    const entries = await this.repo.listWatchingIntraday();
+    if (entries.length === 0) {
+      this.logger.log('[anand-intraday] no open entries to expire at close');
+      return;
+    }
+
+    const tokens = [...new Set(entries.map((e) => e.token).filter((t): t is string => !!t))];
+    const ltpMap = tokens.length
+      ? await this.adapter.getLtpsBatch('NSE', tokens).catch(() => new Map<string, number>())
+      : new Map<string, number>();
+
+    const now = new Date();
+    let count = 0;
+    for (const entry of entries) {
+      const ltp = entry.token ? ltpMap.get(entry.token) : undefined;
+      // Mark to market at the close LTP. Fall back to entryPrice (breakeven,
+      // 0% — neither win nor loss) when no price is available, so the trade is
+      // still closed and counted instead of being dropped from P&L.
+      const exitPrice = ltp ?? entry.entryPrice;
+      if (ltp === undefined) {
+        this.logger.warn(
+          `[anand-intraday] ${entry.id} (${entry.symbol}) expired with no LTP — marked breakeven at entry ${entry.entryPrice}`,
+        );
+      }
+      await this.repo.updateIntradayStatus(entry.id, {
+        status: 'EXPIRED',
+        exitPrice,
+        exitedAt: now,
+      });
+      count++;
+    }
+    this.logger.log(`[anand-intraday] expired ${count} entries (marked to market) at market close`);
   }
 
   // Poll swing entries every 10 min always; guard skips during market hours
