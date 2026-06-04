@@ -388,10 +388,12 @@ describe('WatchService.onTick', () => {
     expect(repo.createEvent).not.toHaveBeenCalled();
   });
 
-  it('transitions to TARGET_HIT when BUY price ≥ profitTarget', async () => {
+  it('transitions to TARGET_HIT when a TRADED BUY position reaches profitTarget', async () => {
+    // Only a TRADED position records a real TARGET_HIT — an untraded WATCHING
+    // entry that drifts to its target is MISSED instead (covered separately).
     repo.findActiveByToken.mockResolvedValue([{
-      id: 'w1', token: '11536', side: 'BUY', status: 'WATCHING',
-      initialPrice: 4000, lastEventPrice: 4000, profitTarget: 4150,
+      id: 'w1', token: '11536', side: 'BUY', status: 'TRADED',
+      initialPrice: 4000, executedPrice: 4000, lastEventPrice: 4000, profitTarget: 4150,
       maxFavorable: 4000, maxAdverse: 4000, optionsToken: null,
     }]);
     await svc.onTick('11536', 4160, new Date('2026-05-13T10:00:00Z'));
@@ -404,10 +406,10 @@ describe('WatchService.onTick', () => {
     expect(feed.unsubscribeForWatch).toHaveBeenCalledWith('11536', 'w1');
   });
 
-  it('transitions to TARGET_HIT when SELL price ≤ profitTarget', async () => {
+  it('transitions to TARGET_HIT when a TRADED SELL position reaches profitTarget', async () => {
     repo.findActiveByToken.mockResolvedValue([{
-      id: 'w1', token: '11536', side: 'SELL', status: 'WATCHING',
-      initialPrice: 4000, lastEventPrice: 4000, profitTarget: 3850,
+      id: 'w1', token: '11536', side: 'SELL', status: 'TRADED',
+      initialPrice: 4000, executedPrice: 4000, lastEventPrice: 4000, profitTarget: 3850,
       maxFavorable: 4000, maxAdverse: 4000, optionsToken: null,
     }]);
     await svc.onTick('11536', 3840, new Date('2026-05-13T10:00:00Z'));
@@ -746,6 +748,69 @@ describe('WatchService.onTick — hard loss-cut', () => {
     expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
       status: 'STOPPED', closedReason: 'loss-cut',
     }));
+  });
+});
+
+describe('WatchService.onTick — untraded alerts become MISSED, not TARGET_HIT', () => {
+  let svc: WatchService;
+  let repo: any;
+
+  beforeEach(async () => {
+    repo = {
+      findActiveByToken: jest.fn(),
+      // transitionTargetHit re-reads the entry to close its linked trade.
+      findById: jest.fn().mockResolvedValue({
+        id: 'w1', token: '11536', symbol: 'TCS-EQ', side: 'BUY',
+        status: 'TRADED', optionsToken: null, paperTradeId: 'pt-1',
+      }),
+      createEvent: jest.fn().mockResolvedValue({ id: 'e1' }),
+      update: jest.fn().mockResolvedValue({}),
+    };
+    mockTrade.closeTrade = jest.fn().mockResolvedValue({});
+    const mod = await Test.createTestingModule({
+      providers: [
+        WatchService,
+        { provide: WatchRepository, useValue: repo },
+        { provide: TargetCalculatorService, useValue: { compute: jest.fn() } },
+        { provide: StrikeSelectorService, useValue: { pick: jest.fn() } },
+        { provide: MarketFeedService, useValue: { subscribeForWatch: jest.fn(), unsubscribeForWatch: jest.fn() } },
+        { provide: LevelBookService, useValue: { getLevels: jest.fn() } },
+        { provide: WatchGateway, useValue: { emitTick: jest.fn(), emitEvent: jest.fn(), emitCreated: jest.fn(), emitEntry: jest.fn() } },
+        { provide: TradeExecutionService, useValue: mockTrade },
+      ],
+    }).compile();
+    svc = mod.get(WatchService);
+  });
+
+  const entry = (overrides: Record<string, any> = {}) => ({
+    id: 'w1', token: '11536', symbol: 'TCS-EQ', side: 'BUY',
+    initialPrice: 2000, profitTarget: 2200, optionsToken: null,
+    maxFavorable: 2000, maxAdverse: 2000, lastTickAt: null,
+    ...overrides,
+  });
+
+  it('a WATCHING (untraded) entry that drifts past its target is MISSED — no phantom TARGET_HIT, no trade closed', async () => {
+    repo.findActiveByToken.mockResolvedValue([
+      entry({ status: 'WATCHING', executedPrice: null, paperTradeId: null }),
+    ]);
+
+    await svc.onTick('11536', 2200, new Date()); // price crosses the target
+
+    expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({ status: 'MISSED' }));
+    const phantom = (repo.update.mock.calls as any[]).find((c) => c[1]?.status === 'TARGET_HIT');
+    expect(phantom).toBeUndefined();
+    expect(mockTrade.closeTrade).not.toHaveBeenCalled();
+  });
+
+  it('a TRADED entry that reaches its target is still TARGET_HIT and closes the trade', async () => {
+    repo.findActiveByToken.mockResolvedValue([
+      entry({ status: 'TRADED', executedPrice: 2000, paperTradeId: 'pt-1' }),
+    ]);
+
+    await svc.onTick('11536', 2200, new Date());
+
+    expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({ status: 'TARGET_HIT' }));
+    expect(mockTrade.closeTrade).toHaveBeenCalledWith('pt-1', expect.objectContaining({ exitPrice: 2200 }));
   });
 });
 

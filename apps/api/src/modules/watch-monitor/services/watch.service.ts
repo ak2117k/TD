@@ -646,7 +646,16 @@ export class WatchService {
       ? ltp >= entry.profitTarget
       : ltp <= entry.profitTarget;
     if (isTargetHit) {
-      await this.transitionTargetHit(entry.id, ltp);
+      // Only a TRADED position can record a real TARGET_HIT win. An un-executed
+      // entry (still WATCHING — e.g. the upside gate refused to chase a price
+      // that already ran past the alert) that drifts to its target is NOT a
+      // trade we took: mark it MISSED rather than a phantom TARGET_HIT, so it
+      // never books a win or pollutes the P&L total.
+      if (entry.status === WatchStatus.TRADED) {
+        await this.transitionTargetHit(entry.id, ltp);
+      } else {
+        await this.transitionMissed(entry.id, ltp);
+      }
       return;
     }
 
@@ -733,6 +742,29 @@ export class WatchService {
       status: WatchStatus.TARGET_HIT,
       closedAt: new Date(),
       closedReason: 'target-hit',
+    });
+    await this.unsubscribeEntry(entryId);
+  }
+
+  /**
+   * Mark an un-executed entry MISSED: the alert reached its target/stop level
+   * but no position was ever opened (e.g. the upside gate refused to chase a
+   * price that had already run past the alert), so there is no trade to close
+   * and no realised P&L. Recording MISSED rather than a phantom TARGET_HIT
+   * keeps these untraded alerts out of the P&L total and makes TARGET_HIT mean
+   * "a real trade that won".
+   */
+  async transitionMissed(entryId: string, price: number): Promise<void> {
+    await this.repo.createEvent({
+      watchEntryId: entryId,
+      eventType: WatchEventType.TARGET_HIT,
+      price,
+      notes: 'untraded alert reached level — MISSED (no position taken)',
+    });
+    await this.repo.update(entryId, {
+      status: WatchStatus.MISSED,
+      closedAt: new Date(),
+      closedReason: 'missed-untraded',
     });
     await this.unsubscribeEntry(entryId);
   }

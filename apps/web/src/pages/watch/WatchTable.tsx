@@ -33,6 +33,7 @@ function statusColor(entry: WatchEntry): string {
     case 'STOPPED': return 'text-red-400';
     case 'EXITED': return 'text-[var(--color-text-muted)]';
     case 'DISMISSED': return 'text-[var(--color-text-muted)]';
+    case 'MISSED': return 'text-amber-500/70';
     default: return 'text-[var(--color-text-secondary)]';
   }
 }
@@ -165,7 +166,20 @@ export function WatchTable({ entries, onSelect, selectedId, fetchEntry }: Props)
               <td className="py-2 px-3 text-right text-[var(--color-text-secondary)]">
                 {pctChange(e.currentPrice, e.executedPrice ?? e.initialPrice)}
               </td>
-              {isClosed(e.status) ? (
+              {e.status === 'MISSED' ? (
+                // Reached its level but was never traded (gate-rejected). It has
+                // no real and no takeable P&L, so show "—" rather than a phantom
+                // what-if figure that would pad a hand-summed column.
+                <>
+                  <td
+                    className="py-2 px-3 text-right tabular-nums text-[var(--color-text-muted)]"
+                    title="Alert reached its level but was never traded (gate-rejected) — no P&L"
+                  >
+                    —
+                  </td>
+                  <td className="py-2 px-3 text-right tabular-nums text-[var(--color-text-muted)]">—</td>
+                </>
+              ) : isClosed(e.status) ? (
                 e.realizedPnl != null ? (
                   // Executed & closed → realized P&L from the linked trade.
                   <>

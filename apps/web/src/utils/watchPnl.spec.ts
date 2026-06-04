@@ -90,6 +90,12 @@ describe('sectionTotalPnl', () => {
     const closed = entry({ status: 'STOPPED', realizedPnl: -1500 });
     expect(sectionTotalPnl([open, closed])).toBeCloseTo(8500, 0);
   });
+
+  it('a MISSED (untraded, gate-rejected) entry contributes ₹0 — no phantom what-if win', () => {
+    // Reached its level but was never executed; must not pollute the column.
+    const missed = entry({ status: 'MISSED', initialPrice: 100, currentPrice: 110, realizedPnl: null });
+    expect(sectionTotalPnl([missed])).toBe(0);
+  });
 });
 
 describe('pnlBreakdown', () => {
@@ -102,6 +108,17 @@ describe('pnlBreakdown', () => {
     expect(b.open).toBeCloseTo(10000, 0);
     expect(b.whatIf).toBeCloseTo(2917.59, 1);
     expect(b.real).toBeCloseTo(8500, 0); // realized + open, excludes what-if
+  });
+
+  it('a MISSED entry contributes to no bucket — not realized, open, what-if, or real', () => {
+    // MISSED = alert reached its level but was never executable (gate-rejected),
+    // so it is not real money AND not a meaningful what-if. Excluded everywhere.
+    const missed = entry({ status: 'MISSED', initialPrice: 100, currentPrice: 110, realizedPnl: null });
+    const b = pnlBreakdown([missed]);
+    expect(b.realized).toBe(0);
+    expect(b.open).toBe(0);
+    expect(b.whatIf).toBe(0);
+    expect(b.real).toBe(0);
   });
 
   it('counts a DISMISSED never-traded entry as what-if, never as real', () => {

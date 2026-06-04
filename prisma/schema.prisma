@@ -529,6 +529,11 @@ enum WatchStatus {
   STOPPED
   EXITED
   DISMISSED
+  // Alert that reached its target/stop level but was never executed as a trade
+  // (e.g. the upside gate refused to chase a price that already ran away).
+  // Distinct from TARGET_HIT so an untraded alert is never booked as a win and
+  // stays out of realized P&L.
+  MISSED
 }
 
 enum WatchEventType {

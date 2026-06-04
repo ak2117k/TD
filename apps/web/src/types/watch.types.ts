@@ -1,5 +1,7 @@
 export type WatchStatus =
-  | 'WATCHING' | 'TRADED' | 'TARGET_HIT' | 'STOPPED' | 'EXITED' | 'DISMISSED';
+  | 'WATCHING' | 'TRADED' | 'TARGET_HIT' | 'STOPPED' | 'EXITED' | 'DISMISSED'
+  // Alert that reached its level but was never executed (e.g. gate-rejected).
+  | 'MISSED';
 
 export type WatchEventType =
   | 'INITIAL' | 'PRICE_CHANGE' | 'SCORE_CHANGE' | 'TARGET_HIT'

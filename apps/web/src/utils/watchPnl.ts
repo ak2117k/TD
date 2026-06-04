@@ -118,6 +118,10 @@ export function isClosed(status: string): boolean {
  */
 export function sectionTotalPnl(entries: WatchEntry[]): number {
   return entries.reduce((total, e) => {
+    // A MISSED alert reached its level but was never executed (e.g. the upside
+    // gate refused to chase a price that already ran away). It is neither real
+    // money nor a meaningful what-if — exclude it so it never pads the column.
+    if (e.status === 'MISSED') return total;
     if (isClosed(e.status) && e.realizedPnl != null) {
       return total + e.realizedPnl;
     }
@@ -163,6 +167,8 @@ export function pnlBreakdown(
   let openFromEntries = 0;
   let whatIf = 0;
   for (const e of entries) {
+    // MISSED (untraded, gate-rejected) belongs in no bucket — see sectionTotalPnl.
+    if (e.status === 'MISSED') continue;
     if (isClosed(e.status) && e.realizedPnl != null) {
       realized += e.realizedPnl;
     } else if (e.status === 'TRADED') {
