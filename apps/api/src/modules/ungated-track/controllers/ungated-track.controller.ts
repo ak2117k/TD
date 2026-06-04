@@ -25,7 +25,13 @@ export class UngatedTrackController {
     const r = entry.paperTradeId
       ? (await this.tradeRepo.findRealization([entry.paperTradeId])).get(entry.paperTradeId)
       : undefined;
-    return { ...entry, realizedPnl: r?.pnl ?? null, realizedFees: r?.fees ?? null };
+    const scannerNames = await this.watchRepo.findScannerNames([entry.alertId]);
+    return {
+      ...entry,
+      scannerName: entry.alertId ? scannerNames.get(entry.alertId) ?? null : null,
+      realizedPnl: r?.pnl ?? null,
+      realizedFees: r?.fees ?? null,
+    };
   }
 
   @Get('watch')
@@ -37,10 +43,18 @@ export class UngatedTrackController {
     const tradeIds = entries
       .map((e) => e.paperTradeId)
       .filter((x): x is string => !!x);
-    const realization = await this.tradeRepo.findRealization(tradeIds);
+    const [realization, scannerNames] = await Promise.all([
+      this.tradeRepo.findRealization(tradeIds),
+      this.watchRepo.findScannerNames(entries.map((e) => e.alertId)),
+    ]);
     return entries.map((e) => {
       const r = e.paperTradeId ? realization.get(e.paperTradeId) : undefined;
-      return { ...e, realizedPnl: r?.pnl ?? null, realizedFees: r?.fees ?? null };
+      return {
+        ...e,
+        scannerName: e.alertId ? scannerNames.get(e.alertId) ?? null : null,
+        realizedPnl: r?.pnl ?? null,
+        realizedFees: r?.fees ?? null,
+      };
     });
   }
 

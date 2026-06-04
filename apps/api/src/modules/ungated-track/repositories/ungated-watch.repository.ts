@@ -166,4 +166,19 @@ export class UngatedWatchRepository {
   async update(id: string, data: Prisma.UngatedWatchEntryUpdateInput) {
     return this.prisma.ungatedWatchEntry.update({ where: { id }, data });
   }
+
+  /**
+   * Resolve alertId -> Chartink scanner name. Batched; deduped; null-safe.
+   * Mirrors WatchRepository.findScannerNames — the ungated controller does the
+   * scanner-name join itself (this repo has no relations to ChartinkAlert).
+   */
+  async findScannerNames(alertIds: Array<string | null>): Promise<Map<string, string>> {
+    const ids = [...new Set(alertIds.filter((x): x is string => !!x))];
+    if (ids.length === 0) return new Map();
+    const alerts = await this.prisma.chartinkAlert.findMany({
+      where: { id: { in: ids } },
+      include: { scanner: true },
+    });
+    return new Map(alerts.map((a) => [a.id, a.scanner.scanName]));
+  }
 }
