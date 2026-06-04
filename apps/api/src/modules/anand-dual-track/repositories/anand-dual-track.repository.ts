@@ -210,6 +210,92 @@ export class AnandDualTrackRepository {
     return out;
   }
 
+  // ── Reinvestment (Feature 4) ─────────────────────────────────────────────
+  async createReinvestmentLot(input: {
+    symbol: string;
+    sourceSwingEntryId: string;
+    capital: number;
+    entryPrice: number;
+  }): Promise<{ id: string } | null> {
+    // sourceSwingEntryId is @unique — a duplicate create (re-poll) throws P2002;
+    // swallow it so the lot is created at most once per swing target hit.
+    try {
+      return await this.prisma.reinvestmentLot.create({
+        data: { ...input, targetPct: 10, stopPct: 10, status: 'OPEN' },
+        select: { id: true },
+      });
+    } catch (err: any) {
+      if (err?.code === 'P2002') return null;
+      throw err;
+    }
+  }
+
+  async listOpenReinvestmentLots() {
+    return this.prisma.reinvestmentLot.findMany({ where: { status: 'OPEN' }, orderBy: { enteredAt: 'desc' } });
+  }
+
+  async listReinvestmentLots(status?: string) {
+    return this.prisma.reinvestmentLot.findMany({
+      where: status ? { status } : {},
+      orderBy: { enteredAt: 'desc' },
+      take: 200,
+    });
+  }
+
+  async closeReinvestmentLot(
+    id: string,
+    data: { status: string; exitPrice: number; exitedAt: Date; exitReason: string },
+  ): Promise<void> {
+    await this.prisma.reinvestmentLot.update({ where: { id }, data });
+  }
+
+  async getPool() {
+    return this.prisma.reinvestmentPool.upsert({
+      where: { id: 'singleton' },
+      create: { id: 'singleton' },
+      update: {},
+    });
+  }
+
+  async applyPoolDelta(delta: {
+    harvestedTotal?: number;
+    deployedActive?: number;
+    idleBalance?: number;
+    realizedPnl?: number;
+  }): Promise<void> {
+    await this.prisma.reinvestmentPool.upsert({
+      where: { id: 'singleton' },
+      create: {
+        id: 'singleton',
+        harvestedTotal: delta.harvestedTotal ?? 0,
+        deployedActive: delta.deployedActive ?? 0,
+        idleBalance: delta.idleBalance ?? 0,
+        realizedPnl: delta.realizedPnl ?? 0,
+      },
+      update: {
+        harvestedTotal: { increment: delta.harvestedTotal ?? 0 },
+        deployedActive: { increment: delta.deployedActive ?? 0 },
+        idleBalance: { increment: delta.idleBalance ?? 0 },
+        realizedPnl: { increment: delta.realizedPnl ?? 0 },
+      },
+    });
+  }
+
+  /** Resolve symbol → instrument token using the most recent swing entry token. */
+  async resolveTokens(symbols: string[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    if (symbols.length === 0) return out;
+    const rows = await this.prisma.swingEntry.findMany({
+      where: { symbol: { in: [...new Set(symbols)] }, token: { not: null } },
+      select: { symbol: true, token: true },
+      orderBy: { enteredAt: 'desc' },
+    });
+    for (const r of rows) {
+      if (r.token && !out.has(r.symbol)) out.set(r.symbol, r.token);
+    }
+    return out;
+  }
+
   async findScannerNamesByAlertIds(alertIds: string[]): Promise<Map<string, string>> {
     if (alertIds.length === 0) return new Map();
     const rows = await this.prisma.chartinkAlert.findMany({
