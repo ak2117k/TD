@@ -4,12 +4,13 @@ import { AnandDualTrackRepository } from '../../repositories/anand-dual-track.re
 
 describe('AnandDualTrackService', () => {
   let service: AnandDualTrackService;
-  let repo: { createIntradayEntry: jest.Mock; createSwingEntry: jest.Mock };
+  let repo: { createIntradayEntry: jest.Mock; createSwingEntry: jest.Mock; findActiveTradedBySymbol: jest.Mock };
 
   beforeEach(async () => {
     repo = {
       createIntradayEntry: jest.fn().mockResolvedValue({ id: 'i1' }),
       createSwingEntry: jest.fn().mockResolvedValue({ id: 's1' }),
+      findActiveTradedBySymbol: jest.fn().mockResolvedValue(null),
     };
 
     const mod = await Test.createTestingModule({
@@ -27,6 +28,8 @@ describe('AnandDualTrackService', () => {
       alertId: 'a1', symbol: 'RELIANCE', token: '2885', hitPrice: 2500, scoreBreakdown: [{ name: 'RSI', passed: true }],
     };
     await service.createEntries(input);
+    expect(repo.findActiveTradedBySymbol).toHaveBeenCalledWith('intraday', 'RELIANCE');
+    expect(repo.findActiveTradedBySymbol).toHaveBeenCalledWith('swing', 'RELIANCE');
     expect(repo.createIntradayEntry).toHaveBeenCalledWith({
       symbol: 'RELIANCE', token: '2885', entryPrice: 2500, alertId: 'a1', scoreBreakdown: [{ name: 'RSI', passed: true }],
     });
@@ -41,5 +44,30 @@ describe('AnandDualTrackService', () => {
       alertId: 'a1', symbol: 'TCS', token: '11536', hitPrice: 3500, scoreBreakdown: null,
     })).resolves.not.toThrow();
     expect(repo.createIntradayEntry).toHaveBeenCalled();
+  });
+
+  it('skips intraday create if active TRADED entry exists for symbol', async () => {
+    repo.findActiveTradedBySymbol.mockImplementation((track: string) =>
+      track === 'intraday' ? Promise.resolve({ id: 'existing-i' }) : Promise.resolve(null),
+    );
+    await service.createEntries({ alertId: 'a1', symbol: 'INFY', token: '1594', hitPrice: 1700, scoreBreakdown: null });
+    expect(repo.createIntradayEntry).not.toHaveBeenCalled();
+    expect(repo.createSwingEntry).toHaveBeenCalled();
+  });
+
+  it('skips swing create if active TRADED entry exists for symbol', async () => {
+    repo.findActiveTradedBySymbol.mockImplementation((track: string) =>
+      track === 'swing' ? Promise.resolve({ id: 'existing-s' }) : Promise.resolve(null),
+    );
+    await service.createEntries({ alertId: 'a1', symbol: 'INFY', token: '1594', hitPrice: 1700, scoreBreakdown: null });
+    expect(repo.createIntradayEntry).toHaveBeenCalled();
+    expect(repo.createSwingEntry).not.toHaveBeenCalled();
+  });
+
+  it('skips both creates if active TRADED entries exist for both tracks', async () => {
+    repo.findActiveTradedBySymbol.mockResolvedValue({ id: 'existing' });
+    await service.createEntries({ alertId: 'a1', symbol: 'HDFCBANK', token: '1333', hitPrice: 1600, scoreBreakdown: null });
+    expect(repo.createIntradayEntry).not.toHaveBeenCalled();
+    expect(repo.createSwingEntry).not.toHaveBeenCalled();
   });
 });

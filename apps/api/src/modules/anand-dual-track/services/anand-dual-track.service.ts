@@ -24,16 +24,29 @@ export class AnandDualTrackService {
       scoreBreakdown: input.scoreBreakdown,
     };
 
-    const results = await Promise.allSettled([
-      this.repo.createIntradayEntry(shared),
-      this.repo.createSwingEntry(shared),
+    // Independent guard per track — intraday TRADED entry does NOT block swing
+    const [activeIntraday, activeSwing] = await Promise.all([
+      this.repo.findActiveTradedBySymbol('intraday', input.symbol),
+      this.repo.findActiveTradedBySymbol('swing', input.symbol),
     ]);
 
-    for (const [i, result] of results.entries()) {
-      if (result.status === 'rejected') {
-        this.logger.warn(
-          `[anand-dual-track] ${i === 0 ? 'intraday' : 'swing'} insert failed for ${input.symbol}: ${result.reason instanceof Error ? result.reason.message : result.reason}`,
-        );
+    if (activeIntraday) {
+      this.logger.log(`[anand] intraday: ${input.symbol} already has active TRADED entry — skipping`);
+    } else {
+      try {
+        await this.repo.createIntradayEntry(shared);
+      } catch (err) {
+        this.logger.warn(`[anand-dual-track] intraday insert failed for ${input.symbol}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+
+    if (activeSwing) {
+      this.logger.log(`[anand] swing: ${input.symbol} already has active TRADED entry — skipping`);
+    } else {
+      try {
+        await this.repo.createSwingEntry(shared);
+      } catch (err) {
+        this.logger.warn(`[anand-dual-track] swing insert failed for ${input.symbol}: ${err instanceof Error ? err.message : err}`);
       }
     }
   }
