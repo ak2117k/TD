@@ -19,7 +19,7 @@ export interface AnandEntry {
   leadCount?: number;           // Feature 1: how many times this symbol led (swing)
   leadDates?: string[];         // lossless ISO-timestamp lead log
   trailing?: boolean;           // Feature 3: intraday trailing-stop armed
-  exitReason?: string | null;   // TARGET_5PCT | TRAIL_ST | TRAIL_GB | STOP | EXPIRE
+  exitReason?: string | null;   // set only on trailed exits: TRAIL_ST | TRAIL_GB (null for plain target/stop/expire)
 }
 
 export interface PnlPeriod {
