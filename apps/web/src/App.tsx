@@ -22,6 +22,7 @@ import { WatchPage } from '@/pages/watch/WatchPage';
 import { UngatedWatchPage } from '@/pages/ungated-watch/UngatedWatchPage';
 import IntradayPage from '@/pages/intraday/IntradayPage';
 import SwingPage from '@/pages/swing/SwingPage';
+import ReinvestPage from '@/pages/reinvest/ReinvestPage';
 
 export default function App() {
   // Open the live-data WebSocket once at app boot. wsService.connect() is
@@ -48,6 +49,7 @@ export default function App() {
         <Route path="ungated-watch" element={<UngatedWatchPage />} />
         <Route path="intraday" element={<IntradayPage />} />
         <Route path="swing" element={<SwingPage />} />
+        <Route path="reinvest" element={<ReinvestPage />} />
         <Route path="auto-trade" element={<AutoTradePage />} />
         <Route path="positions" element={<PositionsPage />} />
         <Route path="news" element={<NewsPage />} />
