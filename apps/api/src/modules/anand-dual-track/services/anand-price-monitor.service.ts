@@ -130,6 +130,9 @@ export class AnandPriceMonitorService {
   private async supertrend15m(token: string): Promise<number | null> {
     const to = new Date();
     const from = new Date(to.getTime() - 6 * 24 * 60 * 60 * 1000); // ~6 calendar days
+    // Note: across long weekends/holidays this ~6-calendar-day window can shrink
+    // to a single trading session, yielding < 11 bars; we then return null and
+    // the caller intentionally falls back to the 2% give-back trailing stop.
     const candles = await this.adapter
       .getHistoricalData(token, 'NSE', '15m', from, to)
       .catch(() => [] as any[]);
@@ -155,11 +158,11 @@ export class AnandPriceMonitorService {
       const ltp = ltpMap.get(entry.token as string);
       if (ltp === undefined) continue;
 
-      // Only fetch candles when the entry is (or is about to be) trailing —
-      // keeps rate-limited candle calls to a minimum.
+      // Supertrend only matters once we are already trailing — the decision for
+      // a not-yet-trailing entry never consults stLine — so fetch the
+      // rate-limited candles only then.
       const pnlPct = ((ltp - entry.entryPrice) / entry.entryPrice) * 100;
-      const willTrail = entry.trailing || pnlPct >= entry.targetPct;
-      const stLine = entry.trailing && willTrail ? await this.supertrend15m(entry.token as string) : null;
+      const stLine = entry.trailing ? await this.supertrend15m(entry.token as string) : null;
 
       const d = AnandPriceMonitorService.decideIntradayTrail(entry, ltp, stLine);
       if (d.action === 'STOP') {
@@ -215,11 +218,11 @@ export class AnandPriceMonitorService {
 
   private async checkReinvestmentLots(): Promise<void> {
     const lots = await this.repo.listOpenReinvestmentLots();
-    const withToken = lots.filter((l) => l.symbol);
-    if (withToken.length === 0) return;
+    if (lots.length === 0) return;
     // Lots store symbol but not token; resolve the token via the most-recent
-    // swing entry for each symbol.
-    const symbols = [...new Set(withToken.map((l) => l.symbol))];
+    // swing entry for each symbol. Lots whose token/LTP is unavailable are
+    // skipped in the loop below.
+    const symbols = [...new Set(lots.map((l) => l.symbol))];
     const tokenMap = await this.repo.resolveTokens(symbols).catch(() => new Map<string, string>());
     const tokens = [...new Set([...tokenMap.values()])];
     const ltpMap = tokens.length

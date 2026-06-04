@@ -174,10 +174,16 @@ export class AnandDualTrackRepository {
   }
 
   /**
-   * Record one "lead" occurrence for a symbol+track. Increments count and
-   * appends the current ISO timestamp to the lossless `dates` log. Called on
-   * EVERY scanner fire — even when no new entry is created — so the count is
-   * true lead frequency.
+   * Record one "lead" occurrence for a symbol+track. Called on EVERY scanner
+   * fire — even when no new entry is created.
+   *
+   * `count` is the AUTHORITATIVE lead frequency: it is incremented atomically
+   * (`{ increment: 1 }`) and is always correct under concurrent fires.
+   *
+   * `dates` is a BEST-EFFORT day log built via read-modify-write, so under
+   * concurrent same-symbol fires it may rarely drop a timestamp (last writer
+   * wins on the array). Do not treat `dates.length` as the lead count — use
+   * `count` for that.
    */
   async bumpLeadStat(track: 'swing' | 'intraday', symbol: string): Promise<void> {
     const nowIso = new Date().toISOString();
@@ -242,11 +248,21 @@ export class AnandDualTrackRepository {
     });
   }
 
+  /**
+   * Guarded close: transitions the lot to a terminal status ONLY if it is still
+   * OPEN. Uses `updateMany` with a status guard so two overlapping poll runs
+   * cannot both close the same lot — exactly one wins. Returns whether THIS call
+   * performed the transition, so the caller knows whether to apply the pool delta.
+   */
   async closeReinvestmentLot(
     id: string,
     data: { status: string; exitPrice: number; exitedAt: Date; exitReason: string },
-  ): Promise<void> {
-    await this.prisma.reinvestmentLot.update({ where: { id }, data });
+  ): Promise<{ transitioned: boolean }> {
+    const res = await this.prisma.reinvestmentLot.updateMany({
+      where: { id, status: 'OPEN' },
+      data,
+    });
+    return { transitioned: res.count === 1 };
   }
 
   async getPool() {

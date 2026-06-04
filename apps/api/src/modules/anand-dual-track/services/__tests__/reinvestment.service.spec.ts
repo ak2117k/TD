@@ -4,7 +4,7 @@ function makeRepo() {
   return {
     createReinvestmentLot: jest.fn(async (): Promise<{ id: string } | null> => ({ id: 'lot1' })),
     applyPoolDelta: jest.fn(async () => {}),
-    closeReinvestmentLot: jest.fn(async () => {}),
+    closeReinvestmentLot: jest.fn(async (): Promise<{ transitioned: boolean }> => ({ transitioned: true })),
   };
 }
 
@@ -36,5 +36,13 @@ describe('ReinvestmentService', () => {
 
     expect(repo.closeReinvestmentLot).toHaveBeenCalledWith('lot1', expect.objectContaining({ status: 'TARGET_HIT', exitPrice: 110, exitReason: 'TARGET_HIT' }));
     expect(repo.applyPoolDelta).toHaveBeenCalledWith({ deployedActive: -SWING_PROFIT, idleBalance: SWING_PROFIT + 2000, realizedPnl: 2000 });
+  });
+
+  it('does not touch the pool when the lot was already closed by another poll', async () => {
+    const repo = makeRepo();
+    repo.closeReinvestmentLot = jest.fn(async () => ({ transitioned: false }));
+    const svc = new ReinvestmentService(repo as any);
+    await svc.closeLot({ id: 'lot1', capital: SWING_PROFIT, entryPrice: 100 }, 110, 'TARGET_HIT');
+    expect(repo.applyPoolDelta).not.toHaveBeenCalled();
   });
 });

@@ -36,12 +36,13 @@ export class ReinvestmentService {
   ): Promise<void> {
     const pnlPct = ((ltp - lot.entryPrice) / lot.entryPrice) * 100;
     const lotPnl = (pnlPct / 100) * lot.capital;
-    await this.repo.closeReinvestmentLot(lot.id, {
+    const { transitioned } = await this.repo.closeReinvestmentLot(lot.id, {
       status,
       exitPrice: ltp,
       exitedAt: new Date(),
       exitReason: status,
     });
+    if (!transitioned) return; // another poll already closed it — do not double-count the pool
     await this.repo.applyPoolDelta({
       deployedActive: -lot.capital,
       idleBalance: lot.capital + lotPnl,
