@@ -4,13 +4,21 @@ import { AnandDualTrackRepository } from '../../repositories/anand-dual-track.re
 
 describe('AnandDualTrackService', () => {
   let service: AnandDualTrackService;
-  let repo: { createIntradayEntry: jest.Mock; createSwingEntry: jest.Mock; findActiveTradedBySymbol: jest.Mock };
+  let repo: {
+    createIntradayEntry: jest.Mock;
+    createSwingEntry: jest.Mock;
+    findActiveTradedBySymbol: jest.Mock;
+    bumpLeadStat: jest.Mock;
+    hasTargetHitTodayBySymbol: jest.Mock;
+  };
 
   beforeEach(async () => {
     repo = {
       createIntradayEntry: jest.fn().mockResolvedValue({ id: 'i1' }),
       createSwingEntry: jest.fn().mockResolvedValue({ id: 's1' }),
       findActiveTradedBySymbol: jest.fn().mockResolvedValue(null),
+      bumpLeadStat: jest.fn().mockResolvedValue(undefined),
+      hasTargetHitTodayBySymbol: jest.fn().mockResolvedValue(false),
     };
 
     const mod = await Test.createTestingModule({
@@ -69,5 +77,42 @@ describe('AnandDualTrackService', () => {
     await service.createEntries({ alertId: 'a1', symbol: 'HDFCBANK', token: '1333', hitPrice: 1600, scoreBreakdown: null });
     expect(repo.createIntradayEntry).not.toHaveBeenCalled();
     expect(repo.createSwingEntry).not.toHaveBeenCalled();
+  });
+});
+
+function makeRepo(overrides: Partial<any> = {}) {
+  return {
+    bumpLeadStat: jest.fn(async () => {}),
+    findActiveTradedBySymbol: jest.fn(async () => null),
+    hasTargetHitTodayBySymbol: jest.fn(async () => false),
+    createIntradayEntry: jest.fn(async () => ({ id: 'i1' })),
+    createSwingEntry: jest.fn(async () => ({ id: 's1' })),
+    ...overrides,
+  };
+}
+
+const leadGuardInput = { alertId: 'a1', symbol: 'TCS', token: 't1', hitPrice: 100, scoreBreakdown: null };
+
+describe('AnandDualTrackService.createEntries (lead + same-day guard)', () => {
+  it('bumps the swing lead stat on every fire', async () => {
+    const repo = makeRepo();
+    await new AnandDualTrackService(repo as any).createEntries(leadGuardInput);
+    expect(repo.bumpLeadStat).toHaveBeenCalledWith('swing', 'TCS');
+  });
+
+  it('skips both tracks when that track hit target today', async () => {
+    const repo = makeRepo({ hasTargetHitTodayBySymbol: jest.fn(async () => true) });
+    await new AnandDualTrackService(repo as any).createEntries(leadGuardInput);
+    expect(repo.createIntradayEntry).not.toHaveBeenCalled();
+    expect(repo.createSwingEntry).not.toHaveBeenCalled();
+    // lead stat still bumped
+    expect(repo.bumpLeadStat).toHaveBeenCalledWith('swing', 'TCS');
+  });
+
+  it('still creates entries on a normal fire', async () => {
+    const repo = makeRepo();
+    await new AnandDualTrackService(repo as any).createEntries(leadGuardInput);
+    expect(repo.createIntradayEntry).toHaveBeenCalled();
+    expect(repo.createSwingEntry).toHaveBeenCalled();
   });
 });

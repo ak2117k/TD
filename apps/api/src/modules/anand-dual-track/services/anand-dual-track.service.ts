@@ -24,14 +24,24 @@ export class AnandDualTrackService {
       scoreBreakdown: input.scoreBreakdown,
     };
 
-    // Independent guard per track — intraday TRADED entry does NOT block swing
-    const [activeIntraday, activeSwing] = await Promise.all([
+    // Feature 1: record the lead on EVERY swing fire, before any guard.
+    await this.repo.bumpLeadStat('swing', input.symbol).catch((err) =>
+      this.logger.warn(`[anand] bumpLeadStat failed for ${input.symbol}: ${err instanceof Error ? err.message : err}`),
+    );
+
+    // Per-track guards: skip if an active TRADED entry exists OR (Feature 2)
+    // the symbol already hit its target today on that track.
+    const [activeIntraday, activeSwing, intradayHitToday, swingHitToday] = await Promise.all([
       this.repo.findActiveTradedBySymbol('intraday', input.symbol),
       this.repo.findActiveTradedBySymbol('swing', input.symbol),
+      this.repo.hasTargetHitTodayBySymbol('intraday', input.symbol),
+      this.repo.hasTargetHitTodayBySymbol('swing', input.symbol),
     ]);
 
     if (activeIntraday) {
       this.logger.log(`[anand] intraday: ${input.symbol} already has active TRADED entry — skipping`);
+    } else if (intradayHitToday) {
+      this.logger.log(`[anand] intraday: ${input.symbol} already hit target today — SKIP_TARGET_HIT_TODAY`);
     } else {
       try {
         await this.repo.createIntradayEntry(shared);
@@ -42,6 +52,8 @@ export class AnandDualTrackService {
 
     if (activeSwing) {
       this.logger.log(`[anand] swing: ${input.symbol} already has active TRADED entry — skipping`);
+    } else if (swingHitToday) {
+      this.logger.log(`[anand] swing: ${input.symbol} already hit target today — SKIP_TARGET_HIT_TODAY`);
     } else {
       try {
         await this.repo.createSwingEntry(shared);
