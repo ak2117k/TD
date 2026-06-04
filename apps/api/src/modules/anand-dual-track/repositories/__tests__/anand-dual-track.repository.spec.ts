@@ -8,13 +8,18 @@ describe('AnandDualTrackRepository', () => {
     intradayEntry: {
       create: jest.Mock;
       findMany: jest.Mock;
+      findFirst: jest.Mock;
       update: jest.Mock;
       updateMany: jest.Mock;
     };
     swingEntry: {
       create: jest.Mock;
       findMany: jest.Mock;
+      findFirst: jest.Mock;
       update: jest.Mock;
+    };
+    chartinkAlert: {
+      findMany: jest.Mock;
     };
   };
 
@@ -23,13 +28,18 @@ describe('AnandDualTrackRepository', () => {
       intradayEntry: {
         create: jest.fn(),
         findMany: jest.fn().mockResolvedValue([]),
+        findFirst: jest.fn().mockResolvedValue(null),
         update: jest.fn(),
         updateMany: jest.fn(),
       },
       swingEntry: {
         create: jest.fn(),
         findMany: jest.fn().mockResolvedValue([]),
+        findFirst: jest.fn().mockResolvedValue(null),
         update: jest.fn(),
+      },
+      chartinkAlert: {
+        findMany: jest.fn().mockResolvedValue([]),
       },
     };
 
@@ -65,18 +75,18 @@ describe('AnandDualTrackRepository', () => {
     );
   });
 
-  it('listWatchingIntraday returns only WATCHING rows', async () => {
-    const row = { id: 'i1', symbol: 'RELIANCE', token: '123', entryPrice: 2500, status: 'WATCHING', targetPct: 5, stopPct: 5 };
+  it('listWatchingIntraday returns only TRADED rows', async () => {
+    const row = { id: 'i1', symbol: 'RELIANCE', token: '123', entryPrice: 2500, status: 'TRADED', targetPct: 5, stopPct: 5 };
     prisma.intradayEntry.findMany.mockResolvedValue([row]);
     const result = await repo.listWatchingIntraday();
     expect(prisma.intradayEntry.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ status: 'WATCHING' }) }),
+      expect.objectContaining({ where: expect.objectContaining({ status: 'TRADED' }) }),
     );
     expect(result).toHaveLength(1);
   });
 
-  it('listWatchingSwing returns only WATCHING rows', async () => {
-    const row = { id: 's1', symbol: 'TCS', token: '456', entryPrice: 3500, status: 'WATCHING', targetPct: 10, stopPct: 10 };
+  it('listWatchingSwing returns only TRADED rows', async () => {
+    const row = { id: 's1', symbol: 'TCS', token: '456', entryPrice: 3500, status: 'TRADED', targetPct: 10, stopPct: 10 };
     prisma.swingEntry.findMany.mockResolvedValue([row]);
     const result = await repo.listWatchingSwing();
     expect(result).toHaveLength(1);
@@ -92,12 +102,12 @@ describe('AnandDualTrackRepository', () => {
     });
   });
 
-  it('expireAllWatchingIntraday updates all WATCHING rows to EXPIRED', async () => {
+  it('expireAllWatchingIntraday updates all TRADED rows to EXPIRED', async () => {
     prisma.intradayEntry.updateMany.mockResolvedValue({ count: 3 });
     const count = await repo.expireAllWatchingIntraday();
     expect(count).toBe(3);
     expect(prisma.intradayEntry.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { status: 'WATCHING' }, data: expect.objectContaining({ status: 'EXPIRED' }) }),
+      expect.objectContaining({ where: { status: 'TRADED' }, data: expect.objectContaining({ status: 'EXPIRED' }) }),
     );
   });
 
@@ -111,5 +121,85 @@ describe('AnandDualTrackRepository', () => {
     expect(result.daily.count).toBe(2);
     expect(result.daily.winCount).toBe(1);
     expect(result.daily.avgExitPct).toBeCloseTo(0); // (+5 + -5) / 2
+  });
+
+  describe('findActiveTradedBySymbol', () => {
+    it('returns null when no TRADED entry exists for symbol', async () => {
+      prisma.intradayEntry.findFirst.mockResolvedValue(null);
+      const result = await repo.findActiveTradedBySymbol('intraday', 'RELIANCE');
+      expect(result).toBeNull();
+      expect(prisma.intradayEntry.findFirst).toHaveBeenCalledWith({
+        where: { symbol: 'RELIANCE', status: 'TRADED' },
+        select: { id: true },
+      });
+    });
+
+    it('returns the entry when a TRADED entry exists for symbol (intraday)', async () => {
+      prisma.intradayEntry.findFirst.mockResolvedValue({ id: 'i1' });
+      const result = await repo.findActiveTradedBySymbol('intraday', 'TCS');
+      expect(result).toEqual({ id: 'i1' });
+    });
+
+    it('queries swingEntry when track is swing', async () => {
+      prisma.swingEntry.findFirst.mockResolvedValue({ id: 's1' });
+      const result = await repo.findActiveTradedBySymbol('swing', 'INFY');
+      expect(result).toEqual({ id: 's1' });
+      expect(prisma.swingEntry.findFirst).toHaveBeenCalledWith({
+        where: { symbol: 'INFY', status: 'TRADED' },
+        select: { id: true },
+      });
+    });
+  });
+
+  describe('findScannerNamesByAlertIds', () => {
+    it('returns empty map for empty input', async () => {
+      const result = await repo.findScannerNamesByAlertIds([]);
+      expect(result.size).toBe(0);
+      expect(prisma.chartinkAlert.findMany).not.toHaveBeenCalled();
+    });
+
+    it('returns map of alertId → scanName', async () => {
+      prisma.chartinkAlert.findMany.mockResolvedValue([
+        { id: 'a1', scanner: { scanName: 'ANAND SWING' } },
+        { id: 'a2', scanner: { scanName: 'BREAKOUT 5MIN' } },
+      ]);
+      const result = await repo.findScannerNamesByAlertIds(['a1', 'a2']);
+      expect(result.get('a1')).toBe('ANAND SWING');
+      expect(result.get('a2')).toBe('BREAKOUT 5MIN');
+      expect(prisma.chartinkAlert.findMany).toHaveBeenCalledWith({
+        where: { id: { in: ['a1', 'a2'] } },
+        select: { id: true, scanner: { select: { scanName: true } } },
+      });
+    });
+  });
+
+  describe('getPnlSummary — totalPnlRs', () => {
+    it('includes totalPnlRs = 0 when no exits', async () => {
+      prisma.intradayEntry.findMany.mockResolvedValue([]);
+      const summary = await repo.getPnlSummary('intraday');
+      expect(summary.daily.totalPnlRs).toBe(0);
+      expect(summary.yearly.totalPnlRs).toBe(0);
+    });
+
+    it('computes totalPnlRs as sum of (exitPct/100)*200000 across exits', async () => {
+      const now = new Date();
+      prisma.intradayEntry.findMany.mockResolvedValue([
+        { exitedAt: now, entryPrice: 100, exitPrice: 105 },
+        { exitedAt: now, entryPrice: 100, exitPrice: 95 },
+      ]);
+      const summary = await repo.getPnlSummary('intraday');
+      expect(summary.daily.totalPnlRs).toBeCloseTo(0, 2);
+      expect(summary.daily.count).toBe(2);
+    });
+
+    it('totalPnlRs is positive when all exits are profitable', async () => {
+      const now = new Date();
+      prisma.intradayEntry.findMany.mockResolvedValue([
+        { exitedAt: now, entryPrice: 1000, exitPrice: 1050 },
+        { exitedAt: now, entryPrice: 2000, exitPrice: 2100 },
+      ]);
+      const summary = await repo.getPnlSummary('intraday');
+      expect(summary.daily.totalPnlRs).toBeCloseTo(20000, 0);
+    });
   });
 });

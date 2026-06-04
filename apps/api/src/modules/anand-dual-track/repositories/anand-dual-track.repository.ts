@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 
+const NOTIONAL = 200_000;
+
 export interface CreateEntryInput {
   symbol: string;
   token: string | null;
@@ -26,6 +28,7 @@ export interface PnlSummaryPeriod {
   avgExitPct: number;
   count: number;
   winCount: number;
+  totalPnlRs: number;
 }
 
 export interface PnlSummary {
@@ -77,14 +80,14 @@ export class AnandDualTrackRepository {
 
   async listWatchingIntraday() {
     return this.prisma.intradayEntry.findMany({
-      where: { status: 'WATCHING' },
+      where: { status: 'TRADED' },
       orderBy: { enteredAt: 'desc' },
     });
   }
 
   async listWatchingSwing() {
     return this.prisma.swingEntry.findMany({
-      where: { status: 'WATCHING' },
+      where: { status: 'TRADED' },
       orderBy: { enteredAt: 'desc' },
     });
   }
@@ -135,10 +138,34 @@ export class AnandDualTrackRepository {
 
   async expireAllWatchingIntraday(): Promise<number> {
     const result = await this.prisma.intradayEntry.updateMany({
-      where: { status: 'WATCHING' },
+      where: { status: 'TRADED' },
       data: { status: 'EXPIRED', exitedAt: new Date() },
     });
     return result.count;
+  }
+
+  async findActiveTradedBySymbol(
+    track: 'intraday' | 'swing',
+    symbol: string,
+  ): Promise<{ id: string } | null> {
+    const model = track === 'intraday' ? this.prisma.intradayEntry : this.prisma.swingEntry;
+    return (model as any).findFirst({
+      where: { symbol, status: 'TRADED' },
+      select: { id: true },
+    });
+  }
+
+  async findScannerNamesByAlertIds(alertIds: string[]): Promise<Map<string, string>> {
+    if (alertIds.length === 0) return new Map();
+    const rows = await this.prisma.chartinkAlert.findMany({
+      where: { id: { in: alertIds } },
+      select: { id: true, scanner: { select: { scanName: true } } },
+    });
+    const map = new Map<string, string>();
+    for (const row of rows) {
+      map.set(row.id, row.scanner.scanName);
+    }
+    return map;
   }
 
   async getPnlSummary(track: 'intraday' | 'swing'): Promise<PnlSummary> {
@@ -172,15 +199,17 @@ export class AnandDualTrackRepository {
         }));
 
     const compute = (rows: typeof exits): PnlSummaryPeriod => {
-      if (rows.length === 0) return { avgExitPct: 0, count: 0, winCount: 0 };
+      if (rows.length === 0) return { avgExitPct: 0, count: 0, winCount: 0, totalPnlRs: 0 };
       let sum = 0;
       let wins = 0;
+      let totalPnlRs = 0;
       for (const r of rows) {
         const pct = ((r.exitPrice! - r.entryPrice) / r.entryPrice) * 100;
         sum += pct;
         if (pct > 0) wins++;
+        totalPnlRs += (pct / 100) * NOTIONAL;
       }
-      return { avgExitPct: sum / rows.length, count: rows.length, winCount: wins };
+      return { avgExitPct: sum / rows.length, count: rows.length, winCount: wins, totalPnlRs };
     };
 
     return {
