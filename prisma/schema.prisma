@@ -548,6 +548,9 @@ enum WatchEventType {
   DISMISSED
   PARTIAL_EXIT
   TRAILING_STOP_HIT
+  // Alert was scored but NOT executed (gate-rejected) — records the reason
+  // (e.g. "already moved +2.16% from alert price"), shown in the event log.
+  NOT_TRADED
 }
 
 model WatchEntry {

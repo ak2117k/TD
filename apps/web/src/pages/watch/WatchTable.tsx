@@ -167,17 +167,19 @@ export function WatchTable({ entries, onSelect, selectedId, fetchEntry }: Props)
                 {pctChange(e.currentPrice, e.executedPrice ?? e.initialPrice)}
               </td>
               {e.status === 'MISSED' ? (
-                // Reached its level but was never traded (gate-rejected). It has
-                // no real and no takeable P&L, so show "—" rather than a phantom
-                // what-if figure that would pad a hand-summed column.
+                // Reached its level but was never traded (gate-rejected). Show
+                // the what-if P&L (marked ~, amber) so the missed amount is
+                // visible — but it never counts toward Real P/L (see WatchPage).
                 <>
                   <td
-                    className="py-2 px-3 text-right tabular-nums text-[var(--color-text-muted)]"
-                    title="Alert reached its level but was never traded (gate-rejected) — no P&L"
+                    className="py-2 px-3 text-right tabular-nums text-amber-500/80"
+                    title="MISSED — alert reached its level but was never traded (gate-rejected). What-if amount only; not real money."
                   >
-                    —
+                    ~{fmtRupees(p.abs)}
                   </td>
-                  <td className="py-2 px-3 text-right tabular-nums text-[var(--color-text-muted)]">—</td>
+                  <td className="py-2 px-3 text-right tabular-nums text-amber-500/80">
+                    ~{p.pct >= 0 ? '+' : ''}{p.pct.toFixed(2)}%
+                  </td>
                 </>
               ) : isClosed(e.status) ? (
                 e.realizedPnl != null ? (

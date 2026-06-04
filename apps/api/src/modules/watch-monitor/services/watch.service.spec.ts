@@ -1020,6 +1020,25 @@ describe('WatchService.executeEntry — live-quote pricing (Bug A)', () => {
     expect(result).toBeNull();
   });
 
+  it('journals a NOT_TRADED reason when the upside gate refuses a price that already ran away', async () => {
+    // Alert price 4000, but the live quote is 4100 (+2.5% > the 1% gate) — the
+    // stock ran past the alert before we could fill, so chasing is refused and
+    // the reason is recorded for the event log shown on click.
+    repo.createEvent = jest.fn().mockResolvedValue({ id: 'e1' });
+    brokerAdapter.getLiveQuote.mockResolvedValue({ ltp: 4100 });
+
+    const result = await svc.executeEntry('w1', { mode: 'paper' });
+
+    expect(result).toBeNull();
+    expect(trade.executeTrade).not.toHaveBeenCalled();
+    expect(repo.createEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: 'NOT_TRADED',
+        notes: expect.stringContaining('already moved'),
+      }),
+    );
+  });
+
   it('persists the real filled quantity on the watch entry', async () => {
     // The watch entry must carry the actual traded quantity so P&L never
     // reconstructs floor(MAX_INVESTMENT / price).

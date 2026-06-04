@@ -73,7 +73,7 @@ export function WatchPage() {
             // reconstruction. Fall back to the entry-derived figure only
             // while the account is still loading. "What-if" stays the
             // reconstruction over alerts that were never actually traded.
-            const { real: fallbackReal, whatIf } = pnlBreakdown(
+            const { real: fallbackReal, whatIf, missed } = pnlBreakdown(
               entries, account?.unrealizedPnl,
             );
             const acct = account ? accountRealPnl(account) : null;
@@ -106,6 +106,12 @@ export function WatchPage() {
                   <span className="text-[var(--color-text-muted)]">What-if (untraded alerts): </span>
                   <span className={`tabular-nums ${colorOf(whatIf)}`}>{fmt(whatIf)}</span>
                 </div>
+                {missed !== 0 && (
+                  <div title="What-if P&L of MISSED alerts — reached their target/stop but were never executable (gate-rejected, e.g. price already ran past the alert). Shows how much was missed; not real money.">
+                    <span className="text-[var(--color-text-muted)]">Missed (gate-rejected): </span>
+                    <span className={`tabular-nums ${colorOf(missed)}`}>~{fmt(missed)}</span>
+                  </div>
+                )}
               </div>
             );
           })()}

@@ -118,10 +118,9 @@ export function isClosed(status: string): boolean {
  */
 export function sectionTotalPnl(entries: WatchEntry[]): number {
   return entries.reduce((total, e) => {
-    // A MISSED alert reached its level but was never executed (e.g. the upside
-    // gate refused to chase a price that already ran away). It is neither real
-    // money nor a meaningful what-if — exclude it so it never pads the column.
-    if (e.status === 'MISSED') return total;
+    // A MISSED alert (reached its level but never executed) shows its what-if
+    // P&L in the column so you can see how much was missed — it just never
+    // counts toward Real P/L (see pnlBreakdown, which keeps `missed` separate).
     if (isClosed(e.status) && e.realizedPnl != null) {
       return total + e.realizedPnl;
     }
@@ -139,7 +138,11 @@ export interface PnlBreakdown {
   open: number;
   /** Hypothetical P/L of alerts that were scored but never traded. NOT real. */
   whatIf: number;
-  /** Real P/L = realized + open. Excludes what-if. */
+  /** What-if P/L of MISSED alerts (reached their level but gate-rejected, so
+   *  never executable). Shown separately so you can see how much was missed;
+   *  NOT real money and excluded from `real`. */
+  missed: number;
+  /** Real P/L = realized + open. Excludes what-if and missed. */
   real: number;
 }
 
@@ -166,10 +169,14 @@ export function pnlBreakdown(
   let realized = 0;
   let openFromEntries = 0;
   let whatIf = 0;
+  let missed = 0;
   for (const e of entries) {
-    // MISSED (untraded, gate-rejected) belongs in no bucket — see sectionTotalPnl.
-    if (e.status === 'MISSED') continue;
-    if (isClosed(e.status) && e.realizedPnl != null) {
+    if (e.status === 'MISSED') {
+      // Reached its level but was never executable — track its what-if P&L in
+      // its own bucket so "how much we missed" is visible, but keep it out of
+      // realized/open/what-if and therefore out of Real P/L.
+      missed += whatIfView(e).abs;
+    } else if (isClosed(e.status) && e.realizedPnl != null) {
       realized += e.realizedPnl;
     } else if (e.status === 'TRADED') {
       openFromEntries += profitView(e).abs;
@@ -179,7 +186,7 @@ export function pnlBreakdown(
   }
   const open =
     accountUnrealizedPnl != null ? accountUnrealizedPnl : openFromEntries;
-  return { realized, open, whatIf, real: realized + open };
+  return { realized, open, whatIf, missed, real: realized + open };
 }
 
 export interface DayRealizedSummary {

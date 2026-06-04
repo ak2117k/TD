@@ -91,10 +91,11 @@ describe('sectionTotalPnl', () => {
     expect(sectionTotalPnl([open, closed])).toBeCloseTo(8500, 0);
   });
 
-  it('a MISSED (untraded, gate-rejected) entry contributes ₹0 — no phantom what-if win', () => {
-    // Reached its level but was never executed; must not pollute the column.
+  it('a MISSED entry shows its what-if P/L in the column (so missed amount is visible)', () => {
+    // score 60 -> ₹1L, qty=1000, raw=(110-100)*1000=10000, capped at target 110,
+    // minus charges 82.41 -> 9917.59 — same bounded what-if as a never-traded row.
     const missed = entry({ status: 'MISSED', initialPrice: 100, currentPrice: 110, realizedPnl: null });
-    expect(sectionTotalPnl([missed])).toBe(0);
+    expect(sectionTotalPnl([missed])).toBeCloseTo(9917.59, 1);
   });
 });
 
@@ -110,11 +111,13 @@ describe('pnlBreakdown', () => {
     expect(b.real).toBeCloseTo(8500, 0); // realized + open, excludes what-if
   });
 
-  it('a MISSED entry contributes to no bucket — not realized, open, what-if, or real', () => {
-    // MISSED = alert reached its level but was never executable (gate-rejected),
-    // so it is not real money AND not a meaningful what-if. Excluded everywhere.
+  it('a MISSED entry lands in its own `missed` bucket — visible, but never in real', () => {
+    // MISSED = alert reached its level but was never executable (gate-rejected).
+    // Its what-if P&L is tracked under `missed` so it is visible, but it stays
+    // out of realized/open/whatIf and therefore out of Real P/L.
     const missed = entry({ status: 'MISSED', initialPrice: 100, currentPrice: 110, realizedPnl: null });
     const b = pnlBreakdown([missed]);
+    expect(b.missed).toBeCloseTo(9917.59, 1);
     expect(b.realized).toBe(0);
     expect(b.open).toBe(0);
     expect(b.whatIf).toBe(0);

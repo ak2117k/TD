@@ -330,6 +330,10 @@ export class WatchService {
           reason: `Auto-execute failed (entry stays WATCHING for manual retry): ${err instanceof Error ? err.message : err}`,
         }),
       );
+      await this.recordNotTraded(
+        entry.id,
+        `auto-execute failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
       return entry;
     } finally {
       // Subscribe to the live feed only now — AFTER the execute step has
@@ -387,6 +391,7 @@ export class WatchService {
           reason: 'outside entry window 09:15-15:00 IST — entry stays WATCHING',
         }),
       );
+      await this.recordNotTraded(entryId, 'outside entry window 09:15-15:00 IST');
       return null;
     }
 
@@ -414,6 +419,7 @@ export class WatchService {
               'no live quote available — refusing to fill at the stale alert price; entry stays WATCHING',
           }),
         );
+        await this.recordNotTraded(entryId, 'no live quote available — refused to fill at the stale alert price');
         return null;
       }
       referencePrice = resolved;
@@ -438,6 +444,10 @@ export class WatchService {
             stage: 'execution',
             reason: `stale entry — already moved +${(moveFromAlert * 100).toFixed(2)}% from alert price ₹${alertPrice.toFixed(2)} (live ₹${referencePrice.toFixed(2)}) — entry stays WATCHING`,
           }),
+        );
+        await this.recordNotTraded(
+          entryId,
+          `already moved +${(moveFromAlert * 100).toFixed(2)}% from alert ₹${alertPrice.toFixed(2)} (live ₹${referencePrice.toFixed(2)}) before we could fill — chasing refused`,
         );
         return null;
       }
@@ -757,9 +767,9 @@ export class WatchService {
   async transitionMissed(entryId: string, price: number): Promise<void> {
     await this.repo.createEvent({
       watchEntryId: entryId,
-      eventType: WatchEventType.TARGET_HIT,
+      eventType: WatchEventType.NOT_TRADED,
       price,
-      notes: 'untraded alert reached level — MISSED (no position taken)',
+      notes: 'reached level but no position was ever taken — MISSED',
     });
     await this.repo.update(entryId, {
       status: WatchStatus.MISSED,
@@ -767,6 +777,24 @@ export class WatchService {
       closedReason: 'missed-untraded',
     });
     await this.unsubscribeEntry(entryId);
+  }
+
+  /**
+   * Journal WHY an alert was not executed (gate-rejected) as a NOT_TRADED event
+   * so the reason — e.g. "already moved +2.16% from alert price" — is visible in
+   * the entry's event log when the row is clicked. Best-effort: a failed journal
+   * write must never block the entry flow.
+   */
+  private async recordNotTraded(entryId: string, reason: string): Promise<void> {
+    try {
+      await this.repo.createEvent({
+        watchEntryId: entryId,
+        eventType: WatchEventType.NOT_TRADED,
+        notes: reason,
+      });
+    } catch {
+      /* best-effort journal — never block the entry flow on a logging failure */
+    }
   }
 
   async transitionStopped(

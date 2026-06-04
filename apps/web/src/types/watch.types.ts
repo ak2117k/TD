@@ -6,7 +6,7 @@ export type WatchStatus =
 export type WatchEventType =
   | 'INITIAL' | 'PRICE_CHANGE' | 'SCORE_CHANGE' | 'TARGET_HIT'
   | 'SL_HIT_SCORE' | 'SL_HIT_PRICE' | 'TRADE_OPENED' | 'TRADE_CLOSED' | 'DISMISSED'
-  | 'PARTIAL_EXIT' | 'TRAILING_STOP_HIT';
+  | 'PARTIAL_EXIT' | 'TRAILING_STOP_HIT' | 'NOT_TRADED';
 
 export interface WatchEntry {
   id: string;
