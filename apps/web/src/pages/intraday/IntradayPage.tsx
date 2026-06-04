@@ -137,7 +137,12 @@ export default function IntradayPage() {
   const [filter, setFilter] = useState<string | undefined>(undefined);
   const [date, setDate] = useState(todayIST());
   const { entries, pnl, loading, error } = useIntradayEntries(filter, date);
-  const activeCount = entries.filter((e) => e.status === 'TRADED').length;
+  // Open (unrealized) book: floating mark-to-market P&L of positions not yet
+  // closed (exitPrice null). Kept separate from the realized period cards so
+  // booked vs floating P&L are never conflated.
+  const openEntries = entries.filter((e) => e.exitPrice == null);
+  const openCount = openEntries.length;
+  const unrealizedRs = openEntries.reduce((sum, e) => sum + (e.pnlPct / 100) * NOTIONAL, 0);
 
   return (
     <div className="flex flex-col gap-4 p-6 text-[var(--color-text-primary)]">
@@ -146,7 +151,20 @@ export default function IntradayPage() {
           <h1 className="text-2xl font-semibold">Intraday Track</h1>
           <p className="text-sm text-[var(--color-text-muted)]">5% target · 5% stop · expires at 15:15</p>
         </div>
-        <div className="text-sm text-[var(--color-text-muted)]">{activeCount} active</div>
+        <div className="flex items-center gap-2 text-sm">
+          <span className="text-[var(--color-text-muted)]">{openCount} open</span>
+          {openCount > 0 && (
+            <span
+              title="Unrealized P&L of open positions (mark-to-market, not yet booked)"
+              className={clsx(
+                'rounded bg-[var(--color-bg-tertiary)] px-2 py-1 text-xs font-semibold tabular-nums',
+                moneyColor(unrealizedRs),
+              )}
+            >
+              {fmtSignedRs(unrealizedRs)} unrealized
+            </span>
+          )}
+        </div>
       </div>
 
       {pnl && <PnlBar pnl={pnl} />}
