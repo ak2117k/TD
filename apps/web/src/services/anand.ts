@@ -16,6 +16,10 @@ export interface AnandEntry {
   targetLeftPct: number;
   scannerName: string | null;   // resolved from alertId on the backend
   scoreBreakdown: Array<{ name: string; points: number; pointsPossible: number; passed: boolean }> | null;
+  leadCount?: number;           // Feature 1: how many times this symbol led (swing)
+  leadDates?: string[];         // lossless ISO-timestamp lead log
+  trailing?: boolean;           // Feature 3: intraday trailing-stop armed
+  exitReason?: string | null;   // TARGET_5PCT | TRAIL_ST | TRAIL_GB | STOP | EXPIRE
 }
 
 export interface PnlPeriod {
@@ -53,5 +57,40 @@ export async function getIntradayPnl(): Promise<PnlSummary> {
 
 export async function getSwingPnl(): Promise<PnlSummary> {
   const r = await api.get<PnlSummary>('/anand/swing/pnl-summary');
+  return r.data;
+}
+
+export interface ReinvestPool {
+  harvestedTotal: number;
+  deployedActive: number;
+  idleBalance: number;
+  realizedPnl: number;
+}
+
+export interface ReinvestLot {
+  id: string;
+  symbol: string;
+  sourceSwingEntryId: string;
+  capital: number;
+  entryPrice: number;
+  enteredAt: string;
+  targetPct: number;
+  stopPct: number;
+  status: string;        // OPEN | TARGET_HIT | STOPPED
+  exitPrice: number | null;
+  exitedAt: string | null;
+  exitReason: string | null;
+  currentPrice: number;
+  pnlPct: number;
+  pnlRs: number;
+}
+
+export async function getReinvestPool(): Promise<ReinvestPool> {
+  const r = await api.get<ReinvestPool>('/anand/reinvest/pool');
+  return r.data;
+}
+
+export async function listReinvestLots(status?: string): Promise<ReinvestLot[]> {
+  const r = await api.get<ReinvestLot[]>('/anand/reinvest/lots', { params: { status } });
   return r.data;
 }
