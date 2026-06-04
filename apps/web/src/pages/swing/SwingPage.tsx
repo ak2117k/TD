@@ -51,6 +51,15 @@ function fmtIstDate(iso: string): string {
   });
 }
 
+/** Collapse a lossless ISO-timestamp lead log to distinct IST calendar days, newest first. */
+function distinctDays(isoList: string[]): string[] {
+  const seen = new Set<string>();
+  for (const iso of isoList) {
+    seen.add(new Date(iso).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: '2-digit' }));
+  }
+  return [...seen].reverse();
+}
+
 function daysElapsed(enteredAt: string, exitedAt: string | null): number {
   const start = new Date(enteredAt).getTime();
   const end = exitedAt ? new Date(exitedAt).getTime() : Date.now();
@@ -115,6 +124,19 @@ function EntryRow({ entry }: { entry: AnandEntry }) {
         <td className="px-3 py-2 text-[var(--color-text-secondary)]">
           {entry.scannerName ?? <span className="text-[var(--color-text-muted)]">—</span>}
         </td>
+        {/* Leads */}
+        <td className="px-3 py-2 tabular-nums">
+          {entry.leadCount && entry.leadCount > 0 ? (
+            <span
+              title={distinctDays(entry.leadDates ?? []).join('\n')}
+              className="rounded bg-[var(--color-bg-tertiary)] px-1.5 py-0.5 text-xs font-semibold text-[var(--color-text-secondary)]"
+            >
+              ×{entry.leadCount}
+            </span>
+          ) : (
+            <span className="text-[var(--color-text-muted)]">—</span>
+          )}
+        </td>
         {/* 3. Entry Price */}
         <td className="px-3 py-2 tabular-nums">₹{entry.entryPrice.toFixed(2)}</td>
         {/* 4. Price / Δ% */}
@@ -155,7 +177,7 @@ function EntryRow({ entry }: { entry: AnandEntry }) {
       </tr>
       {expanded && entry.scoreBreakdown && (
         <tr className="border-t border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)]/40">
-          <td colSpan={12} className="px-3 py-2">
+          <td colSpan={13} className="px-3 py-2">
             <ChartinkScoreTable
               score={entry.scoreBreakdown.filter((c) => c.passed).reduce((s, c) => s + c.points, 0)}
               lotCount={0}
@@ -240,6 +262,7 @@ export default function SwingPage() {
               <tr>
                 <th className="px-3 py-2">Symbol</th>
                 <th className="px-3 py-2">Scanner</th>
+                <th className="px-3 py-2">Leads</th>
                 <th className="px-3 py-2">Entry ₹</th>
                 <th className="px-3 py-2">Price / Δ%</th>
                 <th className="px-3 py-2">P&L ₹</th>
@@ -255,7 +278,7 @@ export default function SwingPage() {
             <tbody>
               {entries.length === 0 && (
                 <tr>
-                  <td colSpan={12} className="px-3 py-8 text-center text-[var(--color-text-muted)]">
+                  <td colSpan={13} className="px-3 py-8 text-center text-[var(--color-text-muted)]">
                     No swing entries yet. Waiting for Anand Swing scanner alerts.
                   </td>
                 </tr>
