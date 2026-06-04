@@ -775,6 +775,17 @@ export class WatchService {
     cause: 'score-decay' | 'manual' | 'eod',
   ): Promise<void> {
     const entry = await this.repo.findById(entryId);
+    // An un-executed entry was never a position, so a score-decay/EOD stop is
+    // not a real STOPPED loss — record it as MISSED instead, the same as an
+    // untraded alert that drifts to its target. Keeps untraded alerts out of
+    // P&L and makes STOPPED mean "a real trade that was stopped out".
+    if (entry && entry.status !== WatchStatus.TRADED) {
+      await this.transitionMissed(
+        entryId,
+        (entry as any).currentPrice ?? entry.initialPrice ?? 0,
+      );
+      return;
+    }
     await this.repo.createEvent({
       watchEntryId: entryId,
       eventType: WatchEventType.SL_HIT_SCORE,

@@ -465,7 +465,11 @@ describe('WatchService.transitionStopped', () => {
     svc = mod.get(WatchService);
   });
 
-  it('writes SL_HIT_SCORE event and transitions to STOPPED', async () => {
+  it('a TRADED position that decays below its score floor transitions to STOPPED', async () => {
+    // Only a real (TRADED) position records a STOPPED loss.
+    repo.findById.mockResolvedValue({
+      id: 'w1', token: '11536', status: 'TRADED', optionsToken: null,
+    });
     await svc.transitionStopped('w1', 55, 'score-decay');
     expect(repo.createEvent).toHaveBeenCalledWith(expect.objectContaining({
       eventType: 'SL_HIT_SCORE', score: 55,
@@ -474,6 +478,16 @@ describe('WatchService.transitionStopped', () => {
       status: 'STOPPED', closedReason: 'sl-score-decay',
     }));
     expect(feed.unsubscribeForWatch).toHaveBeenCalled();
+  });
+
+  it('an UNTRADED (WATCHING) entry that decays is MISSED, not a phantom STOPPED', async () => {
+    // beforeEach findById returns a WATCHING (never-executed) entry.
+    await svc.transitionStopped('w1', 40, 'score-decay');
+    expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
+      status: 'MISSED', closedReason: 'missed-untraded',
+    }));
+    const stopped = (repo.update.mock.calls as any[]).find((c) => c[1]?.status === 'STOPPED');
+    expect(stopped).toBeUndefined();
   });
 
   it('transitionLossCut does not throw when the entry is not found (null entry)', async () => {
