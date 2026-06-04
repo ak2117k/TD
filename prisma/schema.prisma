@@ -796,6 +796,9 @@ model IntradayEntry {
   exitedAt       DateTime?
   alertId        String
   scoreBreakdown Json?
+  trailing       Boolean   @default(false)
+  peakPrice      Float?
+  exitReason     String?
 
   @@index([status, enteredAt])
   @@index([alertId])
@@ -819,4 +822,45 @@ model SwingEntry {
   @@index([status, enteredAt])
   @@index([alertId])
   @@map("swing_entries")
+}
+
+model SymbolLeadStat {
+  id        String   @id @default(cuid())
+  symbol    String
+  track     String   @default("swing")
+  count     Int      @default(0)
+  dates     Json     @default("[]")
+  lastLedAt DateTime @default(now())
+
+  @@unique([symbol, track])
+  @@map("symbol_lead_stats")
+}
+
+model ReinvestmentLot {
+  id                 String    @id @default(cuid())
+  symbol             String
+  sourceSwingEntryId String    @unique
+  capital            Float
+  entryPrice         Float
+  enteredAt          DateTime  @default(now())
+  targetPct          Float     @default(10.0)
+  stopPct            Float     @default(10.0)
+  status             String    @default("OPEN")
+  exitPrice          Float?
+  exitedAt           DateTime?
+  exitReason         String?
+
+  @@index([status, enteredAt])
+  @@index([symbol])
+  @@map("reinvestment_lots")
+}
+
+model ReinvestmentPool {
+  id             String @id @default("singleton")
+  harvestedTotal Float  @default(0)
+  deployedActive Float  @default(0)
+  idleBalance    Float  @default(0)
+  realizedPnl    Float  @default(0)
+
+  @@map("reinvestment_pool")
 }
