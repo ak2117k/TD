@@ -113,6 +113,14 @@ function EntryRow({ entry }: { entry: AnandEntry }) {
         <td className="px-3 py-2 tabular-nums text-[var(--color-text-muted)]">{entry.targetPct}%</td>
         <td className={clsx('px-3 py-2 text-xs font-semibold uppercase tracking-wider', statusColor[entry.status] ?? 'text-gray-400')}>
           {entry.status.replace('_', ' ')}
+          {isActive && entry.trailing && (
+            <span className="ml-1 rounded bg-amber-500/20 px-1 py-0.5 text-[9px] text-amber-300">trailing</span>
+          )}
+          {!isActive && entry.exitReason && (
+            <span className="ml-1 text-[9px] lowercase text-[var(--color-text-muted)]">
+              {entry.exitReason === 'TRAIL_ST' ? 'trail·st' : entry.exitReason === 'TRAIL_GB' ? 'trail·gb' : entry.exitReason.toLowerCase()}
+            </span>
+          )}
         </td>
         <td className="px-3 py-2 tabular-nums text-[var(--color-text-muted)]">
           {fmtTimeIST(entry.enteredAt)}
@@ -149,7 +157,7 @@ export default function IntradayPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Intraday Track</h1>
-          <p className="text-sm text-[var(--color-text-muted)]">5% target · 5% stop · expires at 15:15</p>
+          <p className="text-sm text-[var(--color-text-muted)]">5% → trailing (Supertrend 15m) · 5% stop · expires 15:15</p>
         </div>
         <div className="flex items-center gap-2 text-sm">
           <span className="text-[var(--color-text-muted)]">{openCount} open</span>
