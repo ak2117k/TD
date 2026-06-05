@@ -555,6 +555,7 @@ enum WatchEventType {
 
 model WatchEntry {
   id                    String   @id @default(cuid())
+  recoveryReEntry       Boolean  @default(false) // admitted as a half-size loss-recovery re-entry
   alertId               String?
   setupId               String?  @unique
   symbol                String

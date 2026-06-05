@@ -1,6 +1,6 @@
 import { Test } from '@nestjs/testing';
 import { Logger } from '@nestjs/common';
-import { WatchService, WatchCapExceededError, TradeCooldownError, TradeSellDirectionError, TRADE_COOLDOWN_MS } from './watch.service';
+import { WatchService, WatchCapExceededError, TradeCooldownError, TradeSellDirectionError, TradeLastLossError, TRADE_COOLDOWN_MS } from './watch.service';
 import { WatchRepository } from '../repositories/watch.repository';
 import { TargetCalculatorService } from './target-calculator.service';
 import { StrikeSelectorService } from './strike-selector.service';
@@ -36,6 +36,8 @@ describe('WatchService.createFromAlert', () => {
       createEvent: jest.fn().mockResolvedValue({ id: 'e1' }),
       wasTokenExecutedSince: jest.fn().mockResolvedValue(false),
       getLastClosedPnlForToken: jest.fn().mockResolvedValue(null),
+      getLastClosedTradeForToken: jest.fn().mockResolvedValue(null),
+      countRecoveryReentriesToday: jest.fn().mockResolvedValue(0),
     };
     target = { compute: jest.fn().mockReturnValue({ target: 4150, source: 'indicator-sr' }) };
     strike = { pick: jest.fn().mockResolvedValue(null) };
@@ -138,6 +140,79 @@ describe('WatchService.createFromAlert', () => {
     const r = await svc.createFromAlert(baseInput);
     expect(r.id).toBe('first-watch-of-tcs');
     expect(repo.createEntry).not.toHaveBeenCalled();
+  });
+
+  describe('smart loss-recovery re-entry gate', () => {
+    const passingBreakdown = {
+      checks: [
+        { name: 'MACD on 5m', passed: true },
+        { name: 'VWAP relationship', passed: true },
+        { name: 'RSI on 5m', passed: true },
+        { name: 'ADX trend strength', passed: true },
+      ],
+    };
+
+    it('admits a same-day loss as a half-size recovery when score>80, momentum passes, price reclaimed', async () => {
+      repo.getLastClosedTradeForToken.mockResolvedValue({ pnl: -500, entryPrice: 3900 });
+      repo.countRecoveryReentriesToday.mockResolvedValue(0);
+      await svc.createFromAlert({
+        ...baseInput,
+        initialScore: 85,
+        initialBreakdown: passingBreakdown,
+        initialPrice: 3950, // >= prior entry 3900 → reclaimed
+      });
+      expect(repo.createEntry).toHaveBeenCalledWith(
+        expect.objectContaining({ recoveryReEntry: true }),
+      );
+    });
+
+    it('blocks the loss re-entry when the recovery bar is not met (score not above 80)', async () => {
+      repo.getLastClosedTradeForToken.mockResolvedValue({ pnl: -500, entryPrice: 3900 });
+      repo.countRecoveryReentriesToday.mockResolvedValue(0);
+      await expect(
+        svc.createFromAlert({
+          ...baseInput,
+          initialScore: 78,
+          initialBreakdown: passingBreakdown,
+          initialPrice: 3950,
+        }),
+      ).rejects.toBeInstanceOf(TradeLastLossError);
+      expect(repo.createEntry).not.toHaveBeenCalled();
+    });
+
+    it('blocks when price has not reclaimed the prior entry, even with a strong score', async () => {
+      repo.getLastClosedTradeForToken.mockResolvedValue({ pnl: -500, entryPrice: 3900 });
+      repo.countRecoveryReentriesToday.mockResolvedValue(0);
+      await expect(
+        svc.createFromAlert({
+          ...baseInput,
+          initialScore: 90,
+          initialBreakdown: passingBreakdown,
+          initialPrice: 3850, // below prior entry 3900 → not reclaimed
+        }),
+      ).rejects.toBeInstanceOf(TradeLastLossError);
+    });
+
+    it('blocks a second recovery the same day (cap = 1)', async () => {
+      repo.getLastClosedTradeForToken.mockResolvedValue({ pnl: -500, entryPrice: 3900 });
+      repo.countRecoveryReentriesToday.mockResolvedValue(1); // already recovered once
+      await expect(
+        svc.createFromAlert({
+          ...baseInput,
+          initialScore: 90,
+          initialBreakdown: passingBreakdown,
+          initialPrice: 3950,
+        }),
+      ).rejects.toBeInstanceOf(TradeLastLossError);
+    });
+
+    it('a green prior close re-enters normally with recoveryReEntry false', async () => {
+      repo.getLastClosedTradeForToken.mockResolvedValue({ pnl: 1200, entryPrice: 3900 });
+      await svc.createFromAlert(baseInput);
+      expect(repo.createEntry).toHaveBeenCalledWith(
+        expect.objectContaining({ recoveryReEntry: false }),
+      );
+    });
   });
 
   it('R1: does not create a second entry while one is active for the symbol', async () => {
