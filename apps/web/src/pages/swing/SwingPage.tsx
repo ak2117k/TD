@@ -99,8 +99,11 @@ function PnlCards({ pnl }: { pnl: PnlSummary }) {
 function EntryRow({ entry }: { entry: AnandEntry }) {
   const [expanded, setExpanded] = useState(false);
   const ongoing = entry.exitPrice == null;
-  const pnlColor = entry.pnlPct >= 0 ? 'text-emerald-400' : 'text-red-400';
-  const pnlRs = (entry.pnlPct / 100) * NOTIONAL;
+  const stale = entry.priceStale === true; // only set for open rows with no price
+  const pnlPct = entry.pnlPct;
+  const pnlColor =
+    pnlPct == null ? 'text-[var(--color-text-muted)]' : pnlPct >= 0 ? 'text-emerald-400' : 'text-red-400';
+  const pnlRs = pnlPct == null ? null : (pnlPct / 100) * NOTIONAL;
   const statusColor: Record<string, string> = {
     TRADED: 'text-blue-400',
     TARGET_HIT: 'text-emerald-400',
@@ -143,16 +146,30 @@ function EntryRow({ entry }: { entry: AnandEntry }) {
         <td className="px-3 py-2 tabular-nums">₹{entry.entryPrice.toFixed(2)}</td>
         {/* 4. Price / Δ% */}
         <td className={clsx('px-3 py-2 tabular-nums', pnlColor)}>
-          ₹{(ongoing ? entry.currentPrice : (entry.exitPrice as number)).toFixed(2)}
-          <span className="ml-1 text-xs">{fmtPct(entry.pnlPct)}</span>
+          {stale ? (
+            <span
+              className="text-[var(--color-text-muted)]"
+              title="No live price available right now — showing no data instead of a stale estimate"
+            >
+              —
+              <span className="ml-1 rounded bg-amber-500/15 px-1 text-[9px] font-semibold uppercase text-amber-300">
+                stale
+              </span>
+            </span>
+          ) : (
+            <>
+              ₹{(ongoing ? (entry.currentPrice as number) : (entry.exitPrice as number)).toFixed(2)}
+              {pnlPct != null && <span className="ml-1 text-xs">{fmtPct(pnlPct)}</span>}
+            </>
+          )}
         </td>
         {/* 5. P&L ₹ */}
-        <td className={clsx('px-3 py-2 font-semibold tabular-nums', rsColor(pnlRs))}>
-          {fmtRs(pnlRs)}
+        <td className={clsx('px-3 py-2 font-semibold tabular-nums', pnlRs == null ? 'text-[var(--color-text-muted)]' : rsColor(pnlRs))}>
+          {pnlRs == null ? '—' : fmtRs(pnlRs)}
         </td>
         {/* 6. P&L % */}
         <td className={clsx('px-3 py-2 font-semibold tabular-nums', pnlColor)}>
-          {fmtPct(entry.pnlPct)}
+          {pnlPct == null ? '—' : fmtPct(pnlPct)}
         </td>
         {/* 7. Target */}
         <td className="px-3 py-2 tabular-nums text-[var(--color-text-muted)]">{entry.targetPct}%</td>

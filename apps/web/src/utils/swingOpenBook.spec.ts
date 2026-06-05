@@ -27,6 +27,16 @@ describe('summarizeOpenBook', () => {
     expect(r.unrealizedRs).toBeCloseTo(6000, 6); // 10000 - 4000 + 0
   });
 
+  it('counts a stale position in openCount but excludes it from unrealized', () => {
+    // A position with no live price (pnlPct null) is still open — count it — but
+    // its unrealized P&L is unknown, so it must NOT be summed as if it were 0%.
+    const live = entry({ pnlPct: 5 });                              // +10,000
+    const stale = entry({ pnlPct: null, currentPrice: null, priceStale: true });
+    const r = summarizeOpenBook([live, stale], NOTIONAL);
+    expect(r.openCount).toBe(2);
+    expect(r.unrealizedRs).toBeCloseTo(10000, 6);
+  });
+
   it('is independent of entry dates — positions from different days all contribute', () => {
     // The helper takes no date argument: a position entered yesterday must count
     // exactly the same as one entered today. This is the decoupling guarantee.
