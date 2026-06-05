@@ -11,9 +11,10 @@ export interface AnandEntry {
   status: string;
   exitPrice: number | null;
   exitedAt: string | null;
-  currentPrice: number;
-  pnlPct: number;
-  targetLeftPct: number;
+  currentPrice: number | null;  // null when no live price + no level-book seed (stale)
+  pnlPct: number | null;        // null when price is unavailable (see priceStale)
+  targetLeftPct: number | null;
+  priceStale?: boolean;         // true when neither live LTP nor level-book seed had a price
   scannerName: string | null;   // resolved from alertId on the backend
   scoreBreakdown: Array<{ name: string; points: number; pointsPossible: number; passed: boolean }> | null;
   leadCount?: number;           // Feature 1: how many times this symbol led (swing)

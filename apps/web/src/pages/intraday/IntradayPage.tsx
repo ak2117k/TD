@@ -80,8 +80,10 @@ function PnlBar({ pnl }: { pnl: PnlSummary }) {
 function EntryRow({ entry }: { entry: AnandEntry }) {
   const [expanded, setExpanded] = useState(false);
   const isActive = entry.exitPrice == null;
-  const pnlColor = moneyColor(entry.pnlPct);
-  const pnlRs = (entry.pnlPct / 100) * NOTIONAL;
+  const stale = entry.priceStale === true; // only set for open rows with no price
+  const pnlPct = entry.pnlPct;
+  const pnlColor = pnlPct == null ? 'text-[var(--color-text-muted)]' : moneyColor(pnlPct);
+  const pnlRs = pnlPct == null ? null : (pnlPct / 100) * NOTIONAL;
   const priceShown = isActive ? entry.currentPrice : entry.exitPrice ?? 0;
   const statusColor: Record<string, string> = {
     TRADED: 'text-blue-400',
@@ -102,13 +104,28 @@ function EntryRow({ entry }: { entry: AnandEntry }) {
         </td>
         <td className="px-3 py-2 tabular-nums">₹{entry.entryPrice.toFixed(2)}</td>
         <td className={clsx('px-3 py-2 tabular-nums', pnlColor)}>
-          ₹{priceShown.toFixed(2)} <span className="text-xs">({fmtPct(entry.pnlPct)})</span>
+          {stale ? (
+            <span
+              className="text-[var(--color-text-muted)]"
+              title="No live price available right now — showing no data instead of a stale estimate"
+            >
+              —{' '}
+              <span className="rounded bg-amber-500/15 px-1 text-[9px] font-semibold uppercase text-amber-300">
+                stale
+              </span>
+            </span>
+          ) : (
+            <>
+              ₹{(priceShown as number).toFixed(2)}{' '}
+              {pnlPct != null && <span className="text-xs">({fmtPct(pnlPct)})</span>}
+            </>
+          )}
         </td>
-        <td className={clsx('px-3 py-2 font-semibold tabular-nums', moneyColor(pnlRs))}>
-          {fmtSignedRs(pnlRs)}
+        <td className={clsx('px-3 py-2 font-semibold tabular-nums', pnlRs == null ? 'text-[var(--color-text-muted)]' : moneyColor(pnlRs))}>
+          {pnlRs == null ? '—' : fmtSignedRs(pnlRs)}
         </td>
         <td className={clsx('px-3 py-2 font-semibold tabular-nums', pnlColor)}>
-          {fmtPct(entry.pnlPct)}
+          {pnlPct == null ? '—' : fmtPct(pnlPct)}
         </td>
         <td className="px-3 py-2 tabular-nums text-[var(--color-text-muted)]">{entry.targetPct}%</td>
         <td className={clsx('px-3 py-2 text-xs font-semibold uppercase tracking-wider', statusColor[entry.status] ?? 'text-gray-400')}>
@@ -150,7 +167,11 @@ export default function IntradayPage() {
   // booked vs floating P&L are never conflated.
   const openEntries = entries.filter((e) => e.exitPrice == null);
   const openCount = openEntries.length;
-  const unrealizedRs = openEntries.reduce((sum, e) => sum + (e.pnlPct / 100) * NOTIONAL, 0);
+  // Stale open rows (pnlPct null) count as open but contribute no known P&L.
+  const unrealizedRs = openEntries.reduce(
+    (sum, e) => sum + (e.pnlPct == null ? 0 : (e.pnlPct / 100) * NOTIONAL),
+    0,
+  );
 
   return (
     <div className="flex flex-col gap-4 p-6 text-[var(--color-text-primary)]">

@@ -16,7 +16,13 @@ export interface OpenBookSummary {
  */
 export function summarizeOpenBook(openEntries: AnandEntry[], notional: number): OpenBookSummary {
   return {
+    // Every open position counts toward openCount — including stale ones, which
+    // are still live exposure. But a stale position (pnlPct null) has unknown
+    // unrealized P&L, so it is excluded from the sum rather than treated as 0%.
     openCount: openEntries.length,
-    unrealizedRs: openEntries.reduce((sum, e) => sum + (e.pnlPct / 100) * notional, 0),
+    unrealizedRs: openEntries.reduce(
+      (sum, e) => sum + (e.pnlPct == null ? 0 : (e.pnlPct / 100) * notional),
+      0,
+    ),
   };
 }

@@ -1,8 +1,10 @@
-import { Body, Controller, Get, NotFoundException, Param, Patch, Query } from '@nestjs/common';
+import { Body, Controller, Get, NotFoundException, Optional, Param, Patch, Query } from '@nestjs/common';
 import { IsNotEmpty, IsString } from 'class-validator';
 import { AnandDualTrackRepository } from '../repositories/anand-dual-track.repository';
 import { ChartinkRepository } from '../../chartink/repositories/chartink.repository';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
+import { LevelBookService } from '../../signal-generator/services/level-book.service';
+import { resolvePriceFields } from '../price-fields';
 
 class UpdateCategoryDto {
   @IsString() @IsNotEmpty() category!: string;
@@ -14,6 +16,7 @@ export class AnandDualTrackController {
     private readonly repo: AnandDualTrackRepository,
     private readonly chartinkRepo: ChartinkRepository,
     private readonly adapter: AngelOneAdapterService,
+    @Optional() private readonly levelBook?: LevelBookService,
   ) {}
 
   @Get('intraday/entries')
@@ -98,16 +101,46 @@ export class AnandDualTrackController {
   private async enrichWithLivePrice(
     entries: Array<{ id: string; symbol: string; token: string | null; entryPrice: number; targetPct: number; stopPct: number; status: string; [key: string]: unknown }>,
   ) {
-    const tokens = [...new Set(entries.map((e) => e.token).filter(Boolean) as string[])];
-    const ltpMap = tokens.length
-      ? await this.adapter.getLtpsBatch('NSE', tokens).catch(() => new Map<string, number>())
+    // Live prices are only needed for OPEN positions; closed rows report their
+    // realized exit price below.
+    const openTokens = [
+      ...new Set(entries.filter((e) => e.exitPrice == null).map((e) => e.token).filter(Boolean) as string[]),
+    ];
+    const ltpMap = openTokens.length
+      ? await this.adapter.getLtpsBatch('NSE', openTokens).catch(() => new Map<string, number>())
       : new Map<string, number>();
 
+    // Secondary fallback: for open-position tokens the live LTP batch dropped
+    // (e.g. a stock whose Angel feed went quiet mid-session), seed the price
+    // from the level book (candle-derived spot). Only the still-missing tokens
+    // are queried, so this is a no-op in the common case. A token that resolves
+    // nowhere is left out of both maps → resolvePriceFields marks that row stale
+    // rather than faking entryPrice (which read as a misleading 0% P&L).
+    const seedMap = new Map<string, number>();
+    if (this.levelBook) {
+      const missing = openTokens.filter((t) => !ltpMap.has(t));
+      await Promise.all(
+        missing.map(async (token) => {
+          const symbol = entries.find((e) => e.token === token)?.symbol ?? '';
+          try {
+            const book = await this.levelBook!.lazyLoad(token, 'NSE', symbol);
+            const seed = book ? book.spot || book.vwap || book.prevClose || 0 : 0;
+            if (seed > 0) seedMap.set(token, seed);
+          } catch {
+            /* leave unresolved → resolvePriceFields marks the row stale */
+          }
+        }),
+      );
+    }
+
     return entries.map((e) => {
-      const currentPrice = (e.token ? ltpMap.get(e.token) : undefined) ?? e.entryPrice;
-      const pnlPct = ((currentPrice - e.entryPrice) / e.entryPrice) * 100;
-      const targetLeftPct = e.targetPct - pnlPct;
-      return { ...e, currentPrice, pnlPct, targetLeftPct };
+      // Closed positions report realized P&L from their actual exit price —
+      // never live-priced, never stale.
+      if (e.exitPrice != null) {
+        const pnlPct = ((e.exitPrice - e.entryPrice) / e.entryPrice) * 100;
+        return { ...e, currentPrice: e.exitPrice, pnlPct, targetLeftPct: e.targetPct - pnlPct, priceStale: false };
+      }
+      return { ...e, ...resolvePriceFields(e, ltpMap, seedMap) };
     });
   }
 
