@@ -15,6 +15,7 @@ export interface CreateEntryInput {
   profitTarget: number;
   profitTargetSource: 'indicator-sr' | 'fallback-2pct';
   stopLossScore: number;
+  recoveryReEntry?: boolean;
   optionsToken?: string | null;
   optionsType?: 'CE' | 'PE' | null;
   optionsExpiry?: Date | null;
@@ -64,6 +65,7 @@ export class WatchRepository {
         profitTarget: input.profitTarget,
         profitTargetSource: input.profitTargetSource,
         stopLossScore: input.stopLossScore,
+        recoveryReEntry: input.recoveryReEntry ?? false,
         optionsToken: input.optionsToken ?? null,
         optionsType: input.optionsType ?? null,
         optionsExpiry: input.optionsExpiry ?? null,
@@ -225,6 +227,43 @@ export class WatchRepository {
       select: { pnl: true },
     });
     return trade?.pnl ?? null;
+  }
+
+  /**
+   * Like getLastClosedPnlForToken, but also returns the entry (executed) price
+   * of that last closed trade — the loss-recovery re-entry gate needs it to
+   * check the symbol has reclaimed the level it broke. entryPrice falls back to
+   * the entry's initialPrice if executedPrice is unexpectedly absent.
+   */
+  async getLastClosedTradeForToken(
+    token: string,
+    since?: Date,
+  ): Promise<{ pnl: number; entryPrice: number } | null> {
+    const entry = await this.prisma.watchEntry.findFirst({
+      where: {
+        token,
+        status: { in: [WatchStatus.TARGET_HIT, WatchStatus.STOPPED, WatchStatus.EXITED] },
+        closedAt: since ? { gte: since } : { not: null },
+      },
+      orderBy: { closedAt: 'desc' },
+      select: { paperTradeId: true, liveTradeId: true, executedPrice: true, initialPrice: true },
+    });
+    if (!entry) return null;
+    const tradeId = entry.paperTradeId ?? entry.liveTradeId;
+    if (!tradeId) return null;
+    const trade = await this.prisma.trade.findUnique({ where: { id: tradeId }, select: { pnl: true } });
+    if (trade?.pnl == null) return null;
+    return { pnl: trade.pnl, entryPrice: entry.executedPrice ?? entry.initialPrice };
+  }
+
+  /**
+   * Count loss-recovery re-entries already admitted for a token within the
+   * window (today). Backs the once-per-day recovery cap.
+   */
+  async countRecoveryReentriesToday(token: string, since: Date): Promise<number> {
+    return this.prisma.watchEntry.count({
+      where: { token, recoveryReEntry: true, initialAt: { gte: since } },
+    });
   }
 
   async update(id: string, data: Prisma.WatchEntryUpdateInput): Promise<WatchEntry> {

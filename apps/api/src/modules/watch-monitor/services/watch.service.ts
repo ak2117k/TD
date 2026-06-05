@@ -12,6 +12,7 @@ import { DEFAULT_MAX_CAPITAL_PER_TRADE } from '@td/shared';
 import { formatTradeRejection } from '../../../common/utils/trade-rejection-log';
 import { isWithinEntryWindow } from '../../../common/utils/market-hours';
 import { evaluateTradePolicy } from './trade-policy';
+import { evaluateLossReentry } from './loss-reentry';
 
 export const WATCH_CAP = 50;
 
@@ -223,23 +224,48 @@ export class WatchService {
       throw new TradeCooldownError(input.symbol);
     }
 
-    // Green-only re-entry gate: block re-entry if the last closed trade for
-    // this symbol TODAY was a loss. Same-day only — yesterday's loss does not
-    // carry over to the next session. Each day is a fresh slate.
+    // Re-entry gate. After a same-day loss the symbol is normally locked out,
+    // but a smart loss-recovery re-entry is admitted on overwhelming proof the
+    // uptrend resumed: score>80 + the four momentum factors pass + price has
+    // reclaimed the prior entry, capped at one half-size recovery per day. A
+    // green close (pnl>0) re-enters normally. Same-day only — yesterday's loss
+    // does not carry over.
     const todayIst = new Date(
       new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) + 'T00:00:00.000+05:30',
     );
-    const lastPnl = await this.repo.getLastClosedPnlForToken(input.token, todayIst);
-    if (lastPnl !== null && lastPnl <= 0) {
-      this.logger.warn(
-        formatTradeRejection({
-          symbol: input.symbol,
-          side: input.side,
-          stage: 'watch',
-          reason: `last closed trade was a loss (₹${lastPnl.toFixed(0)}) — entry blocked`,
-        }),
+    let recoveryReEntry = false;
+    const lastClosed = await this.repo.getLastClosedTradeForToken(input.token, todayIst);
+    if (lastClosed !== null && lastClosed.pnl <= 0) {
+      const bd = input.initialBreakdown as unknown;
+      const checks: Array<{ name: string; passed: boolean }> = Array.isArray(bd)
+        ? (bd as Array<{ name: string; passed: boolean }>)
+        : Array.isArray((bd as { checks?: unknown })?.checks)
+          ? ((bd as { checks: Array<{ name: string; passed: boolean }> }).checks)
+          : [];
+      const verdict = evaluateLossReentry({
+        score: input.initialScore,
+        breakdown: checks,
+        // The alert's trigger price is the price prompting this re-entry — the
+        // scanner just fired on it — so it IS the "live, else alert price" value.
+        currentPrice: input.initialPrice,
+        priorEntryPrice: lastClosed.entryPrice,
+        priorRecoveryCount: await this.repo.countRecoveryReentriesToday(input.token, todayIst),
+      });
+      if (!verdict.allow) {
+        this.logger.warn(
+          formatTradeRejection({
+            symbol: input.symbol,
+            side: input.side,
+            stage: 'watch',
+            reason: `loss re-entry blocked: ${verdict.reason} (last pnl ₹${lastClosed.pnl.toFixed(0)})`,
+          }),
+        );
+        throw new TradeLastLossError(input.symbol, lastClosed.pnl);
+      }
+      recoveryReEntry = true;
+      this.logger.log(
+        `[watch] ${input.symbol}: loss-recovery re-entry admitted at half size — ${verdict.reason}`,
       );
-      throw new TradeLastLossError(input.symbol, lastPnl);
     }
 
     const active = await this.repo.countActive();
@@ -280,6 +306,7 @@ export class WatchService {
       // below the 47 entry-admission floor so a trade admitted at 47-49 is
       // not dead-on-arrival — the stop only fires on genuine decay under 45.
       stopLossScore: 45,
+      recoveryReEntry,
       optionsToken: picked?.optionsToken ?? null,
       optionsType: picked?.optionsType ?? null,
       optionsExpiry: picked?.optionsExpiry ?? null,
@@ -456,12 +483,15 @@ export class WatchService {
     // R4: equity quantity is sized off the score-tiered capital, not a flat
     // 2L. evaluateTradePolicy always returns a valid capital; admission was
     // already decided upstream in ChartinkProcessService.processOne.
-    const tradeCapital = evaluateTradePolicy({
-      score: entry.initialScore,
-      at: new Date(),
-    }).capital;
+    // A loss-recovery re-entry already failed once today — deploy HALF the
+    // normal score-tier size on the second attempt.
+    const recoveryHalf = (entry as { recoveryReEntry?: boolean }).recoveryReEntry === true;
+    const tradeCapital =
+      evaluateTradePolicy({ score: entry.initialScore, at: new Date() }).capital *
+      (recoveryHalf ? 0.5 : 1);
+    const effectiveLots = recoveryHalf ? Math.max(1, Math.floor(lotCount / 2)) : lotCount;
     const computedQty = optionsLotSize
-      ? lotCount * optionsLotSize
+      ? effectiveLots * optionsLotSize
       : Math.max(1, Math.floor(tradeCapital / Math.max(referencePrice, 1)));
     const qty = options.quantityOverride ?? computedQty;
 
