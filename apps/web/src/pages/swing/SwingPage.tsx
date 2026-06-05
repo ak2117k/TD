@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import clsx from 'clsx';
 import { useSwingEntries } from '../../hooks/useSwingEntries';
+import { useSwingOpenBook } from '../../hooks/useSwingOpenBook';
+import { summarizeOpenBook } from '../../utils/swingOpenBook';
 import ChartinkScoreTable from '../../components/chartink/ChartinkScoreTable';
 import type { AnandEntry, PnlPeriod, PnlSummary } from '../../services/anand';
 
@@ -190,17 +192,65 @@ function EntryRow({ entry }: { entry: AnandEntry }) {
   );
 }
 
+/** Shared table for both the Open Book and the date-filtered Entries log. */
+function EntriesTable({
+  entries,
+  loading,
+  error,
+  emptyMessage,
+}: {
+  entries: AnandEntry[];
+  loading: boolean;
+  error: string | null;
+  emptyMessage: string;
+}) {
+  if (loading) return <div className="text-[var(--color-text-muted)]">Loading…</div>;
+  if (error) return <div className="text-red-400">Error: {error}</div>;
+  return (
+    <div className="overflow-hidden rounded-lg border border-[var(--color-border-subtle)]">
+      <table className="w-full text-sm">
+        <thead className="bg-[var(--color-bg-secondary)] text-left text-xs uppercase tracking-wider text-[var(--color-text-muted)]">
+          <tr>
+            <th className="px-3 py-2">Symbol</th>
+            <th className="px-3 py-2">Scanner</th>
+            <th className="px-3 py-2">Leads</th>
+            <th className="px-3 py-2">Entry ₹</th>
+            <th className="px-3 py-2">Price / Δ%</th>
+            <th className="px-3 py-2">P&L ₹</th>
+            <th className="px-3 py-2">P&L %</th>
+            <th className="px-3 py-2">Target</th>
+            <th className="px-3 py-2">Status</th>
+            <th className="px-3 py-2">Entry Time</th>
+            <th className="px-3 py-2">Start Date</th>
+            <th className="px-3 py-2">End Date</th>
+            <th className="px-3 py-2">Days</th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.length === 0 && (
+            <tr>
+              <td colSpan={13} className="px-3 py-8 text-center text-[var(--color-text-muted)]">
+                {emptyMessage}
+              </td>
+            </tr>
+          )}
+          {entries.map((e) => <EntryRow key={e.id} entry={e} />)}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export default function SwingPage() {
   const [filter, setFilter] = useState<string | undefined>(undefined);
   const [from, setFrom] = useState(todayIST());
   const { entries, pnl, loading, error } = useSwingEntries(filter, from);
-  // Open (unrealized) book: floating mark-to-market P&L of positions not yet
-  // closed (exitPrice null). Kept separate from the realized period cards so
-  // booked vs floating P&L are never conflated. Especially useful for swing,
-  // which holds positions open across multiple days.
-  const openEntries = entries.filter((e) => e.exitPrice == null);
-  const openCount = openEntries.length;
-  const unrealizedRs = openEntries.reduce((sum, e) => sum + (e.pnlPct / 100) * NOTIONAL, 0);
+  // Open Book: every currently-open position (status TRADED), with NO date
+  // filter — the live-exposure source of truth. Kept separate from the
+  // date-filtered `entries` above so overnight/multi-day positions are always
+  // visible and counted, even when the From date excludes their entry day.
+  const { openEntries, loading: openLoading, error: openError } = useSwingOpenBook();
+  const { openCount, unrealizedRs } = summarizeOpenBook(openEntries, NOTIONAL);
 
   return (
     <div className="flex flex-col gap-4 p-6 text-[var(--color-text-primary)]">
@@ -227,67 +277,59 @@ export default function SwingPage() {
 
       {pnl && <PnlCards pnl={pnl} />}
 
-      <div className="flex flex-wrap gap-2">
-        {FILTERS.map((f) => (
-          <button
-            key={f.label}
-            onClick={() => setFilter(f.value)}
-            className={clsx(
-              'rounded px-3 py-1 text-sm transition-colors',
-              filter === f.value
-                ? 'bg-blue-600 text-white'
-                : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]',
-            )}
-          >
-            {f.label}
-          </button>
-        ))}
-        <div className="ml-auto flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
-          <label>From:</label>
-          <input
-            type="date"
-            value={from}
-            onChange={(e) => setFrom(e.target.value)}
-            className="rounded bg-[var(--color-bg-tertiary)] px-2 py-1 text-[var(--color-text-secondary)]"
-          />
-        </div>
-      </div>
+      {/* Open Book — every currently-open position, always shown regardless of
+          the date filter below. This is the live book that holds overnight. */}
+      <section className="flex flex-col gap-2">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">
+          Open Book · {openCount} open
+        </h2>
+        <EntriesTable
+          entries={openEntries}
+          loading={openLoading}
+          error={openError}
+          emptyMessage="No open positions."
+        />
+      </section>
 
-      {loading && <div className="text-[var(--color-text-muted)]">Loading…</div>}
-      {error && <div className="text-red-400">Error: {error}</div>}
-      {!loading && !error && (
-        <div className="overflow-hidden rounded-lg border border-[var(--color-border-subtle)]">
-          <table className="w-full text-sm">
-            <thead className="bg-[var(--color-bg-secondary)] text-left text-xs uppercase tracking-wider text-[var(--color-text-muted)]">
-              <tr>
-                <th className="px-3 py-2">Symbol</th>
-                <th className="px-3 py-2">Scanner</th>
-                <th className="px-3 py-2">Leads</th>
-                <th className="px-3 py-2">Entry ₹</th>
-                <th className="px-3 py-2">Price / Δ%</th>
-                <th className="px-3 py-2">P&L ₹</th>
-                <th className="px-3 py-2">P&L %</th>
-                <th className="px-3 py-2">Target</th>
-                <th className="px-3 py-2">Status</th>
-                <th className="px-3 py-2">Entry Time</th>
-                <th className="px-3 py-2">Start Date</th>
-                <th className="px-3 py-2">End Date</th>
-                <th className="px-3 py-2">Days</th>
-              </tr>
-            </thead>
-            <tbody>
-              {entries.length === 0 && (
-                <tr>
-                  <td colSpan={13} className="px-3 py-8 text-center text-[var(--color-text-muted)]">
-                    No swing entries yet. Waiting for Anand Swing scanner alerts.
-                  </td>
-                </tr>
+      {/* Entries log — date- and status-filtered history, for auditing what
+          fired on a given day. These controls scope only this section. */}
+      <section className="flex flex-col gap-2">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">
+          Entries
+        </h2>
+        <div className="flex flex-wrap gap-2">
+          {FILTERS.map((f) => (
+            <button
+              key={f.label}
+              onClick={() => setFilter(f.value)}
+              className={clsx(
+                'rounded px-3 py-1 text-sm transition-colors',
+                filter === f.value
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]',
               )}
-              {entries.map((e) => <EntryRow key={e.id} entry={e} />)}
-            </tbody>
-          </table>
+            >
+              {f.label}
+            </button>
+          ))}
+          <div className="ml-auto flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
+            <label>From:</label>
+            <input
+              type="date"
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+              className="rounded bg-[var(--color-bg-tertiary)] px-2 py-1 text-[var(--color-text-secondary)]"
+            />
+          </div>
         </div>
-      )}
+
+        <EntriesTable
+          entries={entries}
+          loading={loading}
+          error={error}
+          emptyMessage="No swing entries yet. Waiting for Anand Swing scanner alerts."
+        />
+      </section>
     </div>
   );
 }
