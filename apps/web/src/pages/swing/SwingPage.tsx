@@ -3,6 +3,7 @@ import clsx from 'clsx';
 import { useSwingEntries } from '../../hooks/useSwingEntries';
 import { useSwingOpenBook } from '../../hooks/useSwingOpenBook';
 import { summarizeOpenBook } from '../../utils/swingOpenBook';
+import { CapitalStrip } from '../../components/anand/CapitalStrip';
 import ChartinkScoreTable from '../../components/chartink/ChartinkScoreTable';
 import type { AnandEntry, PnlPeriod, PnlSummary } from '../../services/anand';
 
@@ -267,7 +268,7 @@ export default function SwingPage() {
   // date-filtered `entries` above so overnight/multi-day positions are always
   // visible and counted, even when the From date excludes their entry day.
   const { openEntries, loading: openLoading, error: openError } = useSwingOpenBook();
-  const { openCount, unrealizedRs } = summarizeOpenBook(openEntries, NOTIONAL);
+  const { openCount, invested, currentValue, unrealizedRs } = summarizeOpenBook(openEntries, NOTIONAL);
 
   return (
     <div className="flex flex-col gap-4 p-6 text-[var(--color-text-primary)]">
@@ -291,6 +292,15 @@ export default function SwingPage() {
           )}
         </div>
       </div>
+
+      {openCount > 0 && (
+        <CapitalStrip
+          openCount={openCount}
+          invested={invested}
+          currentValue={currentValue}
+          unrealizedRs={unrealizedRs}
+        />
+      )}
 
       {pnl && <PnlCards pnl={pnl} />}
 
