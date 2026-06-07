@@ -196,9 +196,16 @@ export function useChartData(): UseChartDataReturn {
   // Live-update path needs to know the real-time bucket of the most-recent
   // bar so a new tick can decide "extend last bar" vs "append a new one".
   const lastRealBucketRef = useRef<number>(0);
+  // Monotonic id stamped on each fetchCandles call. Only the latest may apply
+  // its response — guards against a slow earlier fetch (e.g. the default 15m,
+  // which chunks into many rate-limited requests) resolving AFTER a newer one
+  // (e.g. the switched-to 1h, a single fast request) and overwriting it. That
+  // race left the chart showing 15m candles/times under a "1H" selection.
+  const fetchIdRef = useRef(0);
 
   // Fetch historical candles
   const fetchCandles = useCallback(async () => {
+    const myFetchId = ++fetchIdRef.current;
     // Reset state synchronously BEFORE awaiting the API. The previous
     // symbol's candles must not be visible — and crucially, must not be
     // mutated by incoming live ticks — while this fetch is in flight.
@@ -232,6 +239,11 @@ export function useChartData(): UseChartDataReturn {
         `/market-data/instruments/${selectedSymbol.token}/candles`,
         { params: { timeframe, from, to, exchange: selectedSymbol.exchange } },
       );
+
+      // Stale-response guard: a newer fetch (symbol/timeframe switch) started
+      // while this one was awaiting. Discard so a slow older-window response
+      // can't clobber the current chart's candles + realTimeMap.
+      if (myFetchId !== fetchIdRef.current) return;
 
       const rawCandles: Candle[] = response.data?.candles ?? response.data?.data ?? [];
       // Sorted, deduped, ghost/bad-price-filtered REAL-time candles.
@@ -295,12 +307,15 @@ export function useChartData(): UseChartDataReturn {
         }
       }
     } catch (err) {
+      // Don't let a stale fetch's failure clear the current chart's candles.
+      if (myFetchId !== fetchIdRef.current) return;
       const msg = err instanceof Error ? err.message : 'Failed to fetch candles';
       setError(msg);
       setCandles([]);
       candlesRef.current = [];
     } finally {
-      setIsLoading(false);
+      // Only the latest fetch owns the loading flag.
+      if (myFetchId === fetchIdRef.current) setIsLoading(false);
     }
   }, [selectedSymbol.token, selectedSymbol.exchange, timeframe]);
 
