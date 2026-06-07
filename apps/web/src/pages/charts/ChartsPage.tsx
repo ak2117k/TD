@@ -219,12 +219,20 @@ export default function ChartsPage() {
     selectedSymbol.exchange,
   );
 
+  // Last candle close — memoised separately so it only recomputes when a new
+  // candle actually arrives (not on every live tick that re-creates the
+  // `candles` array reference).
+  const candleClose = useMemo(
+    () => (candles.length > 0 ? candles[candles.length - 1].close : 0),
+    [candles],
+  );
+
   // Live price for nearest-wall computation; fall back to last candle close
   // (currentPrice is null pre-feed / outside market hours).
-  const ltp = useMemo(() => {
-    if (currentPrice && currentPrice > 0) return currentPrice;
-    return candles.length > 0 ? candles[candles.length - 1].close : 0;
-  }, [currentPrice, candles]);
+  const ltp = useMemo(
+    () => (currentPrice && currentPrice > 0 ? currentPrice : candleClose),
+    [currentPrice, candleClose],
+  );
 
   // Count of drawable (non-WEAK) tiered levels — drives the status chip.
   const srLevelCount = useMemo(
