@@ -1,59 +1,61 @@
 import { useEffect, useRef } from 'react';
 import type { IPriceLine, ISeriesApi } from 'lightweight-charts';
 import type { StrongZone } from '@/types';
+import { classifyZoneTiers, type ZoneTierAnnotation } from './classifyZoneTiers';
 
 interface ChartZoneOverlayProps {
   candleSeries: ISeriesApi<'Candlestick'> | null;
   zones: StrongZone[];
+  /** Live price — required to compute nearest (immediate) walls. */
+  ltp: number;
 }
 
 interface StyleSpec {
   color: string;
-  lineWidth: 1 | 2;
-  // numeric lightweight-charts LineStyle: 0=solid, 1=dotted, 2=dashed,
-  // 3=large-dashed, 4=sparse-dotted. Matches LevelOverlay/EntryTargetOverlay
-  // convention used elsewhere in this codebase.
+  lineWidth: 1 | 2 | 3;
+  // 0 = solid, 2 = dashed (lightweight-charts LineStyle numeric convention).
   lineStyle: 0 | 2;
 }
 
 /**
- * Pick stroke colour + weight + dash pattern per the design spec.
- * Returns null for WEAK zones — caller should skip rendering them.
+ * Tier drives emphasis; hue always encodes role (red = resistance,
+ * green = support). We modulate alpha, never hue.
+ *   immediate → solid, 3px, full opacity   (the next wall)
+ *   major     → solid, 2px, ~80% opacity    (structural STRONG wall)
+ *   context   → dashed, 1px, ~40% opacity   (other MEDIUM levels)
  */
-function styleFor(zone: StrongZone): StyleSpec | null {
-  if (zone.classification === 'WEAK') return null;
-
-  const isResistance = zone.type === 'resistance';
-  if (zone.classification === 'STRONG') {
-    return {
-      color: isResistance ? '#ef4444' : '#22c55e',
-      lineWidth: 2,
-      lineStyle: 0, // solid
-    };
-  }
-  // MEDIUM
-  return {
-    color: isResistance ? '#f97316' : '#3b82f6',
-    lineWidth: 1,
-    lineStyle: 2, // dashed
-  };
+function styleForTier(a: ZoneTierAnnotation): StyleSpec {
+  const base = a.zone.type === 'resistance' ? '#ef4444' : '#22c55e';
+  if (a.tier === 'immediate') return { color: base, lineWidth: 3, lineStyle: 0 };
+  if (a.tier === 'major') return { color: `${base}cc`, lineWidth: 2, lineStyle: 0 };
+  return { color: `${base}66`, lineWidth: 1, lineStyle: 2 };
 }
 
-/** "R 24,750.5 (S87)" or "S 24,500 (S72)" — Indian-locale grouping. */
-function formatTitle(zone: StrongZone, price: number): string {
-  // Swap-aware prefix: when a zone has flipped polarity (impulsive break
-  // beyond the wall — see backend StrongZoneDetectorService), surface
-  // the "S→R" / "R→S" transition so a trader can tell at a glance that
-  // this band is a former-S/R that has been broken and is now acting in
-  // the opposite role. Falls back to plain "S" / "R" for original zones.
-  const prefix = zone.flippedAt && zone.wasType
-    ? (zone.wasType === 'support' ? 'S→R' : 'R→S')
-    : (zone.type === 'resistance' ? 'R' : 'S');
-  const priceStr = price.toLocaleString('en-IN', {
+/** e.g. "IMM R 2,512 (+0.4%)", "MAJOR S 2,440 (-2.9%)", "R 2,540 (S55)". */
+function tierTitle(a: ZoneTierAnnotation): string {
+  const role = a.zone.type === 'resistance' ? 'R' : 'S';
+  // Swap-aware prefix preserved from the original overlay.
+  const flip =
+    a.zone.flippedAt && a.zone.wasType
+      ? a.zone.wasType === 'support'
+        ? 'S→R '
+        : 'R→S '
+      : '';
+  let tag: string;
+  if (a.isImmediate && a.isMajor) tag = 'IMM·MAJOR';
+  else if (a.isImmediate) tag = 'IMM';
+  else if (a.isMajor) tag = 'MAJOR';
+  else tag = `S${a.zone.strength}`; // context keeps the strength score
+  const priceStr = a.refPrice.toLocaleString('en-IN', {
     minimumFractionDigits: 0,
     maximumFractionDigits: 2,
   });
-  return `${prefix} ${priceStr} (S${zone.strength})`;
+  const sign = a.distancePct >= 0 ? '+' : '';
+  // For context lines the strength tag already carries info; show distance for
+  // immediate/major where it drives the "room to target" judgement.
+  const dist =
+    a.isImmediate || a.isMajor ? ` (${sign}${a.distancePct.toFixed(1)}%)` : '';
+  return `${flip}${tag} ${role} ${priceStr}${dist}`;
 }
 
 /**
@@ -88,28 +90,26 @@ function safeRemovePriceLine(
 }
 
 /**
- * Renders strong support/resistance zones as horizontal price lines on the
+ * Renders immediate/major/context S/R as horizontal price lines on the
  * candlestick series. Pure side-effect component — returns null.
  *
- * - `isLine: true`  → ONE line at (upper+lower)/2.
- * - `isLine: false` → TWO lines (upper + lower edges) drawn dashed so the
- *   user sees the band's edges without us needing a custom canvas overlay.
- *   Acceptable simplification per the spec — flagged in the agent report.
- * - WEAK zones are skipped to avoid visual noise.
+ * Each zone draws ONE labeled line at its reachable edge (`refPrice`), plus —
+ * for bands (isLine === false) — a thin dashed unlabeled line at the far edge
+ * so the band's width is visible. WEAK + straddle zones are dropped by
+ * classifyZoneTiers.
  *
- * On every `zones` update we tear down the previously-drawn lines and
- * recreate. Cheap (<= ~20 lines for top 5+5 zones) and avoids stale-state
- * reconciliation bugs.
+ * On every input change we tear down previously-drawn lines and recreate.
+ * Cheap (≤ ~20 lines for top 5+5 zones) and avoids stale reconciliation bugs.
  */
 export default function ChartZoneOverlay({
   candleSeries,
   zones,
+  ltp,
 }: ChartZoneOverlayProps) {
   const linesRef = useRef<IPriceLine[]>([]);
 
   useEffect(() => {
     if (!candleSeries) return;
-
     const series = candleSeries;
 
     // 1. Tear down anything drawn previously.
@@ -118,63 +118,47 @@ export default function ChartZoneOverlay({
     }
     linesRef.current = [];
 
-    // 2. Draw the new zones.
-    for (const zone of zones) {
-      const style = styleFor(zone);
-      if (!style) continue; // WEAK — skip
+    // 2. Draw tier-annotated zones.
+    const annotations = classifyZoneTiers(zones, ltp);
+    for (const a of annotations) {
+      const style = styleForTier(a);
 
-      if (zone.isLine) {
-        // Single horizontal line at the zone center.
-        const center = (zone.upper + zone.lower) / 2;
-        const line = safeCreatePriceLine(series, {
-          price: center,
-          color: style.color,
-          lineWidth: style.lineWidth,
-          lineStyle: style.lineStyle,
-          axisLabelVisible: true,
-          title: formatTitle(zone, center),
-        });
-        if (line) linesRef.current.push(line);
-      } else {
-        // Band — draw upper + lower edges. Inner edges are dashed so a
-        // viewer can see this is a band rather than two unrelated lines.
-        // Title only on the outer edge to keep the axis legend tidy.
-        const upperLine = safeCreatePriceLine(series, {
-          price: zone.upper,
-          color: style.color,
-          lineWidth: style.lineWidth,
-          lineStyle: 2, // dashed inner edge
-          axisLabelVisible: true,
-          title:
-            zone.type === 'resistance'
-              ? formatTitle(zone, zone.upper) // resistance: label upper edge
-              : '',
-        });
-        if (upperLine) linesRef.current.push(upperLine);
+      const labeled = safeCreatePriceLine(series, {
+        price: a.refPrice,
+        color: style.color,
+        lineWidth: style.lineWidth,
+        lineStyle: style.lineStyle,
+        axisLabelVisible: true,
+        title: tierTitle(a),
+      });
+      if (labeled) linesRef.current.push(labeled);
 
-        const lowerLine = safeCreatePriceLine(series, {
-          price: zone.lower,
-          color: style.color,
-          lineWidth: style.lineWidth,
-          lineStyle: 2,
-          axisLabelVisible: true,
-          title:
-            zone.type === 'support'
-              ? formatTitle(zone, zone.lower) // support: label lower edge
-              : '',
-        });
-        if (lowerLine) linesRef.current.push(lowerLine);
+      // Band: draw the far edge thin + dashed + unlabeled to show width.
+      if (!a.zone.isLine) {
+        const farEdge =
+          a.zone.type === 'resistance' ? a.zone.upper : a.zone.lower;
+        if (farEdge !== a.refPrice) {
+          const edge = safeCreatePriceLine(series, {
+            price: farEdge,
+            color: `${a.zone.type === 'resistance' ? '#ef4444' : '#22c55e'}66`,
+            lineWidth: 1,
+            lineStyle: 2, // dashed
+            axisLabelVisible: false,
+            title: '',
+          });
+          if (edge) linesRef.current.push(edge);
+        }
       }
     }
 
-    // 3. Cleanup on unmount or before the next zones update.
+    // 3. Cleanup on unmount or before the next update.
     return () => {
       for (const line of linesRef.current) {
         safeRemovePriceLine(series, line);
       }
       linesRef.current = [];
     };
-  }, [candleSeries, zones]);
+  }, [candleSeries, zones, ltp]);
 
   return null;
 }
