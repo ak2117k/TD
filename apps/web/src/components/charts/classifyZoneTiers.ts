@@ -39,7 +39,14 @@ export function classifyZoneTiers(
 ): ZoneTierAnnotation[] {
   if (!Number.isFinite(ltp) || ltp <= 0) return [];
 
-  const drawable = zones.filter((z) => z.classification !== 'WEAK');
+  // Drop WEAK (never drawn) and straddle zones — a band whose range contains
+  // the LTP can't be cleanly sided into above/below, and its reachable-edge
+  // refPrice would contradict its type. Lines (isLine) never straddle.
+  const drawable = zones.filter(
+    (z) =>
+      z.classification !== 'WEAK' &&
+      (z.isLine || z.lower > ltp || z.upper < ltp),
+  );
 
   const above: StrongZone[] = [];
   const below: StrongZone[] = [];
@@ -51,7 +58,13 @@ export function classifyZoneTiers(
 
   const annotateSide = (side: StrongZone[]): ZoneTierAnnotation[] => {
     if (side.length === 0) return [];
-    const rows = side.map((zone) => {
+    type Row = {
+      zone: StrongZone;
+      refPrice: number;
+      distancePct: number;
+      absDist: number; // sort-only; never returned
+    };
+    const rows: Row[] = side.map((zone) => {
       const refPrice = refPriceFor(zone);
       return {
         zone,
@@ -61,6 +74,8 @@ export function classifyZoneTiers(
       };
     });
 
+    // Nearest wins `immediate`. Strict `<` means ties are won by the
+    // first-in-input-array zone; the equidistant other falls to major/context.
     let nearestIdx = 0;
     for (let i = 1; i < rows.length; i++) {
       if (rows[i].absDist < rows[nearestIdx].absDist) nearestIdx = i;

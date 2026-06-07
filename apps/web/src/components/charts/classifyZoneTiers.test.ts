@@ -99,4 +99,16 @@ describe('classifyZoneTiers', () => {
     expect(out.find((a) => a.zone.type === 'resistance')!.refPrice).toBe(110);
     expect(out.find((a) => a.zone.type === 'support')!.refPrice).toBe(90);
   });
+
+  it('tie in distance: first-in-array wins immediate, equidistant STRONG still gets major', () => {
+    const z1 = zone({ type: 'resistance', classification: 'MEDIUM', upper: 105, lower: 105 });
+    const z2 = zone({ type: 'resistance', classification: 'STRONG', upper: 105, lower: 105 });
+    const out = classifyZoneTiers([z1, z2], 100);
+    const first = out.find((a) => a.zone.classification === 'MEDIUM')!;
+    const second = out.find((a) => a.zone.classification === 'STRONG')!;
+    expect(first.isImmediate).toBe(true);
+    expect(first.tier).toBe('immediate');
+    expect(second.isMajor).toBe(true);
+    expect(second.tier).toBe('major');
+  });
 });
