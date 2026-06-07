@@ -3,26 +3,39 @@ import type { AnandEntry } from '../services/anand';
 export interface OpenBookSummary {
   /** How many positions are currently open (status TRADED / exitPrice null). */
   openCount: number;
-  /** Mark-to-market unrealized P&L of those open positions, in rupees. */
+  /** Actual capital deployed: Σ floor(notional/entryPrice) × entryPrice. Always
+   *  ≤ notional per position — whole shares only, the remainder stays as cash. */
+  invested: number;
+  /** Live mark-to-market value: Σ qty × currentPrice. A stale position (no live
+   *  price) is held at cost (qty × entryPrice) so it adds 0 to unrealized. */
+  currentValue: number;
+  /** Unrealized P&L in rupees = currentValue − invested. */
   unrealizedRs: number;
 }
 
 /**
- * Summarise the open swing book — the live-exposure counter shown in the page
- * header. Takes ONLY the open positions and the notional; it has no notion of a
- * date filter, by design. The whole point of the Open Book is that this number
- * reflects every currently-open position regardless of when it was entered, so
- * the helper cannot be coupled to the page's `from` date even by accident.
+ * Summarise the open book — actual deployed capital and its live value.
+ *
+ * ₹200k is only the per-trade allocation ceiling; you can't buy a fractional
+ * share, so the real invested amount is floor(notional/entryPrice) × entryPrice
+ * (a bit under the notional, the rest left as cash). currentValue marks that
+ * same share count at the live price. Takes no date argument by design, so the
+ * figures reflect every open position regardless of when it was entered.
  */
 export function summarizeOpenBook(openEntries: AnandEntry[], notional: number): OpenBookSummary {
+  let invested = 0;
+  let currentValue = 0;
+  for (const e of openEntries) {
+    const qty = e.entryPrice > 0 ? Math.floor(notional / e.entryPrice) : 0;
+    invested += qty * e.entryPrice;
+    // No live price → hold at cost so a stale position contributes 0 unrealized.
+    const mark = e.currentPrice == null ? e.entryPrice : e.currentPrice;
+    currentValue += qty * mark;
+  }
   return {
-    // Every open position counts toward openCount — including stale ones, which
-    // are still live exposure. But a stale position (pnlPct null) has unknown
-    // unrealized P&L, so it is excluded from the sum rather than treated as 0%.
     openCount: openEntries.length,
-    unrealizedRs: openEntries.reduce(
-      (sum, e) => sum + (e.pnlPct == null ? 0 : (e.pnlPct / 100) * notional),
-      0,
-    ),
+    invested,
+    currentValue,
+    unrealizedRs: currentValue - invested,
   };
 }

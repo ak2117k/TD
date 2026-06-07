@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import clsx from 'clsx';
 import { useIntradayEntries } from '../../hooks/useIntradayEntries';
+import { summarizeOpenBook } from '../../utils/swingOpenBook';
+import { CapitalStrip } from '../../components/anand/CapitalStrip';
 import ChartinkScoreTable from '../../components/chartink/ChartinkScoreTable';
 import type { AnandEntry, PnlPeriod, PnlSummary } from '../../services/anand';
 
@@ -166,12 +168,7 @@ export default function IntradayPage() {
   // closed (exitPrice null). Kept separate from the realized period cards so
   // booked vs floating P&L are never conflated.
   const openEntries = entries.filter((e) => e.exitPrice == null);
-  const openCount = openEntries.length;
-  // Stale open rows (pnlPct null) count as open but contribute no known P&L.
-  const unrealizedRs = openEntries.reduce(
-    (sum, e) => sum + (e.pnlPct == null ? 0 : (e.pnlPct / 100) * NOTIONAL),
-    0,
-  );
+  const { openCount, invested, currentValue, unrealizedRs } = summarizeOpenBook(openEntries, NOTIONAL);
 
   return (
     <div className="flex flex-col gap-4 p-6 text-[var(--color-text-primary)]">
@@ -195,6 +192,15 @@ export default function IntradayPage() {
           )}
         </div>
       </div>
+
+      {openCount > 0 && (
+        <CapitalStrip
+          openCount={openCount}
+          invested={invested}
+          currentValue={currentValue}
+          unrealizedRs={unrealizedRs}
+        />
+      )}
 
       {pnl && <PnlBar pnl={pnl} />}
 
