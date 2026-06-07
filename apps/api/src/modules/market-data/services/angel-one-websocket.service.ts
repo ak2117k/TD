@@ -106,6 +106,19 @@ export class AngelOneWebSocketService extends EventEmitter implements OnModuleDe
         );
       }
 
+      // Tear down any prior socket FIRST. On the reconnect path connect() runs
+      // with a stale `this.ws` still set; replacing it without closing leaves the
+      // old instance's internal heartbeat timer alive, firing ws.send() on a dead
+      // socket and throwing "WebSocket is not open" forever (the crash class).
+      if (this.ws) {
+        try {
+          this.ws.close?.();
+        } catch {
+          // ignore — best-effort teardown
+        }
+        this.ws = null;
+      }
+
       this.ws = new WebSocketV2({
         jwttoken: jwtToken,
         clientcode: clientId,
