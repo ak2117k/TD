@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import type { IPriceLine, ISeriesApi } from 'lightweight-charts';
 import type { StrongZone } from '@/types';
 import { classifyZoneTiers, type ZoneTierAnnotation } from './classifyZoneTiers';
@@ -17,6 +17,11 @@ interface StyleSpec {
   lineStyle: 0 | 2;
 }
 
+/** Hue encodes role: red = resistance, green = support. */
+function baseColor(zone: StrongZone): string {
+  return zone.type === 'resistance' ? '#ef4444' : '#22c55e';
+}
+
 /**
  * Tier drives emphasis; hue always encodes role (red = resistance,
  * green = support). We modulate alpha, never hue.
@@ -25,13 +30,13 @@ interface StyleSpec {
  *   context   → dashed, 1px, ~40% opacity   (other MEDIUM levels)
  */
 function styleForTier(a: ZoneTierAnnotation): StyleSpec {
-  const base = a.zone.type === 'resistance' ? '#ef4444' : '#22c55e';
+  const base = baseColor(a.zone);
   if (a.tier === 'immediate') return { color: base, lineWidth: 3, lineStyle: 0 };
   if (a.tier === 'major') return { color: `${base}cc`, lineWidth: 2, lineStyle: 0 };
   return { color: `${base}66`, lineWidth: 1, lineStyle: 2 };
 }
 
-/** e.g. "IMM R 2,512 (+0.4%)", "MAJOR S 2,440 (-2.9%)", "R 2,540 (S55)". */
+/** e.g. "IMM R 2,512 (+0.4%)", "MAJOR S 2,440 (-2.9%)", "S55 R 2,540". */
 function tierTitle(a: ZoneTierAnnotation): string {
   const role = a.zone.type === 'resistance' ? 'R' : 'S';
   // Swap-aware prefix preserved from the original overlay.
@@ -108,6 +113,26 @@ export default function ChartZoneOverlay({
 }: ChartZoneOverlayProps) {
   const linesRef = useRef<IPriceLine[]>([]);
 
+  const annotations = useMemo(
+    () => classifyZoneTiers(zones, ltp),
+    [zones, ltp],
+  );
+
+  // Redraw only when the VISIBLE output changes — tier assignment, level
+  // price, or the displayed distance-% (rendered to 1 decimal). `ltp` itself
+  // ticks several times per second; without this the effect would tear down
+  // and recreate every price line on each tick for no visible change.
+  const drawKey = useMemo(
+    () =>
+      annotations
+        .map(
+          (a) =>
+            `${a.zone.id}:${a.tier}:${a.refPrice}:${a.distancePct.toFixed(1)}`,
+        )
+        .join('|'),
+    [annotations],
+  );
+
   useEffect(() => {
     if (!candleSeries) return;
     const series = candleSeries;
@@ -119,7 +144,6 @@ export default function ChartZoneOverlay({
     linesRef.current = [];
 
     // 2. Draw tier-annotated zones.
-    const annotations = classifyZoneTiers(zones, ltp);
     for (const a of annotations) {
       const style = styleForTier(a);
 
@@ -137,10 +161,12 @@ export default function ChartZoneOverlay({
       if (!a.zone.isLine) {
         const farEdge =
           a.zone.type === 'resistance' ? a.zone.upper : a.zone.lower;
+        // Defensive: refPrice === farEdge only for a degenerate zero-width
+        // band (isLine === false guarantees upper !== lower for real bands).
         if (farEdge !== a.refPrice) {
           const edge = safeCreatePriceLine(series, {
             price: farEdge,
-            color: `${a.zone.type === 'resistance' ? '#ef4444' : '#22c55e'}66`,
+            color: `${baseColor(a.zone)}66`,
             lineWidth: 1,
             lineStyle: 2, // dashed
             axisLabelVisible: false,
@@ -158,7 +184,11 @@ export default function ChartZoneOverlay({
       }
       linesRef.current = [];
     };
-  }, [candleSeries, zones, ltp]);
+    // `annotations` is referenced but intentionally omitted: it is memoised on
+    // [zones, ltp] and `drawKey` is derived from it, so whenever the visible
+    // output changes `drawKey` changes and `annotations` is already fresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [candleSeries, drawKey]);
 
   return null;
 }
