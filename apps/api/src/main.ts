@@ -6,29 +6,37 @@ import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters';
 import { LoggingInterceptor } from './common/interceptors';
+import { isBenignWsHeartbeatError } from './common/utils/ws-heartbeat-error';
 
 /**
- * Narrow safety net for the smartapi-javascript WebSocket heartbeat bug:
- * its internal setTimeout calls `ws.send()` without checking readyState,
- * and when the socket is still in CONNECTING the throw escapes unhandled
- * and kills the whole process. Swallow only THAT specific error; rethrow
- * everything else so real bugs still crash loudly.
+ * Safety net for the smartapi-javascript WebSocket heartbeat bug: its internal
+ * timer calls `ws.send()` without checking readyState, so during the daily
+ * reconnect (socket CONNECTING/CLOSING/CLOSED) the throw escapes and kills the
+ * whole process — taking the API and every chart/feed down until a manual
+ * restart. Swallow ONLY that "WebSocket is not open" class, via BOTH
+ * uncaughtException and unhandledRejection; everything else crashes loudly so
+ * real bugs stay visible. (The previous guard matched only readyState 0 + a
+ * stack string, so the reconnect-time readyState 2/3 throws slipped through.)
  */
 process.on('uncaughtException', (err: Error) => {
-  const msg = err?.message ?? '';
-  const stack = err?.stack ?? '';
-  if (
-    msg.includes('WebSocket is not open: readyState 0') &&
-    stack.includes('smartapi-javascript')
-  ) {
+  if (isBenignWsHeartbeatError(err)) {
     // eslint-disable-next-line no-console
-    console.warn('[uncaughtException] smartapi WS heartbeat on CONNECTING socket — swallowed:', msg);
+    console.warn('[uncaughtException] smartapi WS heartbeat on non-open socket — swallowed:', err?.message);
     return;
   }
-  // Unknown error — preserve default behaviour.
   // eslint-disable-next-line no-console
   console.error('[uncaughtException]', err);
   throw err;
+});
+
+process.on('unhandledRejection', (reason: unknown) => {
+  if (isBenignWsHeartbeatError(reason)) {
+    // eslint-disable-next-line no-console
+    console.warn('[unhandledRejection] smartapi WS heartbeat on non-open socket — swallowed:', (reason as Error)?.message ?? reason);
+    return;
+  }
+  // eslint-disable-next-line no-console
+  console.error('[unhandledRejection]', reason);
 });
 
 async function bootstrap(): Promise<void> {
