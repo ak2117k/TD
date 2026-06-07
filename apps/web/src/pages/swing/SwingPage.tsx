@@ -4,6 +4,7 @@ import { useSwingEntries } from '../../hooks/useSwingEntries';
 import { useSwingOpenBook } from '../../hooks/useSwingOpenBook';
 import { summarizeOpenBook } from '../../utils/swingOpenBook';
 import { CapitalStrip } from '../../components/anand/CapitalStrip';
+import { SymbolChartLink } from '../../components/common';
 import ChartinkScoreTable from '../../components/chartink/ChartinkScoreTable';
 import type { AnandEntry, PnlPeriod, PnlSummary } from '../../services/anand';
 
@@ -119,7 +120,7 @@ function EntryRow({ entry }: { entry: AnandEntry }) {
       >
         {/* 1. Symbol */}
         <td className="px-3 py-2 font-mono font-medium">
-          {entry.symbol}
+          <SymbolChartLink symbol={entry.symbol} token={entry.token} />
           {ongoing && (
             <span className="ml-2 rounded bg-amber-500/20 px-1 py-0.5 text-[9px] font-semibold uppercase text-amber-300">
               Overnight

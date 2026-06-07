@@ -1,6 +1,6 @@
 import { Filter, RefreshCw, Loader2, Slash } from 'lucide-react';
 import { cn } from '@/utils/cn';
-import { EmptyState, LoadingSkeleton } from '@/components/common';
+import { EmptyState, LoadingSkeleton, SymbolChartLink } from '@/components/common';
 import { useChartinkRejections } from '@/hooks/useChartinkRejections';
 import type {
   RejectionKindCount,
@@ -199,7 +199,7 @@ function RejectionsTable({ rows }: { rows: RejectionRow[] }) {
                 {formatTime(r.processedAt)}
               </td>
               <td className="px-3 py-2 font-mono font-semibold text-gray-100">
-                {r.symbol}
+                <SymbolChartLink symbol={r.symbol} />
               </td>
               <td className="px-3 py-2 text-gray-400">{r.scanner}</td>
               <td className="px-3 py-2">

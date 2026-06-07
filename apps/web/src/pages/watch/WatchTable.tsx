@@ -5,6 +5,7 @@ import { trailView, SL_AMBER_THRESHOLD_PCT } from '../../utils/trailView';
 import { WatchDetailPanel } from './WatchDetailPanel';
 import { factorCell, type FactorCellState } from './factorCell';
 import { FACTOR_COLUMNS } from '../../utils/factorColumns';
+import { SymbolChartLink } from '../../components/common';
 
 interface Props {
   entries: WatchEntry[];
@@ -145,7 +146,7 @@ export function WatchTable({ entries, onSelect, selectedId, fetchEntry }: Props)
               }`}
             >
               <td className="py-2 px-3 font-mono text-[var(--color-text-primary)]">
-                {e.symbol}
+                <SymbolChartLink symbol={e.symbol} token={e.token} exchange={e.exchange} />
               </td>
               <td
                 className="py-2 px-3 text-left text-[var(--color-text-secondary)] max-w-[160px] truncate"

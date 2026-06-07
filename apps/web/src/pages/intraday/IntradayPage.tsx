@@ -3,6 +3,7 @@ import clsx from 'clsx';
 import { useIntradayEntries } from '../../hooks/useIntradayEntries';
 import { summarizeOpenBook } from '../../utils/swingOpenBook';
 import { CapitalStrip } from '../../components/anand/CapitalStrip';
+import { SymbolChartLink } from '../../components/common';
 import ChartinkScoreTable from '../../components/chartink/ChartinkScoreTable';
 import type { AnandEntry, PnlPeriod, PnlSummary } from '../../services/anand';
 
@@ -100,7 +101,9 @@ function EntryRow({ entry }: { entry: AnandEntry }) {
         onClick={() => setExpanded((v) => !v)}
         className="cursor-pointer border-t border-[var(--color-border-subtle)] hover:bg-[var(--color-bg-tertiary)]"
       >
-        <td className="px-3 py-2 font-mono font-medium">{entry.symbol}</td>
+        <td className="px-3 py-2 font-mono font-medium">
+          <SymbolChartLink symbol={entry.symbol} token={entry.token} />
+        </td>
         <td className="px-3 py-2 text-[var(--color-text-muted)]">
           {entry.scannerName ?? <span className="text-gray-500">—</span>}
         </td>
