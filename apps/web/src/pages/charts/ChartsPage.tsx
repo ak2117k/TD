@@ -6,6 +6,9 @@ import type { CandlestickChartHandle } from '@/components/charts';
 import LevelOverlay, { LEVEL_COLORS } from '@/components/charts/LevelOverlay';
 import SetupMarker from '@/components/charts/SetupMarker';
 import EntryTargetOverlay from '@/components/charts/EntryTargetOverlay';
+import ChartZoneOverlay from '@/components/charts/ChartZoneOverlay';
+import { classifyZoneTiers } from '@/components/charts/classifyZoneTiers';
+import { useZones } from '@/hooks/useZones';
 import StockOverviewPanel from '@/components/stock-overview/StockOverviewPanel';
 import { useChartData } from '@/hooks/useChartData';
 import { useChartAnalysis } from '@/hooks/useChartAnalysis';
@@ -210,6 +213,25 @@ export default function ChartsPage() {
 
   useDrawingPersistence(selectedSymbol.token);
 
+  // Strong-zone S/R (display-only). Polls /signals/zones every 60s.
+  const { zones, isLoading: zonesLoading } = useZones(
+    selectedSymbol.token,
+    selectedSymbol.exchange,
+  );
+
+  // Live price for nearest-wall computation; fall back to last candle close
+  // (currentPrice is null pre-feed / outside market hours).
+  const ltp = useMemo(() => {
+    if (currentPrice && currentPrice > 0) return currentPrice;
+    return candles.length > 0 ? candles[candles.length - 1].close : 0;
+  }, [currentPrice, candles]);
+
+  // Count of drawable (non-WEAK) tiered levels — drives the status chip.
+  const srLevelCount = useMemo(
+    () => classifyZoneTiers(zones, ltp).length,
+    [zones, ltp],
+  );
+
   const handleCrosshairMove = useCallback((params: unknown) => {
     const p = params as { seriesData?: Map<unknown, unknown> };
     if (!p.seriesData || p.seriesData.size === 0) {
@@ -402,6 +424,15 @@ export default function ChartsPage() {
               levels={analysisOverlayLevels}
             />
           )}
+          {/* Strong-zone S/R overlay — immediate (next wall) + major (STRONG
+              structural) tiers. Detector basis is 15m, so only render there. */}
+          {timeframe === '15m' && ltp > 0 && (
+            <ChartZoneOverlay
+              candleSeries={chartRef.current?.candleSeries ?? null}
+              zones={zones}
+              ltp={ltp}
+            />
+          )}
           {!setupContext && analysis?.kind === 'setup' && (
             <EntryTargetOverlay
               series={chartRef.current?.candleSeries ?? null}
@@ -421,6 +452,19 @@ export default function ChartsPage() {
               chart={chartRef.current?.chart ?? null}
               candles={candles}
             />
+          )}
+
+          {/* S/R status chip — an empty overlay is normal when candle history
+              is insufficient (e.g. Angel daily session expiry). Surface that
+              explicitly so a blank chart doesn't look like a bug. */}
+          {timeframe === '15m' && (
+            <div className="absolute top-3 right-3 z-20 rounded-full bg-[var(--color-bg-secondary)]/90 px-3 py-1 text-[11px] font-medium text-[var(--color-text-secondary)] shadow backdrop-blur-sm">
+              {zonesLoading && zones.length === 0
+                ? 'S/R: loading…'
+                : srLevelCount > 0
+                  ? `S/R: ${srLevelCount} levels`
+                  : 'S/R: no zones (insufficient data)'}
+            </div>
           )}
 
           {/* Watermark */}
