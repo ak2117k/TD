@@ -204,6 +204,8 @@ export default function ChartsPage() {
     realTimeMap,
     loadOlder,
     isLoadingMore,
+    hasMoreHistory,
+    prependSeq,
   } = useChartData();
 
   useDrawingPersistence(selectedSymbol.token);
@@ -342,6 +344,15 @@ export default function ChartsPage() {
             </div>
           )}
 
+          {/* Groww-style "loading older history" pill — shows while a
+              previous-candles fetch is in flight after scrolling to the left edge. */}
+          {isLoadingMore && (
+            <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 rounded-full bg-[var(--color-bg-secondary)]/90 px-3 py-1 text-xs text-[var(--color-text-secondary)] shadow backdrop-blur-sm">
+              <div className="h-3 w-3 animate-spin rounded-full border-2 border-[var(--color-accent-blue)] border-t-transparent" />
+              Loading older history…
+            </div>
+          )}
+
           <CandlestickChart
             key={selectedSymbol.token}
             ref={chartRef}
@@ -349,8 +360,9 @@ export default function ChartsPage() {
             onCrosshairMove={handleCrosshairMove}
             showVolume={indicators.volume}
             realTimeMap={realTimeMap}
-            onReachStart={loadOlder}
-            isLoadingMore={isLoadingMore}
+            onLoadOlder={loadOlder}
+            canLoadOlder={hasMoreHistory && !isLoadingMore}
+            prependSeq={prependSeq}
           />
 
           {/* User-drawn annotations (hline, hzone, trend, vline, rect, fib, text, arrow) */}

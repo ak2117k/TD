@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import api from '@/services/api';
 import { wsService } from '@/services/websocket';
 import { useChartStore } from '@/stores/chart-store';
+import { prependOlderCandles } from '@/utils/chartHistory';
 import type { Candle, OIData, Quote } from '@/types';
 
 interface ChartCandle {
@@ -31,6 +32,15 @@ interface UseChartDataReturn {
   // crosshair tooltips so they show actual market times even though the
   // chart's time axis is gap-collapsed for visual continuity.
   realTimeMap: Map<number, number>;
+  // Infinite history: fetch + prepend the previous chunk of older candles.
+  loadOlder: () => void;
+  // True while a loadOlder fetch is in flight (parent gates re-triggers on it).
+  isLoadingMore: boolean;
+  // False once a loadOlder pull returns nothing older — stop trying.
+  hasMoreHistory: boolean;
+  // Bumps on each successful prepend so the chart preserves scroll position
+  // instead of default-zooming (distinguishes a prepend from a symbol reset).
+  prependSeq: number;
 }
 
 /**
@@ -135,6 +145,28 @@ function candleToChart(c: Candle): ChartCandle {
   };
 }
 
+/**
+ * Raw API candles → sorted, time-deduped, "meaningful" ChartCandles (REAL
+ * times, before gap-compression). Drops ghost bars (no range AND no body) and
+ * any with non-positive prices. Shared by the initial fetch and loadOlder.
+ */
+function cleanCandles(raw: Candle[]): ChartCandle[] {
+  const chartCandles = raw.map(candleToChart).sort((a, b) => a.time - b.time);
+  const seen = new Set<number>();
+  const deduped = chartCandles.filter((c) => {
+    if (seen.has(c.time)) return false;
+    seen.add(c.time);
+    return true;
+  });
+  return deduped.filter((c) => {
+    const noRange = c.high === c.low;
+    const noBody = c.open === c.close;
+    if (noRange && noBody) return false;
+    if (c.open <= 0 || c.close <= 0 || c.high <= 0 || c.low <= 0) return false;
+    return true;
+  });
+}
+
 export function useChartData(): UseChartDataReturn {
   const selectedSymbol = useChartStore((s) => s.selectedSymbol);
   const timeframe = useChartStore((s) => s.timeframe);
@@ -148,6 +180,19 @@ export function useChartData(): UseChartDataReturn {
   const candlesRef = useRef<ChartCandle[]>([]);
   const timeframeMsRef = useRef(getTimeframeDurationMs(timeframe));
   const [realTimeMap, setRealTimeMap] = useState<Map<number, number>>(new Map());
+  // Mirror of realTimeMap kept in a ref so loadOlder (and the prepend helper)
+  // can read the current compressed→real map without a stale closure.
+  const realTimeMapRef = useRef<Map<number, number>>(new Map());
+  // Infinite-history state. realCandlesRef holds the full REAL-time candle
+  // series (uncompressed times); oldestRealRef is the oldest real second we
+  // hold, the cursor for the next older fetch.
+  const realCandlesRef = useRef<ChartCandle[]>([]);
+  const oldestRealRef = useRef<number | null>(null);
+  const loadingMoreRef = useRef(false);
+  const hasMoreRef = useRef(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [hasMoreHistory, setHasMoreHistory] = useState(true);
+  const [prependSeq, setPrependSeq] = useState(0);
   // Live-update path needs to know the real-time bucket of the most-recent
   // bar so a new tick can decide "extend last bar" vs "append a new one".
   const lastRealBucketRef = useRef<number>(0);
@@ -164,6 +209,17 @@ export function useChartData(): UseChartDataReturn {
     candlesRef.current = [];
     lastRealBucketRef.current = 0;
     setRealTimeMap(new Map());
+    realTimeMapRef.current = new Map();
+    // Reset infinite-history state for the new symbol/timeframe. prependSeq is
+    // intentionally NOT reset — the chart treats a prependSeq change as "preserve
+    // scroll"; a symbol switch must read as a reset (default-zoom), so it must
+    // leave prependSeq unchanged.
+    realCandlesRef.current = [];
+    oldestRealRef.current = null;
+    loadingMoreRef.current = false;
+    hasMoreRef.current = true;
+    setHasMoreHistory(true);
+    setIsLoadingMore(false);
 
     setIsLoading(true);
     setError(null);
@@ -178,30 +234,8 @@ export function useChartData(): UseChartDataReturn {
       );
 
       const rawCandles: Candle[] = response.data?.candles ?? response.data?.data ?? [];
-      const chartCandles = rawCandles
-        .map(candleToChart)
-        .sort((a, b) => a.time - b.time);
-
-      // Deduplicate by time
-      const seen = new Set<number>();
-      const deduped = chartCandles.filter((c) => {
-        if (seen.has(c.time)) return false;
-        seen.add(c.time);
-        return true;
-      });
-
-      // Drop "ghost" candles that have no real range AND no body movement.
-      // We also keep zero-volume candles when they have a real range — index
-      // candles (e.g. NIFTY) often have volume=0 by design.
-      const meaningful = deduped.filter((c) => {
-        const noRange = c.high === c.low;
-        const noBody = c.open === c.close;
-        if (noRange && noBody) return false;
-        // Sanity guard: drop any candle with zero/negative prices (occasional
-        // bad-data artifact; would skew the price scale).
-        if (c.open <= 0 || c.close <= 0 || c.high <= 0 || c.low <= 0) return false;
-        return true;
-      });
+      // Sorted, deduped, ghost/bad-price-filtered REAL-time candles.
+      const meaningful = cleanCandles(rawCandles);
 
       // Compress overnight/weekend gaps so candles render contiguously.
       const tfSec = timeframeMsRef.current / 1000;
@@ -218,6 +252,11 @@ export function useChartData(): UseChartDataReturn {
       setCandles(compressed);
       candlesRef.current = compressed;
       setRealTimeMap(realByCompressed);
+      realTimeMapRef.current = realByCompressed;
+      // Seed the infinite-history cursor with the full real-time series.
+      realCandlesRef.current = meaningful;
+      oldestRealRef.current = meaningful.length > 0 ? meaningful[0].time : null;
+      hasMoreRef.current = true;
 
       // Track the most-recent bar's real-time bucket so the WebSocket tick
       // handler can decide whether a new tick extends it or starts a new bar.
@@ -264,6 +303,64 @@ export function useChartData(): UseChartDataReturn {
       setIsLoading(false);
     }
   }, [selectedSymbol.token, selectedSymbol.exchange, timeframe]);
+
+  // Infinite history: fetch the chunk of candles immediately older than what we
+  // currently hold and prepend it, keeping the existing bars' compressed times
+  // unchanged (the chart restores scroll position off the prependSeq bump).
+  // Guards prevent concurrent pulls and stop once history is exhausted.
+  const loadOlder = useCallback(async () => {
+    if (loadingMoreRef.current || !hasMoreRef.current) return;
+    const oldest = oldestRealRef.current;
+    if (oldest == null) return;
+
+    loadingMoreRef.current = true;
+    setIsLoadingMore(true);
+    try {
+      const days = getHistoryRangeDays(timeframe);
+      const toMs = (oldest - 1) * 1000; // just before our current oldest real candle
+      const to = new Date(toMs).toISOString();
+      const from = new Date(toMs - days * 24 * 60 * 60 * 1000).toISOString();
+
+      const response = await api.get(
+        `/market-data/instruments/${selectedSymbol.token}/candles`,
+        { params: { timeframe, from, to, exchange: selectedSymbol.exchange } },
+      );
+      const rawOlder: Candle[] = response.data?.candles ?? response.data?.data ?? [];
+      const olderMeaningful = cleanCandles(rawOlder).filter((c) => c.time < oldest);
+
+      if (olderMeaningful.length === 0) {
+        hasMoreRef.current = false;
+        setHasMoreHistory(false);
+        return;
+      }
+
+      const tfSec = timeframeMsRef.current / 1000;
+      const { candles: merged, realTimeMap: newMap, prependedCount } = prependOlderCandles(
+        candlesRef.current,
+        realTimeMapRef.current,
+        olderMeaningful,
+        tfSec,
+      );
+      if (prependedCount === 0) {
+        hasMoreRef.current = false;
+        setHasMoreHistory(false);
+        return;
+      }
+
+      realCandlesRef.current = [...olderMeaningful, ...realCandlesRef.current];
+      oldestRealRef.current = olderMeaningful[0].time;
+      candlesRef.current = merged;
+      realTimeMapRef.current = newMap;
+      setCandles(merged);
+      setRealTimeMap(newMap);
+      setPrependSeq((s) => s + 1);
+    } catch {
+      // Soft failure — leave hasMore true so a later pan can retry.
+    } finally {
+      loadingMoreRef.current = false;
+      setIsLoadingMore(false);
+    }
+  }, [timeframe, selectedSymbol.token, selectedSymbol.exchange]);
 
   // Fetch OI data. Defensive unwrap with Array.isArray guard so a backend
   // shape change (e.g. wrapping in `{ oi: [...] }`) surfaces as a console
@@ -365,6 +462,7 @@ export function useChartData(): UseChartDataReturn {
           setRealTimeMap((m) => {
             const next = new Map(m);
             next.set(newCompressedTime, tickRealBucket);
+            realTimeMapRef.current = next;
             return next;
           });
           lastRealBucketRef.current = tickRealBucket;
@@ -421,6 +519,7 @@ export function useChartData(): UseChartDataReturn {
           setRealTimeMap((m) => {
             const nm = new Map(m);
             nm.set(start, realBucket);
+            realTimeMapRef.current = nm;
             return nm;
           });
           lastRealBucketRef.current = realBucket;
@@ -450,6 +549,7 @@ export function useChartData(): UseChartDataReturn {
           setRealTimeMap((m) => {
             const nm = new Map(m);
             nm.set(newCompressedTime, realBucket);
+            realTimeMapRef.current = nm;
             return nm;
           });
           lastRealBucketRef.current = realBucket;
@@ -485,5 +585,9 @@ export function useChartData(): UseChartDataReturn {
     priceChange,
     priceChangePercent,
     realTimeMap,
+    loadOlder,
+    isLoadingMore,
+    hasMoreHistory,
+    prependSeq,
   };
 }
