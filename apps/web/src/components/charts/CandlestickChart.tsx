@@ -37,6 +37,17 @@ interface CandlestickChartProps {
   // crosshair tooltips show real market times instead of the synthetic
   // gap-collapsed timestamps.
   realTimeMap?: Map<number, number>;
+  // Infinite history scroll: invoked when the user scrolls near the left edge
+  // (oldest bar) and more history is available. Parent should fetch + prepend
+  // older bars, then bump `prependSeq` so the chart preserves scroll position.
+  onLoadOlder?: () => void;
+  // Whether older history is still available to load. When false the left-edge
+  // detection will not fire `onLoadOlder`.
+  canLoadOlder?: boolean;
+  // Monotonically-increasing counter the parent bumps after prepending older
+  // bars. A change signals a PREPEND update (preserve scroll, no default-zoom)
+  // rather than a fresh dataset reset.
+  prependSeq?: number;
 }
 
 function formatRealTime(realSec: number): string {
@@ -61,7 +72,17 @@ function formatRealTimeShort(realSec: number): string {
 
 const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProps>(
   function CandlestickChart(
-    { candles, width, height, onCrosshairMove, showVolume = true, realTimeMap },
+    {
+      candles,
+      width,
+      height,
+      onCrosshairMove,
+      showVolume = true,
+      realTimeMap,
+      onLoadOlder,
+      canLoadOlder,
+      prependSeq,
+    },
     ref,
   ) {
     const containerRef = useRef<HTMLDivElement>(null);
@@ -70,6 +91,23 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
     const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
     const prevCandlesLenRef = useRef(0);
     const prevFirstCandleTimeRef = useRef<number | null>(null);
+    // Tracks the last seen prependSeq so updateData can distinguish a PREPEND
+    // (older bars added at the front — preserve scroll) from a real dataset
+    // reset (symbol/timeframe change — default-zoom).
+    const prevPrependSeqRef = useRef<number | undefined>(prependSeq);
+    // Hold the latest onLoadOlder / canLoadOlder in refs so the once-at-mount
+    // visible-range subscription always reads current values without needing
+    // to re-subscribe on every prop change.
+    const onLoadOlderRef = useRef<(() => void) | undefined>(onLoadOlder);
+    const canLoadOlderRef = useRef<boolean | undefined>(canLoadOlder);
+    // In-flight guard: disarms after firing onLoadOlder at the left edge and
+    // re-arms once the visible range scrolls away from the edge. Prevents a
+    // burst of onLoadOlder calls while the parent is fetching.
+    const loadOlderArmedRef = useRef(true);
+    useEffect(() => {
+      onLoadOlderRef.current = onLoadOlder;
+      canLoadOlderRef.current = canLoadOlder;
+    }, [onLoadOlder, canLoadOlder]);
     // Hold the latest realTimeMap in a ref so chart-level formatters (created
     // once at mount) can always read the current map without re-creating the
     // chart on every prop change.
@@ -185,6 +223,27 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
         chart.subscribeCrosshairMove(onCrosshairMove);
       }
 
+      // Left-edge detection for infinite history scroll. Subscribed once at
+      // mount; reads onLoadOlder / canLoadOlder via refs so it always sees the
+      // current values without re-subscribing.
+      const handleVisibleLogicalRangeChange = (
+        range: { from: number; to: number } | null,
+      ) => {
+        if (!range) return;
+        // Re-arm once we've scrolled comfortably away from the left edge.
+        if (range.from >= 20) {
+          loadOlderArmedRef.current = true;
+        }
+        // Within ~8 bars of logical index 0 — request older history.
+        if (range.from < 8 && loadOlderArmedRef.current && canLoadOlderRef.current) {
+          loadOlderArmedRef.current = false;
+          onLoadOlderRef.current?.();
+        }
+      };
+      chart
+        .timeScale()
+        .subscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
+
       // ResizeObserver for auto-resize
       const resizeObserver = new ResizeObserver((entries) => {
         for (const entry of entries) {
@@ -204,6 +263,9 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
         if (onCrosshairMove) {
           chart.unsubscribeCrosshairMove(onCrosshairMove);
         }
+        chart
+          .timeScale()
+          .unsubscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
         chart.remove();
         chartRef.current = null;
         candleSeriesRef.current = null;
@@ -224,6 +286,7 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
         volumeSeriesRef.current.setData([]);
         prevCandlesLenRef.current = 0;
         prevFirstCandleTimeRef.current = null;
+        prevPrependSeqRef.current = prependSeq;
         return;
       }
 
@@ -241,10 +304,35 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
         color: c.close >= c.open ? 'rgba(0, 207, 132, 0.35)' : 'rgba(239, 68, 68, 0.35)',
       }));
 
+      const newFirstTime = candles[0].time;
+
+      // PREPEND update: older bars were just added at the FRONT (lower compressed
+      // times) while existing bars keep their times. This also changes the first
+      // candle time, so we use prependSeq — not the first-candle-time delta — to
+      // distinguish it from a real dataset reset. Preserve the user's scroll
+      // position by capturing the visible range before setData and restoring it
+      // after, and skip the default-zoom logic entirely.
+      const isPrepend = prependSeq !== prevPrependSeqRef.current;
+      if (isPrepend) {
+        const ts = chartRef.current?.timeScale();
+        const savedRange = ts?.getVisibleRange() ?? null;
+        candleSeriesRef.current.setData(candleData);
+        volumeSeriesRef.current.setData(volumeData);
+        if (ts && savedRange) {
+          ts.setVisibleRange(savedRange);
+        }
+        // Now that more history exists to the left, re-arm so a subsequent
+        // scroll back to the (new) edge can request the next page.
+        loadOlderArmedRef.current = true;
+        prevCandlesLenRef.current = candles.length;
+        prevFirstCandleTimeRef.current = newFirstTime;
+        prevPrependSeqRef.current = prependSeq;
+        return;
+      }
+
       // Detect a symbol/dataset change: if the first candle's timestamp differs
       // from what we saw before, this is a completely new dataset — force a full
       // setData() by resetting the incremental counter.
-      const newFirstTime = candles[0].time;
       if (prevFirstCandleTimeRef.current !== null && prevFirstCandleTimeRef.current !== newFirstTime) {
         prevCandlesLenRef.current = 0;
       }
@@ -300,7 +388,8 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
 
       prevCandlesLenRef.current = candles.length;
       prevFirstCandleTimeRef.current = newFirstTime;
-    }, [candles]);
+      prevPrependSeqRef.current = prependSeq;
+    }, [candles, prependSeq]);
 
     useEffect(() => {
       updateData();
