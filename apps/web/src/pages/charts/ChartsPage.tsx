@@ -7,7 +7,7 @@ import LevelOverlay, { LEVEL_COLORS } from '@/components/charts/LevelOverlay';
 import SetupMarker from '@/components/charts/SetupMarker';
 import EntryTargetOverlay from '@/components/charts/EntryTargetOverlay';
 import ChartZoneOverlay from '@/components/charts/ChartZoneOverlay';
-import { classifyZoneTiers } from '@/components/charts/classifyZoneTiers';
+import { buildSRView } from '@/components/charts/buildSRView';
 import { useZones } from '@/hooks/useZones';
 import StockOverviewPanel from '@/components/stock-overview/StockOverviewPanel';
 import { useChartData } from '@/hooks/useChartData';
@@ -214,7 +214,7 @@ export default function ChartsPage() {
   useDrawingPersistence(selectedSymbol.token);
 
   // Strong-zone S/R (display-only). Polls /signals/zones every 60s.
-  const { zones, isLoading: zonesLoading } = useZones(
+  const { zones } = useZones(
     selectedSymbol.token,
     selectedSymbol.exchange,
   );
@@ -234,10 +234,12 @@ export default function ChartsPage() {
     [currentPrice, candleClose],
   );
 
-  // Count of drawable (non-WEAK) tiered levels — drives the status chip.
-  const srLevelCount = useMemo(
-    () => classifyZoneTiers(zones, ltp).length,
-    [zones, ltp],
+  // Unified S/R decision read — nearest wall above + below, synthesized from
+  // BOTH the anchored level book (PDH/PDL/ORH/ORL/VWAP) and the pivot zones.
+  // Anchored levels are always present, so a moving stock always gets a read.
+  const srView = useMemo(
+    () => buildSRView(analysis?.levels ?? null, zones, ltp),
+    [analysis?.levels, zones, ltp],
   );
 
   const handleCrosshairMove = useCallback((params: unknown) => {
@@ -466,12 +468,20 @@ export default function ChartsPage() {
               is insufficient (e.g. Angel daily session expiry). Surface that
               explicitly so a blank chart doesn't look like a bug. */}
           {timeframe === '15m' && (
-            <div className="absolute top-3 right-3 z-20 rounded-full bg-[var(--color-bg-secondary)]/90 px-3 py-1 text-[11px] font-medium text-[var(--color-text-secondary)] shadow backdrop-blur-sm">
-              {zonesLoading && zones.length === 0
-                ? 'S/R: loading…'
-                : srLevelCount > 0
-                  ? `S/R: ${srLevelCount} levels`
-                  : 'S/R: no zones (insufficient data)'}
+            <div className="absolute top-3 right-3 z-20 rounded-full bg-[var(--color-bg-secondary)]/90 px-3 py-1 text-[11px] font-medium tabular-nums text-[var(--color-text-secondary)] shadow backdrop-blur-sm">
+              {(() => {
+                const fmt = (n: number) =>
+                  n.toLocaleString('en-IN', { maximumFractionDigits: 2 });
+                const pct = (p: number) =>
+                  `${p >= 0 ? '+' : ''}${p.toFixed(1)}%`;
+                if (ltp <= 0) return 'S/R: insufficient data';
+                const r = srView.immediateResistance;
+                const s = srView.immediateSupport;
+                if (!r && !s) return 'S/R: no levels';
+                const rTxt = r ? `R ${fmt(r.price)} (${pct(r.distancePct)})` : 'R —';
+                const sTxt = s ? `S ${fmt(s.price)} (${pct(s.distancePct)})` : 'S —';
+                return `${rTxt} · ${sTxt}`;
+              })()}
             </div>
           )}
 
