@@ -25,6 +25,7 @@ import { ZoneRepository } from '../repositories/zone.repository';
 import { StrongZoneDetectorService } from '../services/strong-zone-detector.service';
 import { LevelBookService } from '../services/level-book.service';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
+import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 
 @Controller('api/signals')
 export class SignalGeneratorController {
@@ -50,6 +51,10 @@ export class SignalGeneratorController {
     @Optional() private readonly strongZoneDetector?: StrongZoneDetectorService,
     @Optional() private readonly levelBookService?: LevelBookService,
     @Optional() private readonly marketDataRepository?: MarketDataRepository,
+    // Live 15m candle source for /zones — token-based, bypasses the duplicate
+    // instrument rows that starve the DB-by-instrumentId path. Optional so
+    // test wirings still construct.
+    @Optional() private readonly angelOneAdapter?: AngelOneAdapterService,
   ) {}
 
   /**
@@ -86,6 +91,37 @@ export class SignalGeneratorController {
       throw new BadRequestException('token is required');
     }
     return { history: this.setupTracker.getHistory(token) };
+  }
+
+  /**
+   * Fetch live 15m candles via the Angel adapter (token-based, TTL-cached).
+   * Token-based so it is immune to the duplicate-instrument-row problem that
+   * starves the DB-by-instrumentId path. Returns [] when the adapter is
+   * unwired or the fetch fails/throttles, so the caller can fall back to DB.
+   */
+  private async fetchLiveCandles15m(
+    token: string,
+    exchange: string,
+    from: Date,
+    to: Date,
+  ): Promise<Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>> {
+    if (!this.angelOneAdapter) return [];
+    try {
+      const live = await this.angelOneAdapter.getHistoricalData(token, exchange, '15m', from, to);
+      return (live ?? []).map((c: any) => ({
+        timestamp: c.timestamp,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        volume: typeof c.volume === 'bigint' ? Number(c.volume) : Number(c.volume),
+      }));
+    } catch (err) {
+      this.logger.debug(
+        `getZones: live candle fetch failed for ${token}: ${err instanceof Error ? err.message : err}`,
+      );
+      return [];
+    }
   }
 
   /**
@@ -146,20 +182,28 @@ export class SignalGeneratorController {
 
       const now = new Date();
       const tenDaysAgo = new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000);
-      const instrument = await this.marketDataRepository.getInstrumentByToken(token);
-      if (!instrument) return [];
 
-      const rows = await this.marketDataRepository.getCandles(
-        instrument.id, '15m', tenDaysAgo, now, 200,
-      );
-      const candles15m = rows.map((r) => ({
-        timestamp: r.timestamp,
-        open: r.open,
-        high: r.high,
-        low: r.low,
-        close: r.close,
-        volume: typeof r.volume === 'bigint' ? Number(r.volume) : r.volume,
-      }));
+      // Prefer LIVE 15m candles (token-based) — robust to duplicate instrument
+      // rows that split candle history and starve the DB-by-instrumentId path.
+      // Fall back to the DB only when the live fetch is unavailable (throttle /
+      // offline) so indices with seeded DB candles still produce zones.
+      let candles15m = await this.fetchLiveCandles15m(token, resolvedExchange, tenDaysAgo, now);
+      if (candles15m.length < 10) {
+        const instrument = await this.marketDataRepository.getInstrumentByToken(token);
+        if (instrument) {
+          const rows = await this.marketDataRepository.getCandles(
+            instrument.id, '15m', tenDaysAgo, now, 200,
+          );
+          candles15m = rows.map((r) => ({
+            timestamp: r.timestamp,
+            open: r.open,
+            high: r.high,
+            low: r.low,
+            close: r.close,
+            volume: typeof r.volume === 'bigint' ? Number(r.volume) : r.volume,
+          }));
+        }
+      }
 
       if (candles15m.length < 10) return [];
 
