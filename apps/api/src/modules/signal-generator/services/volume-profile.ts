@@ -1,3 +1,5 @@
+const NODES_PER_SIDE = 5;
+
 export interface ProfileCandle {
   high: number;
   low: number;
@@ -48,6 +50,13 @@ export function computeVolumeNodes(
     score: avgVol > 0 ? 40 * Math.min(volume / avgVol / 3, 1) : 0,
   }));
 
-  nodes.sort((a, b) => b.volume - a.volume);
-  return nodes.slice(0, 5);
+  // Select the strongest nodes on EACH side of the live price, not the global
+  // top-N. Volume is the biggest single evidence contributor; when price sits
+  // low in its range every heavy-volume bucket is overhead, which would starve
+  // the support side. `avgVol` above stays global so scores remain honest and
+  // cross-side comparable — a small support node still scores low.
+  const byVolumeDesc = (a: VolumeNode, b: VolumeNode) => b.volume - a.volume;
+  const above = nodes.filter((n) => n.price > ltp).sort(byVolumeDesc).slice(0, NODES_PER_SIDE);
+  const below = nodes.filter((n) => n.price < ltp).sort(byVolumeDesc).slice(0, NODES_PER_SIDE);
+  return [...above, ...below];
 }
