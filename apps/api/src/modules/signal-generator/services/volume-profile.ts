@@ -25,7 +25,9 @@ export function computeVolumeNodes(
   ltp: number,
 ): VolumeNode[] {
   if (candles.length < 10 || !(ltp > 0)) return [];
-  const bucket = Math.max(0.1 * atr14, 0.0025 * ltp) || 0.0025 * ltp;
+  // `ltp > 0` already guarantees a positive bucket; the `!(bucket > 0)` guard
+  // remains only to reject a NaN bucket from a NaN atr14 (Math.max propagates NaN).
+  const bucket = Math.max(0.1 * atr14, 0.0025 * ltp);
   if (!(bucket > 0)) return [];
 
   const byBucket = new Map<number, number>(); // bucketIndex → volume
