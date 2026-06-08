@@ -59,4 +59,46 @@ describe('scoreAndCluster', () => {
     const out = scoreAndCluster(cands, LTP, ATR, { softRoundGrid: [110, 120] });
     expect(out.filter((l) => l.side === 'resistance' && l.soft)).toHaveLength(0);
   });
+
+  it('does not chain-drift: spread-out candidates beyond tol stay separate', () => {
+    // ATR 2 → tol = max(0.6, 0.3) = 0.6. 105.0 / 105.5 / 106.0 each 0.5 apart →
+    // 105.0+105.5 merge (anchor 105.0, 105.5 within 0.6), but 106.0 is 1.0 from
+    // anchor 105.0 → new cluster. Without the anchor fix all three would merge.
+    const cands: LevelCandidate[] = [
+      { price: 105.0, kind: 'VOLUME', score: 38 },
+      { price: 105.5, kind: 'VOLUME', score: 38 },
+      { price: 106.0, kind: 'VOLUME', score: 38 },
+    ];
+    const out = scoreAndCluster(cands, LTP, ATR, { softRoundGrid: [] });
+    const res = out.filter((l) => l.side === 'resistance' && !l.soft);
+    expect(res.length).toBe(2); // {105.0,105.5} and {106.0}
+  });
+
+  it('never merges across the ltp: support + resistance within tol stay separate', () => {
+    // 99.7 (support) and 100.3 (resistance) are 0.6 apart (== tol) but on
+    // opposite sides of ltp 100 → must NOT merge, and both must be kept.
+    const cands: LevelCandidate[] = [
+      { price: 99.7, kind: 'VOLUME', score: 38 },
+      { price: 100.3, kind: 'VOLUME', score: 40 },
+    ];
+    const out = scoreAndCluster(cands, LTP, ATR, { softRoundGrid: [] });
+    const real = out.filter((l) => !l.soft);
+    expect(real).toHaveLength(2);
+    expect(real.some((l) => l.side === 'resistance')).toBe(true);
+    expect(real.some((l) => l.side === 'support')).toBe(true);
+  });
+
+  it('respects a custom floor override', () => {
+    const cands: LevelCandidate[] = [{ price: 105, kind: 'VOLUME', score: 38 }];
+    const out = scoreAndCluster(cands, LTP, ATR, { softRoundGrid: [], floor: 50 });
+    expect(out.filter((l) => !l.soft)).toHaveLength(0);
+  });
+
+  it('pure-soft: no candidates → a soft round number on each side from the grid', () => {
+    const out = scoreAndCluster([], LTP, ATR, { softRoundGrid: [90, 100, 110] });
+    expect(out.filter((l) => l.soft && l.side === 'resistance')).toHaveLength(1);
+    expect(out.filter((l) => l.soft && l.side === 'support')).toHaveLength(1);
+    expect(out.find((l) => l.side === 'resistance')!.price).toBe(110);
+    expect(out.find((l) => l.side === 'support')!.price).toBe(90);
+  });
 });

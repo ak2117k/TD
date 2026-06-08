@@ -9,7 +9,9 @@ interface ScoreOpts {
 }
 
 interface Cluster {
-  price: number;       // strongest contributor's price
+  anchor: number;      // first (lowest) candidate's price — never moves; the
+                       // tolerance window is anchored here to prevent chain-drift
+  price: number;       // strongest contributor's price (representative)
   topScore: number;    // for representative price selection
   score: number;       // summed, capped at 100
   kinds: Set<EvidenceKind>;
@@ -20,6 +22,11 @@ interface Cluster {
  * them vs the live price, drop everything below the floor, and — when a side
  * has no kept level — surface the nearest adaptive round number on that side as
  * a `soft` fallback (so a blue-sky breakout still shows a "how far" reference).
+ *
+ * Candidates are split by side (above/below ltp) BEFORE clustering so a cluster
+ * can never straddle the price (which would mis-side it and bury one side's
+ * evidence), and each cluster's window is anchored to its first member so a
+ * run of candidates can't chain-drift past the tolerance.
  */
 export function scoreAndCluster(
   candidates: LevelCandidate[],
@@ -31,24 +38,42 @@ export function scoreAndCluster(
   const floor = opts.floor ?? FLOOR;
   const tol = Math.max(0.3 * atr14, 0.003 * ltp);
 
-  const sorted = [...candidates]
-    .filter((c) => Number.isFinite(c.price) && c.price > 0 && c.price !== ltp)
-    .sort((a, b) => a.price - b.price);
+  const valid = candidates.filter(
+    (c) => Number.isFinite(c.price) && c.price > 0 && c.price !== ltp,
+  );
 
-  const clusters: Cluster[] = [];
-  for (const c of sorted) {
-    const last = clusters[clusters.length - 1];
-    if (last && Math.abs(c.price - last.price) <= tol) {
-      last.score = Math.min(100, last.score + c.score);
-      last.kinds.add(c.kind);
-      if (c.score > last.topScore) {
-        last.topScore = c.score;
-        last.price = c.price;
+  // Cluster a single side (all candidates already on one side of ltp). The
+  // window is anchored to the cluster's first member, not its shifting
+  // representative, so 100/101.5/103 with tol 1.6 does NOT collapse into one.
+  const clusterSide = (side: LevelCandidate[]): Cluster[] => {
+    const sorted = [...side].sort((a, b) => a.price - b.price);
+    const clusters: Cluster[] = [];
+    for (const c of sorted) {
+      const last = clusters[clusters.length - 1];
+      if (last && Math.abs(c.price - last.anchor) <= tol) {
+        last.score = Math.min(100, last.score + c.score);
+        last.kinds.add(c.kind);
+        if (c.score > last.topScore) {
+          last.topScore = c.score;
+          last.price = c.price;
+        }
+      } else {
+        clusters.push({
+          anchor: c.price,
+          price: c.price,
+          topScore: c.score,
+          score: Math.min(100, c.score),
+          kinds: new Set([c.kind]),
+        });
       }
-    } else {
-      clusters.push({ price: c.price, topScore: c.score, score: Math.min(100, c.score), kinds: new Set([c.kind]) });
     }
-  }
+    return clusters;
+  };
+
+  const clusters = [
+    ...clusterSide(valid.filter((c) => c.price > ltp)),
+    ...clusterSide(valid.filter((c) => c.price < ltp)),
+  ];
 
   const kept: EvidenceLevel[] = clusters
     .filter((cl) => cl.score >= floor)

@@ -12,5 +12,5 @@ export interface EvidenceLevel {
 export interface LevelCandidate {
   price: number;
   kind: EvidenceKind;
-  score: number;
+  score: number; // 0–100 (this source's contribution; clusters sum + cap at 100)
 }
