@@ -111,4 +111,20 @@ describe('classifyZoneTiers', () => {
     expect(second.isMajor).toBe(true);
     expect(second.tier).toBe('major');
   });
+
+  it('drops a band that straddles the LTP (lower < ltp < upper)', () => {
+    // A band whose range contains the price can't be cleanly sided; its
+    // reachable-edge refPrice would contradict its type — so it is excluded.
+    const straddle = zone({ type: 'resistance', classification: 'STRONG', upper: 110, lower: 90, isLine: false });
+    const clean = zone({ type: 'support', classification: 'MEDIUM', upper: 80, lower: 80 });
+    const out = classifyZoneTiers([straddle, clean], 100);
+    expect(out.find((a) => a.zone === straddle)).toBeUndefined();
+    expect(out).toHaveLength(1);
+    expect(out[0].zone).toBe(clean);
+  });
+
+  it('returns [] when ltp is Infinity', () => {
+    const zones = [zone({ type: 'resistance', classification: 'STRONG', upper: 110, lower: 110 })];
+    expect(classifyZoneTiers(zones, Infinity)).toEqual([]);
+  });
 });
