@@ -74,6 +74,10 @@ export function buildSRView(
   for (const z of zones) {
     const hasFlipped = z.flippedAt != null;
     if (z.classification === 'WEAK' && !hasFlipped) continue;
+    // Skip straddle bands (range contains ltp) — same guard classifyZoneTiers
+    // uses. The reachable edge would land on one side and misrepresent a band
+    // the price is sitting inside.
+    if (!z.isLine && z.lower <= ltp && z.upper >= ltp) continue;
     candidates.push({
       price: pivotRefPrice(z),
       source: 'PIVOT',

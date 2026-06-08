@@ -138,4 +138,10 @@ describe('buildSRView', () => {
     expect(v.immediateResistance?.source).toBe('ORH');
     expect(v.immediateResistance?.price).toBe(108);
   });
+
+  it('skips a pivot band that straddles the ltp', () => {
+    const straddle = zone({ type: 'resistance', classification: 'MEDIUM', upper: 110, lower: 90, isLine: false });
+    const v = buildSRView(emptyBook, [straddle], 100);
+    expect(v.levels.filter((l) => l.source === 'PIVOT')).toHaveLength(0);
+  });
 });
