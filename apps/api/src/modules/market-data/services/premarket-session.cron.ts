@@ -31,6 +31,10 @@ export class PremarketSessionCron {
   /**
    * Re-establish a fresh Angel session. Never throws: a failed pre-market
    * login must not bubble out of the scheduler. Returns whether it succeeded.
+   *
+   * Note: `authService.login()` also re-arms the auth service's own ~23h token
+   * refresh timer (clearing the old one first), so this re-login realigns that
+   * schedule to the fresh session — no duplicate timers result.
    */
   async reLogin(): Promise<boolean> {
     try {

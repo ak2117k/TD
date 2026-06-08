@@ -14,4 +14,11 @@ describe('PremarketSessionCron', () => {
     await expect(cron.reLogin()).resolves.toBe(false);
     expect(auth.login).toHaveBeenCalledTimes(1);
   });
+
+  it('the @Cron handler refreshPremarketSession() delegates to reLogin() (login is invoked)', async () => {
+    const auth = { login: jest.fn().mockResolvedValue(undefined) };
+    const cron = new PremarketSessionCron(auth as never);
+    await expect(cron.refreshPremarketSession()).resolves.toBeUndefined();
+    expect(auth.login).toHaveBeenCalledTimes(1);
+  });
 });
