@@ -8,6 +8,8 @@ import SetupMarker from '@/components/charts/SetupMarker';
 import EntryTargetOverlay from '@/components/charts/EntryTargetOverlay';
 import ChartZoneOverlay from '@/components/charts/ChartZoneOverlay';
 import { buildSRView } from '@/components/charts/buildSRView';
+import EvidenceLevelOverlay from '@/components/charts/EvidenceLevelOverlay';
+import { useSrEvidence } from '@/hooks/useSrEvidence';
 import { useZones } from '@/hooks/useZones';
 import StockOverviewPanel from '@/components/stock-overview/StockOverviewPanel';
 import { useChartData } from '@/hooks/useChartData';
@@ -218,6 +220,7 @@ export default function ChartsPage() {
     selectedSymbol.token,
     selectedSymbol.exchange,
   );
+  const { evidence } = useSrEvidence(selectedSymbol.token, selectedSymbol.exchange);
 
   // Last candle close — memoised separately so it only recomputes when a new
   // candle actually arrives (not on every live tick that re-creates the
@@ -238,8 +241,8 @@ export default function ChartsPage() {
   // BOTH the anchored level book (PDH/PDL/ORH/ORL/VWAP) and the pivot zones.
   // Anchored levels are always present, so a moving stock always gets a read.
   const srView = useMemo(
-    () => buildSRView(analysis?.levels ?? null, zones, ltp),
-    [analysis?.levels, zones, ltp],
+    () => buildSRView(analysis?.levels ?? null, zones, evidence, ltp),
+    [analysis?.levels, zones, evidence, ltp],
   );
 
   const handleCrosshairMove = useCallback((params: unknown) => {
@@ -441,6 +444,12 @@ export default function ChartsPage() {
               candleSeries={chartRef.current?.candleSeries ?? null}
               zones={zones}
               ltp={ltp}
+            />
+          )}
+          {timeframe === '15m' && ltp > 0 && (
+            <EvidenceLevelOverlay
+              candleSeries={chartRef.current?.candleSeries ?? null}
+              evidence={evidence}
             />
           )}
           {!setupContext && analysis?.kind === 'setup' && (
