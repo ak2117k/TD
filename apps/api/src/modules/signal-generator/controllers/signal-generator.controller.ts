@@ -26,6 +26,7 @@ import { StrongZoneDetectorService } from '../services/strong-zone-detector.serv
 import { LevelBookService } from '../services/level-book.service';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
+import { SrEvidenceService } from '../services/sr-evidence.service';
 
 @Controller('api/signals')
 export class SignalGeneratorController {
@@ -55,6 +56,7 @@ export class SignalGeneratorController {
     // instrument rows that starve the DB-by-instrumentId path. Optional so
     // test wirings still construct.
     @Optional() private readonly angelOneAdapter?: AngelOneAdapterService,
+    @Optional() private readonly srEvidenceService?: SrEvidenceService,
   ) {}
 
   /**
@@ -235,6 +237,33 @@ export class SignalGeneratorController {
       );
       return [];
     }
+  }
+
+  /**
+   * GET /api/signals/sr-evidence — evidence-weighted S/R levels (volume nodes,
+   * adaptive round numbers, OI walls, pivot history) scored + sided vs spot.
+   * Returns [] (not 404) when unavailable so the overlay stays mounted.
+   */
+  @Get('sr-evidence')
+  async getSrEvidence(
+    @Query('token') token: string,
+    @Query('exchange') exchange?: string,
+    @Query('symbol') symbol?: string,
+  ) {
+    if (!token) throw new BadRequestException('token is required');
+    if (!this.srEvidenceService) return [];
+    let resolvedSymbol = symbol;
+    let resolvedExchange = exchange ?? 'NSE';
+    if (!resolvedSymbol && this.marketDataRepository) {
+      try {
+        const inst = await this.marketDataRepository.getInstrumentByToken(token);
+        resolvedSymbol = inst?.symbol;
+        resolvedExchange = inst?.exchange ?? resolvedExchange;
+      } catch {
+        /* fall through — service handles missing symbol */
+      }
+    }
+    return this.srEvidenceService.levelsFor(token, resolvedExchange, resolvedSymbol ?? '');
   }
 
   /**

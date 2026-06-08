@@ -29,6 +29,8 @@ import { SetupTrackerService } from './services/setup-tracker.service';
 import { MtfAlignmentService } from './services/mtf-alignment.service';
 import { ZoneRepository } from './repositories/zone.repository';
 import { StrongZoneDetectorService } from './services/strong-zone-detector.service';
+import { SrEvidenceService } from './services/sr-evidence.service';
+import { OiWallService } from './services/oi-wall.service';
 import { ContextScoringService } from './services/context-scoring/context-scoring.service';
 import { MtfTrendFactor } from './services/context-scoring/factors/mtf-trend.factor';
 import { GreeksFactor } from './services/context-scoring/factors/greeks.factor';
@@ -112,6 +114,10 @@ import type { ContextFactor } from './services/context-scoring/types';
     // on cache miss so the chart overlay never sees an empty zone list.
     StrongZoneDetectorService,
 
+    // OI walls + evidence-weighted S/R orchestrator
+    OiWallService,
+    SrEvidenceService,
+
     // Context scoring engine — Mama's 10-factor framework v1.
     // Each factor is registered as a provider so it can be unit-tested
     // independently. ContextScoringService receives the array via a
@@ -160,6 +166,7 @@ import type { ContextFactor } from './services/context-scoring/types';
     SetupTrackerService,
     ContextScoringService,
     MtfAlignmentService,
+    SrEvidenceService,
   ],
 })
 export class SignalGeneratorModule {}
