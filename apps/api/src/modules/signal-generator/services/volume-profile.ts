@@ -16,8 +16,14 @@ export interface VolumeNode {
 /**
  * Volume-by-price profile. Buckets candles by their typical price (v1
  * simplification — assign full bar volume to one bucket, not spread across
- * high–low), returns the top 5 high-volume nodes scored 0–40 by how far each
- * exceeds the average bucket volume (>=3x → ~40).
+ * high–low), scoring each 0–40 by how far it exceeds the average bucket
+ * volume (>=3x → ~40). Returns up to NODES_PER_SIDE (5) nodes on EACH side of
+ * `ltp` — up to 10 total — selected by descending volume within each side, so
+ * the support side is never starved when all heavy volume sits overhead. The
+ * average used for scoring stays global (all buckets) so scores remain honest
+ * and cross-side comparable. Order: above-side nodes first, then below-side;
+ * within a side, descending volume. `scoreAndCluster` re-sorts by price, so
+ * callers must not rely on this order.
  *
  * Returns [] for < 10 candles (insufficient profile).
  */
