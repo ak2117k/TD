@@ -63,14 +63,17 @@ export function buildSRView(
     };
     push(book.pdh, 'PDH', 'PDH', true);
     push(book.pdl, 'PDL', 'PDL', true);
-    push(book.orh ?? book.prevOrh, 'ORH', 'ORH', false);
-    push(book.orl ?? book.prevOrl, 'ORL', 'ORL', false);
+    // Treat a 0/negative orh/orl as "not locked yet" and fall back to the
+    // previous session's OR (some feeds send 0 as a not-set sentinel, which
+    // `??` would not catch).
+    push(book.orh && book.orh > 0 ? book.orh : book.prevOrh, 'ORH', 'ORH', false);
+    push(book.orl && book.orl > 0 ? book.orl : book.prevOrl, 'ORL', 'ORL', false);
     if (book.vwap > 0) push(book.vwap, 'VWAP', 'VWAP', false);
   }
 
   for (const z of zones) {
-    const isForming = z.flippedAt != null;
-    if (z.classification === 'WEAK' && !isForming) continue;
+    const hasFlipped = z.flippedAt != null;
+    if (z.classification === 'WEAK' && !hasFlipped) continue;
     candidates.push({
       price: pivotRefPrice(z),
       source: 'PIVOT',
@@ -87,19 +90,24 @@ export function buildSRView(
     else if (c.price < ltp) below.push(c);
   }
 
+  // Dedupe within a side at the eps window, with anchored levels winning over
+  // pivots: keep all non-conflicting anchored levels first, then add pivots
+  // only where they don't sit within eps of an already-kept anchored level — so
+  // a pivot on top of (or just nearer than) PDH/VWAP collapses into the
+  // anchored level, which carries the more meaningful label. Re-sort the merged
+  // result by distance so `immediate` (nearest) still picks correctly.
+  const eps = (ltp * DEDUPE_EPS_PCT) / 100;
+  const byDistance = (a: Candidate, b: Candidate) =>
+    Math.abs(a.price - ltp) - Math.abs(b.price - ltp);
   const dedupe = (arr: Candidate[]): Candidate[] => {
-    const sorted = [...arr].sort((a, b) => {
-      const d = Math.abs(a.price - ltp) - Math.abs(b.price - ltp);
-      if (d !== 0) return d;
-      return (a.source === 'PIVOT' ? 1 : 0) - (b.source === 'PIVOT' ? 1 : 0);
-    });
+    const anchored = arr.filter((c) => c.source !== 'PIVOT').sort(byDistance);
+    const pivots = arr.filter((c) => c.source === 'PIVOT').sort(byDistance);
     const kept: Candidate[] = [];
-    for (const c of sorted) {
-      const eps = (ltp * DEDUPE_EPS_PCT) / 100;
+    for (const c of [...anchored, ...pivots]) {
       if (kept.some((k) => Math.abs(k.price - c.price) <= eps)) continue;
       kept.push(c);
     }
-    return kept;
+    return kept.sort(byDistance);
   };
   const aboveKept = dedupe(above);
   const belowKept = dedupe(below);

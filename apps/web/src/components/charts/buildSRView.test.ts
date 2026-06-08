@@ -99,4 +99,43 @@ describe('buildSRView', () => {
     expect(at110).toHaveLength(1);
     expect(at110[0].source).toBe('PDH');
   });
+
+  it('anchored wins over a nearer pivot within the dedup eps window', () => {
+    // ltp 24000, PDH 24010, pivot 24005 — both within the ~0.05% (12pt) eps.
+    // The nearer pivot must NOT evict the anchored PDH.
+    const book: LevelBookLite = { ...emptyBook, pdh: 24010 };
+    const piv = zone({ type: 'resistance', classification: 'MEDIUM', upper: 24005, lower: 24005 });
+    const v = buildSRView(book, [piv], 24000);
+    expect(v.immediateResistance?.source).toBe('PDH');
+    expect(v.levels.filter((l) => l.side === 'resistance')).toHaveLength(1);
+  });
+
+  it('STRONG pivot as nearest → tier is immediate, not major', () => {
+    const nearest = zone({ type: 'resistance', classification: 'STRONG', upper: 102, lower: 102 });
+    const farther = zone({ type: 'resistance', classification: 'STRONG', upper: 110, lower: 110 });
+    const v = buildSRView(emptyBook, [nearest, farther], 100);
+    expect(v.immediateResistance?.price).toBe(102);
+    expect(v.immediateResistance?.tier).toBe('immediate');
+    expect(v.levels.find((l) => l.price === 110)!.tier).toBe('major');
+  });
+
+  it('returns empty view for NaN or Infinity ltp', () => {
+    const book: LevelBookLite = { ...emptyBook, pdh: 110 };
+    expect(buildSRView(book, [], NaN).levels).toEqual([]);
+    expect(buildSRView(book, [], Infinity).levels).toEqual([]);
+  });
+
+  it('orders same-side levels nearest-first', () => {
+    const book: LevelBookLite = { ...emptyBook, pdh: 130, orh: 110, vwap: 105 };
+    const v = buildSRView(book, [], 100);
+    const res = v.levels.filter((l) => l.side === 'resistance').map((l) => l.price);
+    expect(res).toEqual([105, 110, 130]);
+  });
+
+  it('orh=0 sentinel falls back to prevOrh (not treated as a real level)', () => {
+    const book: LevelBookLite = { ...emptyBook, orh: 0, prevOrh: 108 };
+    const v = buildSRView(book, [], 100);
+    expect(v.immediateResistance?.source).toBe('ORH');
+    expect(v.immediateResistance?.price).toBe(108);
+  });
 });
