@@ -114,7 +114,7 @@ export class SignalGeneratorController {
         high: c.high,
         low: c.low,
         close: c.close,
-        volume: typeof c.volume === 'bigint' ? Number(c.volume) : Number(c.volume),
+        volume: Number(c.volume),
       }));
     } catch (err) {
       this.logger.debug(
@@ -165,10 +165,15 @@ export class SignalGeneratorController {
 
     let resolvedSymbol = symbol;
     let resolvedExchange = exchange;
+    // Captured once here and reused by the DB-fallback candle fetch below, so
+    // we don't look the instrument up twice on the rare fallback path.
+    let resolvedInstrument:
+      | Awaited<ReturnType<MarketDataRepository['getInstrumentByToken']>>
+      | null = null;
     try {
-      const instrument = await this.marketDataRepository.getInstrumentByToken(token);
-      resolvedSymbol = resolvedSymbol ?? instrument?.symbol;
-      resolvedExchange = resolvedExchange ?? instrument?.exchange ?? 'NSE';
+      resolvedInstrument = await this.marketDataRepository.getInstrumentByToken(token);
+      resolvedSymbol = resolvedSymbol ?? resolvedInstrument?.symbol;
+      resolvedExchange = resolvedExchange ?? resolvedInstrument?.exchange ?? 'NSE';
     } catch (err) {
       this.logger.debug(
         `getZones: instrument lookup failed for ${token}: ${err instanceof Error ? err.message : err}`,
@@ -188,21 +193,18 @@ export class SignalGeneratorController {
       // Fall back to the DB only when the live fetch is unavailable (throttle /
       // offline) so indices with seeded DB candles still produce zones.
       let candles15m = await this.fetchLiveCandles15m(token, resolvedExchange, tenDaysAgo, now);
-      if (candles15m.length < 10) {
-        const instrument = await this.marketDataRepository.getInstrumentByToken(token);
-        if (instrument) {
-          const rows = await this.marketDataRepository.getCandles(
-            instrument.id, '15m', tenDaysAgo, now, 200,
-          );
-          candles15m = rows.map((r) => ({
-            timestamp: r.timestamp,
-            open: r.open,
-            high: r.high,
-            low: r.low,
-            close: r.close,
-            volume: typeof r.volume === 'bigint' ? Number(r.volume) : r.volume,
-          }));
-        }
+      if (candles15m.length < 10 && resolvedInstrument) {
+        const rows = await this.marketDataRepository.getCandles(
+          resolvedInstrument.id, '15m', tenDaysAgo, now, 200,
+        );
+        candles15m = rows.map((r) => ({
+          timestamp: r.timestamp,
+          open: r.open,
+          high: r.high,
+          low: r.low,
+          close: r.close,
+          volume: typeof r.volume === 'bigint' ? Number(r.volume) : r.volume,
+        }));
       }
 
       if (candles15m.length < 10) return [];
