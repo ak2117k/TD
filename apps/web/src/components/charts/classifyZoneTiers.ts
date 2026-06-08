@@ -24,14 +24,18 @@ function refPriceFor(zone: StrongZone): number {
 }
 
 /**
- * Annotate strong zones into two trader tiers relative to the live price:
- *  - immediate = nearest drawable (non-WEAK) zone on each side (the next wall)
+ * Annotate strong zones into trader tiers relative to the live price:
+ *  - immediate = nearest drawable zone on each side (the next wall)
  *  - major     = nearest STRONG zone on each side (the structural wall)
- * A zone can be both (nearest is STRONG) — `tier` is 'immediate' but
- * `isMajor` is also true so the renderer can tag it `IMM·MAJOR`.
+ *  - forming   = a freshly-flipped (flippedAt != null) zone still demoted to
+ *                WEAK — the breakout origin; drawn dotted, excluded from the
+ *                immediate/major competition so it can't steal those tiers.
+ * A zone can be both immediate and major (nearest is STRONG) — `tier` is
+ * 'immediate' but `isMajor` is also true so the renderer can tag it `IMM·MAJOR`.
  *
- * WEAK zones are dropped (never drawn, too unreliable to call a "wall").
- * Returns [] when ltp is not a positive number.
+ * Non-flipped WEAK zones are dropped (genuine noise). A flipped zone that has
+ * earned MEDIUM/STRONG again (3+ retests) goes through the normal tiering, not
+ * `forming`. Returns [] when ltp is not a positive number.
  */
 export function classifyZoneTiers(
   zones: StrongZone[],
