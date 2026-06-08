@@ -21,14 +21,16 @@ export class OiWallService {
       const chain = await this.optionsChain.getOptionsChain(symbol, expiries[0]);
       if (!Array.isArray(chain) || chain.length === 0) return [];
 
+      // Sort by OI desc; break ties deterministically by strike (higher strike
+      // for a call wall, lower for a put wall) so the chosen wall is stable.
       const calls = chain
         .map((e: any) => ({ price: e.strikePrice, oi: e.ceData?.oi ?? 0 }))
         .filter((x) => x.oi > 0)
-        .sort((a, b) => b.oi - a.oi);
+        .sort((a, b) => b.oi - a.oi || b.price - a.price);
       const puts = chain
         .map((e: any) => ({ price: e.strikePrice, oi: e.peData?.oi ?? 0 }))
         .filter((x) => x.oi > 0)
-        .sort((a, b) => b.oi - a.oi);
+        .sort((a, b) => b.oi - a.oi || a.price - b.price);
 
       const out: LevelCandidate[] = [];
       const ranks = [30, 20];
