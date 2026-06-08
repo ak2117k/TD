@@ -127,4 +127,23 @@ describe('classifyZoneTiers', () => {
     const zones = [zone({ type: 'resistance', classification: 'STRONG', upper: 110, lower: 110 })];
     expect(classifyZoneTiers(zones, Infinity)).toEqual([]);
   });
+
+  it('keeps a flipped WEAK zone as a forming tier (not dropped)', () => {
+    const forming = zone({ type: 'support', classification: 'WEAK', upper: 95, lower: 95, flippedAt: 1, wasType: 'resistance' });
+    const out = classifyZoneTiers([forming], 100);
+    expect(out).toHaveLength(1);
+    expect(out[0].tier).toBe('forming');
+    expect(out[0].isImmediate).toBe(false);
+    expect(out[0].isMajor).toBe(false);
+  });
+
+  it('a forming zone does not steal immediate from a real zone on the same side', () => {
+    const forming = zone({ type: 'support', classification: 'WEAK', upper: 98, lower: 98, flippedAt: 1, wasType: 'resistance' });
+    const real = zone({ type: 'support', classification: 'MEDIUM', upper: 95, lower: 95 });
+    const out = classifyZoneTiers([forming, real], 100);
+    const realA = out.find((a) => a.zone.classification === 'MEDIUM')!;
+    const formingA = out.find((a) => a.zone.classification === 'WEAK')!;
+    expect(realA.tier).toBe('immediate');
+    expect(formingA.tier).toBe('forming');
+  });
 });

@@ -1,6 +1,6 @@
 import type { StrongZone } from '@/types';
 
-export type ZoneTier = 'immediate' | 'major' | 'context';
+export type ZoneTier = 'immediate' | 'major' | 'context' | 'forming';
 
 export interface ZoneTierAnnotation {
   zone: StrongZone;
@@ -39,22 +39,42 @@ export function classifyZoneTiers(
 ): ZoneTierAnnotation[] {
   if (!Number.isFinite(ltp) || ltp <= 0) return [];
 
-  // Drop WEAK (never drawn) and straddle zones — a band whose range contains
-  // the LTP can't be cleanly sided into above/below, and its reachable-edge
-  // refPrice would contradict its type. Lines (isLine) never straddle.
+  // Keep non-WEAK zones AND freshly-flipped (forming) zones — a flipped level
+  // is the breakout origin and the most relevant level on a moving stock, even
+  // while the detector demotes it to WEAK until 3+ retests. Still drop
+  // non-flipped WEAK (genuine noise) and straddle bands.
   const drawable = zones.filter(
     (z) =>
-      z.classification !== 'WEAK' &&
+      (z.classification !== 'WEAK' || z.flippedAt != null) &&
       (z.isLine || z.lower > ltp || z.upper < ltp),
   );
 
+  // Forming (flipped + WEAK) zones get their own tier and are excluded from the
+  // immediate/major competition so they don't steal those tiers from proven
+  // zones. They still render (dotted) so a breakout's flipped level is visible.
+  const forming: StrongZone[] = [];
   const above: StrongZone[] = [];
   const below: StrongZone[] = [];
   for (const z of drawable) {
+    if (z.classification === 'WEAK' && z.flippedAt != null) {
+      forming.push(z);
+      continue;
+    }
     const ref = refPriceFor(z);
     if (ref > ltp) above.push(z);
     else below.push(z); // ref <= ltp → treat as support side deterministically
   }
+  const formingAnnotations: ZoneTierAnnotation[] = forming.map((zone) => {
+    const refPrice = refPriceFor(zone);
+    return {
+      zone,
+      tier: 'forming',
+      isImmediate: false,
+      isMajor: false,
+      refPrice,
+      distancePct: ((refPrice - ltp) / ltp) * 100,
+    };
+  });
 
   const annotateSide = (side: StrongZone[]): ZoneTierAnnotation[] => {
     if (side.length === 0) return [];
@@ -108,5 +128,5 @@ export function classifyZoneTiers(
     });
   };
 
-  return [...annotateSide(above), ...annotateSide(below)];
+  return [...annotateSide(above), ...annotateSide(below), ...formingAnnotations];
 }

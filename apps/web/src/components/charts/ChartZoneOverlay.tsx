@@ -13,8 +13,8 @@ interface ChartZoneOverlayProps {
 interface StyleSpec {
   color: string;
   lineWidth: 1 | 2 | 3;
-  // 0 = solid, 2 = dashed (lightweight-charts LineStyle numeric convention).
-  lineStyle: 0 | 2;
+  // 0 = solid, 1 = dotted, 2 = dashed (lightweight-charts LineStyle).
+  lineStyle: 0 | 1 | 2;
 }
 
 /** Hue encodes role: red = resistance, green = support. */
@@ -33,6 +33,8 @@ function styleForTier(a: ZoneTierAnnotation): StyleSpec {
   const base = baseColor(a.zone);
   if (a.tier === 'immediate') return { color: base, lineWidth: 3, lineStyle: 0 };
   if (a.tier === 'major') return { color: `${base}cc`, lineWidth: 2, lineStyle: 0 };
+  // Forming = freshly-flipped, unproven: dotted + amber so it reads as tentative.
+  if (a.tier === 'forming') return { color: '#f59e0b', lineWidth: 1, lineStyle: 1 };
   return { color: `${base}66`, lineWidth: 1, lineStyle: 2 };
 }
 
@@ -47,7 +49,8 @@ function tierTitle(a: ZoneTierAnnotation): string {
         : 'R→S '
       : '';
   let tag: string;
-  if (a.isImmediate && a.isMajor) tag = 'IMM·MAJOR';
+  if (a.tier === 'forming') tag = 'FORMING';
+  else if (a.isImmediate && a.isMajor) tag = 'IMM·MAJOR';
   else if (a.isImmediate) tag = 'IMM';
   else if (a.isMajor) tag = 'MAJOR';
   else tag = `S${a.zone.strength}`; // context keeps the strength score
@@ -59,7 +62,9 @@ function tierTitle(a: ZoneTierAnnotation): string {
   // For context lines the strength tag already carries info; show distance for
   // immediate/major where it drives the "room to target" judgement.
   const dist =
-    a.isImmediate || a.isMajor ? ` (${sign}${a.distancePct.toFixed(1)}%)` : '';
+    a.isImmediate || a.isMajor || a.tier === 'forming'
+      ? ` (${sign}${a.distancePct.toFixed(1)}%)`
+      : '';
   return `${flip}${tag} ${role} ${priceStr}${dist}`;
 }
 
