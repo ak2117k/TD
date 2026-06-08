@@ -1,7 +1,7 @@
-import type { StrongZone } from '@/types';
+import type { EvidenceLevel, StrongZone } from '@/types';
 
-export type SRSource = 'PDH' | 'PDL' | 'ORH' | 'ORL' | 'VWAP' | 'PIVOT';
-export type SRTier = 'immediate' | 'major' | 'context';
+export type SRSource = 'PDH' | 'PDL' | 'ORH' | 'ORL' | 'VWAP' | 'PIVOT' | 'EVIDENCE';
+export type SRTier = 'immediate' | 'major' | 'context' | 'soft';
 
 export interface SRLevel {
   price: number;
@@ -44,11 +44,14 @@ interface Candidate {
   label: string;
   isStructural: boolean; // STRONG pivot, or PDH/PDL — eligible for `major`
   classification?: 'STRONG' | 'MEDIUM' | 'WEAK';
+  isSoft?: boolean;
+  evScore?: number;
 }
 
 export function buildSRView(
   book: LevelBookLite | null,
   zones: StrongZone[],
+  evidence: EvidenceLevel[],
   ltp: number,
 ): SRView {
   if (!Number.isFinite(ltp) || ltp <= 0) {
@@ -87,6 +90,19 @@ export function buildSRView(
     });
   }
 
+  // Evidence-weighted levels (volume nodes, OI walls, round confluence, soft
+  // fallbacks) arrive pre-scored and pre-sided from the backend.
+  for (const e of evidence) {
+    candidates.push({
+      price: e.price,
+      source: 'EVIDENCE',
+      label: e.soft ? 'ROUND' : e.kinds[0] ?? 'EVIDENCE',
+      isStructural: !e.soft && e.score >= 60,
+      isSoft: e.soft,
+      evScore: e.score,
+    });
+  }
+
   const above: Candidate[] = [];
   const below: Candidate[] = [];
   for (const c of candidates) {
@@ -121,7 +137,13 @@ export function buildSRView(
     side: 'resistance' | 'support',
     isImmediate: boolean,
   ): SRLevel => {
-    const tier: SRTier = isImmediate ? 'immediate' : c.isStructural ? 'major' : 'context';
+    const tier: SRTier = c.isSoft
+      ? 'soft'
+      : isImmediate
+        ? 'immediate'
+        : c.isStructural
+          ? 'major'
+          : 'context';
     return {
       price: c.price,
       side,
