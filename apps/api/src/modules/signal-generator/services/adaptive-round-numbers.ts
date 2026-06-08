@@ -26,11 +26,16 @@ export function adaptiveRoundNumbers(ltp: number): number[] {
  *  - 0  if not on the grid
  *  - 15 if it is a "major" round (a multiple of 5*step — e.g. a century/half-century)
  *  - 12 otherwise (ordinary grid level)
+ *
+ * `step` must be the value from `adaptiveRoundStep(ltp)` — the score is only
+ * meaningful relative to the same grid the price was drawn from. The 1e-6
+ * tolerance absorbs float accumulation from `center + k*step` in
+ * `adaptiveRoundNumbers` so a grid value never reads as off-grid.
  */
 export function roundScore(price: number, step: number): number {
   if (step <= 0) return 0;
-  const onGrid = Math.abs(price / step - Math.round(price / step)) < 1e-9;
+  const onGrid = Math.abs(price / step - Math.round(price / step)) < 1e-6;
   if (!onGrid) return 0;
-  const major = Math.abs(price / (5 * step) - Math.round(price / (5 * step))) < 1e-9;
+  const major = Math.abs(price / (5 * step) - Math.round(price / (5 * step))) < 1e-6;
   return major ? 15 : 12;
 }
