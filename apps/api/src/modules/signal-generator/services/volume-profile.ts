@@ -1,3 +1,5 @@
+const NODES_PER_SIDE = 5;
+
 export interface ProfileCandle {
   high: number;
   low: number;
@@ -14,8 +16,14 @@ export interface VolumeNode {
 /**
  * Volume-by-price profile. Buckets candles by their typical price (v1
  * simplification — assign full bar volume to one bucket, not spread across
- * high–low), returns the top 5 high-volume nodes scored 0–40 by how far each
- * exceeds the average bucket volume (>=3x → ~40).
+ * high–low), scoring each 0–40 by how far it exceeds the average bucket
+ * volume (>=3x → ~40). Returns up to NODES_PER_SIDE (5) nodes on EACH side of
+ * `ltp` — up to 10 total — selected by descending volume within each side, so
+ * the support side is never starved when all heavy volume sits overhead. The
+ * average used for scoring stays global (all buckets) so scores remain honest
+ * and cross-side comparable. Order: above-side nodes first, then below-side;
+ * within a side, descending volume. `scoreAndCluster` re-sorts by price, so
+ * callers must not rely on this order.
  *
  * Returns [] for < 10 candles (insufficient profile).
  */
@@ -48,6 +56,13 @@ export function computeVolumeNodes(
     score: avgVol > 0 ? 40 * Math.min(volume / avgVol / 3, 1) : 0,
   }));
 
-  nodes.sort((a, b) => b.volume - a.volume);
-  return nodes.slice(0, 5);
+  // Select the strongest nodes on EACH side of the live price, not the global
+  // top-N. Volume is the biggest single evidence contributor; when price sits
+  // low in its range every heavy-volume bucket is overhead, which would starve
+  // the support side. `avgVol` above stays global so scores remain honest and
+  // cross-side comparable — a small support node still scores low.
+  const byVolumeDesc = (a: VolumeNode, b: VolumeNode) => b.volume - a.volume;
+  const above = nodes.filter((n) => n.price > ltp).sort(byVolumeDesc).slice(0, NODES_PER_SIDE);
+  const below = nodes.filter((n) => n.price < ltp).sort(byVolumeDesc).slice(0, NODES_PER_SIDE);
+  return [...above, ...below];
 }
