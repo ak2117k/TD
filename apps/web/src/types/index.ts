@@ -309,3 +309,14 @@ export interface ChartinkSourceRef {
   scannerUrl: string;
   alertId: string;
 }
+
+// Evidence-weighted S/R (mirrors apps/api .../types/evidence-level.types.ts).
+export type EvidenceKind = 'VOLUME' | 'HISTORY' | 'OI_CALL' | 'OI_PUT' | 'ROUND';
+export interface EvidenceLevel {
+  price: number;
+  side: 'resistance' | 'support';
+  score: number;
+  kinds: EvidenceKind[];
+  soft: boolean;
+  distancePct: number;
+}
