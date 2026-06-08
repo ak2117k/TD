@@ -63,7 +63,7 @@ export class SrEvidenceService {
         candidates.push({ price: edge, kind: 'HISTORY', score: 25 * ((p.strength ?? 0) / 100) });
       }
 
-      const levels = scoreAndCluster(candidates, ltp, atr14, { softRoundGrid: roundGrid, floor: 15 });
+      const levels = scoreAndCluster(candidates, ltp, atr14, { softRoundGrid: roundGrid });
       this.cache.set(cacheKey, { at: Date.now(), levels });
       return levels;
     } catch (err) {

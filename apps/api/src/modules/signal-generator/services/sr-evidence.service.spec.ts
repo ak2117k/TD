@@ -2,9 +2,18 @@ import { SrEvidenceService } from './sr-evidence.service';
 
 describe('SrEvidenceService', () => {
   const book = { spot: 140, atr14: 4, pdh: 138, pdl: 130 };
-  const candles = Array.from({ length: 20 }, (_, i) => ({
-    high: 150, low: 150, close: 150, volume: i < 10 ? 500 : 50,
-  }));
+  // A realistic profile: light background across several price buckets below
+  // spot, and a heavy volume SHELF at 150 (above spot 140). The shelf is many
+  // times the average bucket volume → full ~40 volume score, which combined
+  // with the round-number score at 150 clears the real floor (35). A flat
+  // single-price fixture would collapse into one bucket and never score.
+  const candles = [
+    ...Array.from({ length: 16 }, (_, i) => {
+      const p = 130 + (i % 3);
+      return { high: p, low: p, close: p, volume: 10 };
+    }),
+    ...Array.from({ length: 8 }, () => ({ high: 150, low: 150, close: 150, volume: 300 })),
+  ];
 
   function build(overrides: Partial<any> = {}) {
     const deps = {
