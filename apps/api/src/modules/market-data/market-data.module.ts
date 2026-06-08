@@ -17,6 +17,7 @@ import { YahooFinanceService } from './services/yahoo-finance.service';
 import { MarketContextService } from './services/market-context.service';
 import { CommodityRollService } from './services/commodity-roll.service';
 import { CommodityRollCron } from './services/commodity-roll.cron';
+import { PremarketSessionCron } from './services/premarket-session.cron';
 import { GapDetectorService } from './services/gap-detector.service';
 import { NseSectorIndexService } from './services/nse-sector-index.service';
 import { OptionsChainModule } from '../options-chain/options-chain.module';
@@ -48,6 +49,7 @@ import { OptionsChainModule } from '../options-chain/options-chain.module';
 
     // Angel One broker services
     AngelOneAuthService,
+    PremarketSessionCron,
     AngelOneWebSocketService,
     AngelOneAdapterService,
 
