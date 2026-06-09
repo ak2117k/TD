@@ -902,6 +902,20 @@ model AdaptiveStopTrade {
   @@map("adaptive_stop_trades")
 }
 
+model AdaptiveStopPaperAccount {
+  id               String   @id @default(cuid())
+  startingBalance  Float
+  cash             Float
+  realizedPnl      Float    @default(0)
+  fees             Float    @default(0)
+  deployedCapital  Float    @default(0)
+  killSwitchAt     DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@map("adaptive_stop_paper_account")
+}
+
 // ============================================
 // Anand Dual-Track Analysis Logs
 // ============================================
