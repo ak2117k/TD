@@ -14,7 +14,7 @@ describe('OiWallService', () => {
 
   it('returns [] for a non-F&O symbol (no expiries)', async () => {
     const s = svc(jest.fn().mockResolvedValue([]), jest.fn());
-    expect(await s.walls('CUPID')).toEqual([]);
+    expect(await s.walls('CUPID', 105)).toEqual([]);
   });
 
   it('returns top-2 call strikes as resistance (score 30/20) and top-2 put strikes as support', async () => {
@@ -22,7 +22,7 @@ describe('OiWallService', () => {
       jest.fn().mockResolvedValue(['2026-06-25']),
       jest.fn().mockResolvedValue(chain),
     );
-    const walls = await s.walls('NIFTY');
+    const walls = await s.walls('NIFTY', 105);
     const res = walls.filter((w) => w.kind === 'OI_CALL').sort((a, b) => b.score - a.score);
     const sup = walls.filter((w) => w.kind === 'OI_PUT').sort((a, b) => b.score - a.score);
     expect(res[0]).toMatchObject({ price: 110, score: 30 });
@@ -36,6 +36,29 @@ describe('OiWallService', () => {
       jest.fn().mockResolvedValue(['2026-06-25']),
       jest.fn().mockRejectedValue(new Error('boom')),
     );
-    expect(await s.walls('NIFTY')).toEqual([]);
+    expect(await s.walls('NIFTY', 105)).toEqual([]);
+  });
+
+  it('excludes ITM high-OI strikes (call below spot / put above spot) — only OTM walls count', async () => {
+    const ltp = 105;
+    const itmChain = [
+      ...chain,
+      { strikePrice: 95, ceData: { oi: 999 }, peData: { oi: 1 } },  // ITM call, huge OI — must be excluded
+      { strikePrice: 115, ceData: { oi: 1 }, peData: { oi: 999 } }, // ITM put, huge OI — must be excluded
+    ];
+    const s = svc(
+      jest.fn().mockResolvedValue(['2026-06-25']),
+      jest.fn().mockResolvedValue(itmChain),
+    );
+    const walls = await s.walls('NIFTY', ltp);
+    // No call wall below spot, no put wall above spot.
+    expect(walls.filter((w) => w.kind === 'OI_CALL').every((w) => w.price > ltp)).toBe(true);
+    expect(walls.filter((w) => w.kind === 'OI_PUT').every((w) => w.price < ltp)).toBe(true);
+    // The 999-OI ITM strikes are dropped despite being the highest OI.
+    expect(walls.some((w) => w.price === 95)).toBe(false);
+    expect(walls.some((w) => w.price === 115)).toBe(false);
+    // Genuine OTM walls remain the chosen ones.
+    expect(walls.find((w) => w.kind === 'OI_CALL')).toMatchObject({ price: 110, score: 30 });
+    expect(walls.find((w) => w.kind === 'OI_PUT')).toMatchObject({ price: 100, score: 30 });
   });
 });

@@ -13,7 +13,7 @@ export class OiWallService {
 
   constructor(@Optional() private readonly optionsChain?: OptionsChainService) {}
 
-  async walls(symbol: string): Promise<LevelCandidate[]> {
+  async walls(symbol: string, ltp: number): Promise<LevelCandidate[]> {
     if (!this.optionsChain || !symbol) return [];
     try {
       const expiries = await this.optionsChain.getExpiries(symbol);
@@ -21,15 +21,20 @@ export class OiWallService {
       const chain = await this.optionsChain.getOptionsChain(symbol, expiries[0]);
       if (!Array.isArray(chain) || chain.length === 0) return [];
 
-      // Sort by OI desc; break ties deterministically by strike (higher strike
-      // for a call wall, lower for a put wall) so the chosen wall is stable.
+      // Only OTM OI forms a wall: call OI above spot caps upside (resistance),
+      // put OI below spot floors downside (support). A high-OI ITM strike (call
+      // below spot / put above spot) is not a barrier in the usual sense and was
+      // previously mis-sided by the downstream price-vs-spot split — exclude it
+      // here at the source, where the call/put semantics are known. ltp<=0 (no
+      // spot) disables the filter rather than dropping every wall.
+      const hasSpot = ltp > 0;
       const calls = chain
         .map((e: any) => ({ price: e.strikePrice, oi: e.ceData?.oi ?? 0 }))
-        .filter((x) => x.oi > 0)
+        .filter((x) => x.oi > 0 && (!hasSpot || x.price > ltp))
         .sort((a, b) => b.oi - a.oi || b.price - a.price);
       const puts = chain
         .map((e: any) => ({ price: e.strikePrice, oi: e.peData?.oi ?? 0 }))
-        .filter((x) => x.oi > 0)
+        .filter((x) => x.oi > 0 && (!hasSpot || x.price < ltp))
         .sort((a, b) => b.oi - a.oi || a.price - b.price);
 
       const out: LevelCandidate[] = [];
