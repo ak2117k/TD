@@ -4,7 +4,7 @@ import {
   AdaptiveStopWatchRepository, AdaptiveStopCreateEntryInput,
 } from '../repositories/adaptive-stop-watch.repository';
 import { AdaptiveStopTradeRepository } from '../repositories/adaptive-stop-trade.repository';
-import { AdaptiveStopAccountService, TRADE_CAPITAL } from './adaptive-stop-account.service';
+import { AdaptiveStopAccountService } from './adaptive-stop-account.service';
 import { AdaptiveStopTradeExecutionService } from './adaptive-stop-trade-execution.service';
 import { AdaptiveStopGateway } from '../gateways/adaptive-stop.gateway';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
@@ -53,6 +53,13 @@ export class AdaptiveStopNoQuoteError extends Error {
   constructor(public readonly symbol: string) {
     super(`adaptive-stop: ${symbol} rejected — live quote unavailable, cannot enter at stale Chartink price`);
     this.name = 'AdaptiveStopNoQuoteError';
+  }
+}
+
+export class AdaptiveStopRiskBudgetError extends Error {
+  constructor(public readonly symbol: string) {
+    super(`adaptive-stop: ${symbol} rejected — stop distance exceeds the per-trade risk budget (qty < 1)`);
+    this.name = 'AdaptiveStopRiskBudgetError';
   }
 }
 
@@ -187,7 +194,7 @@ export class AdaptiveStopWatchService {
       this.logger.warn(
         `[adaptive-stop] ${input.symbol}: stop ₹${stop.stopDist.toFixed(2)} exceeds risk budget — rejected`,
       );
-      throw new AdaptiveStopNoQuoteError(input.symbol);
+      throw new AdaptiveStopRiskBudgetError(input.symbol);
     }
 
     // 8. Create the WATCHING entry row (with the resolved stop + risk metadata).

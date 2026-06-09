@@ -1,5 +1,5 @@
 import { Test } from '@nestjs/testing';
-import { AdaptiveStopWatchService } from './adaptive-stop-watch.service';
+import { AdaptiveStopWatchService, AdaptiveStopRiskBudgetError } from './adaptive-stop-watch.service';
 import { AdaptiveStopWatchRepository } from '../repositories/adaptive-stop-watch.repository';
 import { AdaptiveStopTradeRepository } from '../repositories/adaptive-stop-trade.repository';
 import { AdaptiveStopAccountService } from './adaptive-stop-account.service';
@@ -101,6 +101,32 @@ describe('AdaptiveStopWatchService.createFromAlert — vol-stop + risk-first siz
       status: 'TRADED', paperTradeId: 'at1', executedPrice: 2000,
       quantity: sizeQuantity(stop.stopDist),
     }));
+  });
+
+  it('rejects with AdaptiveStopRiskBudgetError when sized qty < 1 (stop too wide) — no entry, no trade', async () => {
+    // High entry (₹50000) + a huge ATR → stop distance caps at MAX_STOP_PCT (2.5%)
+    // = ₹1250, which exceeds RISK_PER_TRADE (₹800) → sizeQuantity = floor(800/1250) = 0.
+    // Sanity-check the math before asserting the rejection path.
+    const entry = 50000;
+    const candles = makeCandles(entry, 4000, 30); // flat-close → ATR(14) === range (4000)
+    const atr5m = atr(
+      candles.map((c) => c.high), candles.map((c) => c.low), candles.map((c) => c.close), 14,
+    );
+    const stop = resolveStop(entry, atr5m as number);
+    expect(stop.basis).toBe('cap');
+    expect(sizeQuantity(stop.stopDist)).toBe(0);
+
+    // initialPrice === live so the upside gate (step 5) passes (moveFromAlert = 0).
+    adapter.getLiveQuote.mockResolvedValue({ ltp: entry });
+    adapter.getHistoricalData.mockResolvedValue(candles);
+
+    await expect(
+      svc.createFromAlert({ ...baseInput, initialPrice: entry }),
+    ).rejects.toBeInstanceOf(AdaptiveStopRiskBudgetError);
+
+    // The gate fires before entry creation and execution.
+    expect(repo.createEntry).not.toHaveBeenCalled();
+    expect(exec.openTrade).not.toHaveBeenCalled();
   });
 });
 
