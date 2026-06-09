@@ -780,6 +780,128 @@ model UngatedRejection {
   @@map("ungated_rejections")
 }
 
+// ============================================================================
+// Adaptive-Stop Shadow-Track
+// Cloned from the ungated-track models; adds ATR-based stop sizing fields.
+// Tables: adaptive_stop_watch_entries, adaptive_stop_trades,
+//         adaptive_stop_watch_events.
+// ============================================================================
+
+model AdaptiveStopWatchEntry {
+  id                    String   @id @default(cuid())
+  alertId               String?
+  setupId               String?
+  symbol                String
+  token                 String
+  exchange              String
+  side                  String
+  initialPrice          Float
+  initialScore          Int
+  initialBreakdown      Json
+  initialAt             DateTime @default(now())
+  profitTarget          Float
+  profitTargetSource    String
+  stopLossScore         Int      @default(60)
+  status                WatchStatus @default(WATCHING)
+  currentPrice          Float?
+  currentScore          Int?
+  currentBreakdown      Json?
+  maxFavorable          Float?
+  maxAdverse            Float?
+  lastTickAt            DateTime?
+  lastRescoreAt         DateTime?
+  lastEventPrice        Float?
+  paperTradeId          String?
+  executedAt            DateTime?
+  executedPrice         Float?
+  quantity              Int?
+  // Adaptive-stop sizing fields (new — not present in ungated track)
+  riskAmount            Float?   // ₹ risked on this entry
+  atrAtEntry            Float?   // 5m ATR(14) used to size the stop
+  stopPct               Float?   // resolved stop distance as % of entry
+  stopPrice             Float?   // absolute stop level
+  stopBasis             String?  // 'atr' | 'floor' | 'cap'
+  closedAt              DateTime?
+  closedReason          String?
+  notes                 String?
+  dismissedAt           DateTime?
+  partialExitedAt       DateTime?
+  partialExitPrice      Float?
+  partialQty            Int?
+  remainingQty          Int?
+  trailingHighWater     Float?
+  trailingStopPrice     Float?
+  // Two-strike stop-hunt guard: counts consecutive 30s polls where LTP
+  // breaches the hard SL threshold. Exit fires only on the 2nd consecutive
+  // breach (slBreachCount reaches 1 after first poll, exits on second poll).
+  // Resets to 0 when price recovers above the SL level between polls.
+  slBreachCount         Int      @default(0)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  events                AdaptiveStopWatchEvent[]
+
+  @@index([status])
+  @@index([token])
+  @@index([symbol])
+  @@index([createdAt])
+  @@map("adaptive_stop_watch_entries")
+}
+
+model AdaptiveStopWatchEvent {
+  id            String         @id @default(cuid())
+  watchEntryId  String
+  watchEntry    AdaptiveStopWatchEntry @relation(fields: [watchEntryId], references: [id], onDelete: Cascade)
+  eventType     WatchEventType
+  price         Float?
+  score         Int?
+  breakdown     Json?
+  priceDelta    Float?
+  scoreDelta    Int?
+  notes         String?
+  createdAt     DateTime       @default(now())
+
+  @@index([watchEntryId, createdAt])
+  @@index([eventType])
+  @@map("adaptive_stop_watch_events")
+}
+
+model AdaptiveStopTrade {
+  id              String   @id @default(cuid())
+  instrumentId    String
+  signalId        String?
+  orderId         String?
+  side            String
+  orderType       String
+  positionType    String
+  quantity        Int
+  // Cumulative shares closed across all (partial + final) exit legs. Lets
+  // pnlPercent blend every leg's cost basis into a position-level return,
+  // instead of being overwritten with only the final leg's percent.
+  closedQuantity  Int      @default(0)
+  entryPrice      Float?
+  exitPrice       Float?
+  stoploss        Float?
+  target          Float?
+  pnl             Float?
+  pnlPercent      Float?
+  fees            Float    @default(0)
+  status          String   @default("PENDING")
+  strategy        String?
+  isPaperTrade    Boolean  @default(true)
+  entryTime       DateTime?
+  exitTime        DateTime?
+  notes           String?
+  entryReason     String?
+  exitReasonTag   String?
+  exitNotes       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("adaptive_stop_trades")
+}
+
 // ============================================
 // Anand Dual-Track Analysis Logs
 // ============================================
