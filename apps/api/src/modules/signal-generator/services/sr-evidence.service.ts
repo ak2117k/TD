@@ -48,7 +48,7 @@ export class SrEvidenceService {
       const volNodes = computeVolumeNodes(candles5m, atr14, ltp);
       const step = adaptiveRoundStep(ltp);
       const roundGrid = adaptiveRoundNumbers(ltp);
-      const oiWalls = this.oiWallService ? await this.oiWallService.walls(symbol) : [];
+      const oiWalls = this.oiWallService ? await this.oiWallService.walls(symbol, ltp) : [];
       const pivots = this.zoneRepository ? await this.zoneRepository.findActiveByToken(token) : [];
 
       const candidates: LevelCandidate[] = [];
