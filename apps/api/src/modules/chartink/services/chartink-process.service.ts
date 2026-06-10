@@ -13,6 +13,7 @@ import { UngatedRejectionRepository, UngatedRejectionReason } from '../../ungate
 import {
   UngatedCapitalExhaustedError, UngatedPositionCapError, UngatedKillSwitchError,
 } from '../../ungated-track/services/ungated-paper-account.service';
+import { AdaptiveStopWatchService } from '../../adaptive-stop-track/services/adaptive-stop-watch.service';
 import { AnandDualTrackService } from '../../anand-dual-track/services/anand-dual-track.service';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
 
@@ -60,6 +61,7 @@ export class ChartinkProcessService {
     private readonly watch: WatchService,
     private readonly ungatedWatch: UngatedWatchService,
     private readonly ungatedRejections: UngatedRejectionRepository,
+    private readonly adaptiveStopWatch: AdaptiveStopWatchService,
     private readonly anandDualTrack: AnandDualTrackService,
     @Optional() private readonly levelBook?: LevelBookService,
   ) {}
@@ -347,6 +349,24 @@ export class ChartinkProcessService {
             `watch.createFromAlert failed for ${hit.symbol}: ${err instanceof Error ? err.message : err}`,
           );
         }
+      }
+
+      // Adaptive-Stop shadow track — same admitted entry, new vol-stop/risk-first sizing.
+      // Independent try/catch: must never affect the gated or ungated paths.
+      try {
+        await this.adaptiveStopWatch.createFromAlert({
+          alertId,
+          setupId: persistedSetup.id,
+          symbol: hit.symbol,
+          token: instrument.token,
+          exchange: 'NSE',
+          side,
+          initialPrice: hit.hitPrice,
+          initialScore: scoringResult.score,
+          initialBreakdown: { checks: scoringResult.checks, lotCount: scoringResult.lotCount } as any,
+        });
+      } catch (err) {
+        this.logger.warn(`[adaptive-stop] ${hit.symbol}: ${err instanceof Error ? err.message : err}`);
       }
     } else {
       await this.rejectSetup(

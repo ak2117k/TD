@@ -22,6 +22,7 @@ import { FundamentalsModule } from './modules/fundamentals/fundamentals.module';
 import { WatchMonitorModule } from './modules/watch-monitor/watch-monitor.module';
 import { StrategyReviewModule } from './modules/strategy-review/strategy-review.module';
 import { UngatedTrackModule } from './modules/ungated-track/ungated-track.module';
+import { AdaptiveStopTrackModule } from './modules/adaptive-stop-track/adaptive-stop-track.module';
 import { AnandDualTrackModule } from './modules/anand-dual-track/anand-dual-track.module';
 
 @Module({
@@ -101,6 +102,9 @@ import { AnandDualTrackModule } from './modules/anand-dual-track/anand-dual-trac
 
     // Ungated Track — shadow paper-trade pipeline for unfiltered signals
     UngatedTrackModule,
+
+    // Adaptive-Stop Track — shadow track with vol-stop / risk-first sizing
+    AdaptiveStopTrackModule,
 
     // Anand Dual-Track — intraday (5%) and swing (10%) analysis logs
     AnandDualTrackModule,
