@@ -22,6 +22,9 @@ export interface ExecuteTradeDto {
   target?: number;
   entryReason?: string;
   entryTags?: string[];
+  // Per-order paper/live flag (Manual Trade Terminal). Explicit flag wins on
+  // the backend; absent flag falls back to the global paperTrading setting.
+  isPaper?: boolean;
   // Allow forward-compat passthrough (e.g. signalId) without tightening
   // every caller in the same patch.
   [key: string]: unknown;

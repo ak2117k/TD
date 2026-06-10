@@ -26,6 +26,7 @@ import {
   TrendingUp,
   PiggyBank,
   ShieldHalf,
+  Send,
 } from 'lucide-react';
 import type { NavItem } from '@/types';
 
@@ -44,6 +45,7 @@ const navItems: NavItem[] = [
   { path: '/swing', label: 'Swing', icon: TrendingUp },
   { path: '/reinvest', label: 'Reinvest', icon: PiggyBank },
   { path: '/auto-trade', label: 'Auto-Trade', icon: Bot },
+  { path: '/manual-trade', label: 'Manual Trade', icon: Send },
   { path: '/positions', label: 'Positions', icon: Briefcase },
   { path: '/news', label: 'News', icon: Newspaper },
   { path: '/journal', label: 'Journal', icon: BookOpen },
