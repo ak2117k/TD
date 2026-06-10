@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { realizedIntradayPnlPct } from '../intraday-pnl';
 
 const NOTIONAL = 200_000;
 
@@ -352,10 +353,20 @@ export class AnandDualTrackRepository {
         ? ['TARGET_HIT', 'STOPPED', 'EXPIRED']
         : ['TARGET_HIT', 'STOPPED'];
 
+    // Intraday rows additionally carry the partial-booking legs so realized P&L
+    // can be blended across the booked partial + the final-exit leg. Swing rows
+    // have no partial fields (and never partially book), so they keep the plain
+    // (exitPrice - entryPrice) calculation.
     const exits = await (track === 'intraday'
       ? this.prisma.intradayEntry.findMany({
           where: { status: { in: exitStatuses }, exitedAt: { gte: yearStart }, exitPrice: { not: null } },
-          select: { exitedAt: true, entryPrice: true, exitPrice: true },
+          select: {
+            exitedAt: true,
+            entryPrice: true,
+            exitPrice: true,
+            partialExitPrice: true,
+            partialFraction: true,
+          },
         })
       : this.prisma.swingEntry.findMany({
           where: { status: { in: exitStatuses }, exitedAt: { gte: yearStart }, exitPrice: { not: null } },
@@ -368,7 +379,13 @@ export class AnandDualTrackRepository {
       let wins = 0;
       let totalPnlRs = 0;
       for (const r of rows) {
-        const pct = ((r.exitPrice! - r.entryPrice) / r.entryPrice) * 100;
+        const blended = realizedIntradayPnlPct({
+          entryPrice: r.entryPrice,
+          exitPrice: r.exitPrice,
+          partialExitPrice: (r as { partialExitPrice?: number | null }).partialExitPrice ?? null,
+          partialFraction: (r as { partialFraction?: number | null }).partialFraction ?? null,
+        });
+        const pct = blended ?? ((r.exitPrice! - r.entryPrice) / r.entryPrice) * 100;
         sum += pct;
         if (pct > 0) wins++;
         totalPnlRs += (pct / 100) * NOTIONAL;
