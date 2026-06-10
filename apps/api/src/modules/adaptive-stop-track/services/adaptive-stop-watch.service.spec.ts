@@ -220,4 +220,44 @@ describe('AdaptiveStopWatchService.onTick — per-entry stop + 2-min grace', () 
     expect(exec.closeTrade).not.toHaveBeenCalled();
     expect(repo.update).toHaveBeenCalledWith('aw1', expect.objectContaining({ slBreachCount: 0 }));
   });
+
+  it('emits a PRICE_CHANGE event on a >=0.25% move with no transition firing', async () => {
+    // lastEventPrice=2000; ltp=2010 → +0.5% (>=0.25%). Below the +1% partial
+    // trigger (2020), below the +2% target (2040), above the stop — so no
+    // transition/partial fires and the price-change block is reached.
+    repo.findActiveByToken.mockResolvedValue([
+      tradedEntry({ lastEventPrice: 2000 }),
+    ]);
+    await svc.onTick('11536', 2010, new Date());
+
+    expect(exec.closeTrade).not.toHaveBeenCalled();
+
+    const priceChangeCalls = repo.createEvent.mock.calls.filter(
+      (c: any[]) => c[0].eventType === 'PRICE_CHANGE',
+    );
+    expect(priceChangeCalls).toHaveLength(1);
+    expect(priceChangeCalls[0][0]).toEqual(expect.objectContaining({
+      watchEntryId: 'aw1',
+      eventType: 'PRICE_CHANGE',
+      price: 2010,
+    }));
+    expect(priceChangeCalls[0][0].priceDelta).not.toBeNull();
+    expect(priceChangeCalls[0][0].priceDelta).toBeCloseTo(0.5, 6);
+
+    expect(repo.update).toHaveBeenCalledWith('aw1', { lastEventPrice: 2010 });
+  });
+
+  it('does NOT emit a PRICE_CHANGE event on a <0.25% move', async () => {
+    // lastEventPrice=2000; ltp=2003 → +0.15% (<0.25%). No price-change event.
+    repo.findActiveByToken.mockResolvedValue([
+      tradedEntry({ lastEventPrice: 2000 }),
+    ]);
+    await svc.onTick('11536', 2003, new Date());
+
+    const priceChangeCalls = repo.createEvent.mock.calls.filter(
+      (c: any[]) => c[0].eventType === 'PRICE_CHANGE',
+    );
+    expect(priceChangeCalls).toHaveLength(0);
+    expect(repo.update).not.toHaveBeenCalledWith('aw1', { lastEventPrice: 2003 });
+  });
 });
