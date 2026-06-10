@@ -94,13 +94,25 @@ export class AnandPriceMonitorService {
   }
 
   private static readonly TRAIL_GIVEBACK = 0.02; // 2% give-back fallback
+  private static readonly PARTIAL_TRIGGER_PCT = 3;
+  private static readonly PARTIAL_FRACTION = 0.5;
 
   /**
    * Pure trailing decision for one intraday entry.
    * @param stLine current Supertrend(10,3) 15m line value, or null if unavailable
+   *
+   * `stopMovedToBE` reflects that the partial (50% @ +3%) has been booked and
+   * the remaining runner's hard stop is now breakeven (0%) instead of −stopPct.
    */
   static decideIntradayTrail(
-    entry: { entryPrice: number; targetPct: number; stopPct: number; trailing: boolean; peakPrice: number | null },
+    entry: {
+      entryPrice: number;
+      targetPct: number;
+      stopPct: number;
+      trailing: boolean;
+      peakPrice: number | null;
+      stopMovedToBE: boolean;
+    },
     ltp: number,
     stLine: number | null,
   ):
@@ -112,11 +124,15 @@ export class AnandPriceMonitorService {
 
     if (!entry.trailing) {
       if (pnlPct >= entry.targetPct) return { action: 'ARM_TRAIL', peakPrice: ltp };
-      if (pnlPct <= -entry.stopPct) return { action: 'STOP' };
+      // Once the partial is booked the runner's hard stop is breakeven (0%);
+      // otherwise the original −stopPct applies.
+      if (pnlPct <= (entry.stopMovedToBE ? 0 : -entry.stopPct)) return { action: 'STOP' };
       return { action: 'HOLD', peakPrice: ltp };
     }
 
     const peak = Math.max(entry.peakPrice ?? ltp, ltp);
+    // A breakeven'd runner can never be allowed to go red — floor at entry.
+    if (entry.stopMovedToBE && ltp <= entry.entryPrice) return { action: 'STOP' };
     if (stLine != null) {
       if (ltp < stLine) return { action: 'EXIT', exitReason: 'TRAIL_ST', peakPrice: peak };
       return { action: 'HOLD', peakPrice: peak };
@@ -148,7 +164,18 @@ export class AnandPriceMonitorService {
 
   /** Intraday checking with trailing. Replaces the generic path for intraday. */
   private async checkIntraday(
-    entries: Array<{ id: string; token: string | null; entryPrice: number; targetPct: number; stopPct: number; trailing: boolean; peakPrice: number | null }>,
+    entries: Array<{
+      id: string;
+      symbol: string;
+      token: string | null;
+      entryPrice: number;
+      targetPct: number;
+      stopPct: number;
+      trailing: boolean;
+      peakPrice: number | null;
+      partialBookedAt?: Date | null;
+      stopMovedToBE?: boolean | null;
+    }>,
   ): Promise<void> {
     const withToken = entries.filter((e) => e.token);
     if (withToken.length === 0) return;
@@ -168,9 +195,28 @@ export class AnandPriceMonitorService {
       // a not-yet-trailing entry never consults stLine — so fetch the
       // rate-limited candles only then.
       const pnlPct = ((ltp - entry.entryPrice) / entry.entryPrice) * 100;
+
+      // Partial profit-booking: at +3%, book 50% at the fresh price and move the
+      // remaining runner's stop to breakeven. Happens once per entry — the
+      // `!entry.partialBookedAt` guard (the DB row is set after the first fire,
+      // and listWatchingIntraday returns it) makes later ticks idempotent.
+      let stopMovedToBE = entry.stopMovedToBE ?? false;
+      if (!entry.partialBookedAt && pnlPct >= AnandPriceMonitorService.PARTIAL_TRIGGER_PCT) {
+        await this.repo.recordIntradayPartial(entry.id, {
+          partialExitPrice: ltp,
+          partialFraction: AnandPriceMonitorService.PARTIAL_FRACTION,
+          partialBookedAt: now,
+          stopMovedToBE: true,
+        });
+        this.logger.log(
+          `[anand-intraday] ${entry.id} (${entry.symbol}) partial ${AnandPriceMonitorService.PARTIAL_FRACTION * 100}% booked at +${pnlPct.toFixed(2)}% (₹${ltp}) — stop → breakeven`,
+        );
+        stopMovedToBE = true;
+      }
+
       const stLine = entry.trailing ? await this.supertrend15m(entry.token as string) : null;
 
-      const d = AnandPriceMonitorService.decideIntradayTrail(entry, ltp, stLine);
+      const d = AnandPriceMonitorService.decideIntradayTrail({ ...entry, stopMovedToBE }, ltp, stLine);
       if (d.action === 'STOP') {
         this.logger.log(`[anand-intraday] ${entry.id} STOPPED at ${ltp} (${pnlPct.toFixed(2)}%)`);
         await this.repo.updateIntradayStatus(entry.id, { status: 'STOPPED', exitPrice: ltp, exitedAt: now });

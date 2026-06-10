@@ -9,10 +9,12 @@ const makeEntry = (overrides: Partial<{
   id: string; symbol: string; token: string; entryPrice: number;
   targetPct: number; stopPct: number; status: string;
   trailing: boolean; peakPrice: number | null;
+  partialBookedAt: Date | null; stopMovedToBE: boolean;
 }> = {}) => ({
   id: 'i1', symbol: 'RELIANCE', token: '2885', entryPrice: 2500,
   targetPct: 5, stopPct: 5, status: 'WATCHING', exitPrice: null, exitedAt: null,
   trailing: false, peakPrice: null,
+  partialBookedAt: null, stopMovedToBE: false,
   ...overrides,
 });
 
@@ -24,6 +26,7 @@ describe('AnandPriceMonitorService', () => {
     updateIntradayStatus: jest.Mock;
     updateSwingStatus: jest.Mock;
     setIntradayTrailing: jest.Mock;
+    recordIntradayPartial: jest.Mock;
     listOpenReinvestmentLots: jest.Mock;
     resolveTokens: jest.Mock;
   };
@@ -38,6 +41,7 @@ describe('AnandPriceMonitorService', () => {
       updateIntradayStatus: jest.fn().mockResolvedValue(undefined),
       updateSwingStatus: jest.fn().mockResolvedValue(undefined),
       setIntradayTrailing: jest.fn().mockResolvedValue(undefined),
+      recordIntradayPartial: jest.fn().mockResolvedValue(undefined),
       listOpenReinvestmentLots: jest.fn().mockResolvedValue([]),
       resolveTokens: jest.fn().mockResolvedValue(new Map()),
     };
@@ -184,5 +188,80 @@ describe('AnandPriceMonitorService', () => {
     adapter.getLtpsBatch.mockResolvedValue(new Map()); // empty
     await service.pollMarketHours();
     expect(repo.updateIntradayStatus).not.toHaveBeenCalled();
+  });
+
+  // --- Partial profit-booking (50% @ +3%, stop → breakeven) ---
+
+  describe('decideIntradayTrail breakeven stop', () => {
+    const base = {
+      entryPrice: 100, targetPct: 5, stopPct: 5,
+      trailing: false, peakPrice: null as number | null, stopMovedToBE: false,
+    };
+
+    it('STOPS at breakeven (pnl −0.5%) when stopMovedToBE is true (not trailing)', () => {
+      const d = AnandPriceMonitorService.decideIntradayTrail(
+        { ...base, stopMovedToBE: true },
+        99.5, // −0.5%
+        null,
+      );
+      expect(d.action).toBe('STOP');
+    });
+
+    it('HOLDS at the same −0.5% price when stopMovedToBE is false (−0.5% > −5%)', () => {
+      const d = AnandPriceMonitorService.decideIntradayTrail(
+        { ...base, stopMovedToBE: false },
+        99.5,
+        null,
+      );
+      expect(d.action).toBe('HOLD');
+    });
+
+    it('STOPS a trailing runner once ltp drops to/below entryPrice when BE moved', () => {
+      const d = AnandPriceMonitorService.decideIntradayTrail(
+        { ...base, trailing: true, peakPrice: 108, stopMovedToBE: true },
+        99.9, // below entry 100
+        95,   // would otherwise HOLD (above ST line)
+      );
+      expect(d.action).toBe('STOP');
+    });
+
+    it('still ARM_TRAILs at >= targetPct regardless of stopMovedToBE', () => {
+      const d = AnandPriceMonitorService.decideIntradayTrail(
+        { ...base, stopMovedToBE: true },
+        105, // +5%
+        null,
+      );
+      expect(d).toEqual({ action: 'ARM_TRAIL', peakPrice: 105 });
+    });
+  });
+
+  it('books 50% partial + moves stop to BE at +3.5% without closing the entry', async () => {
+    repo.listWatchingIntraday.mockResolvedValue([
+      makeEntry({ entryPrice: 2500, partialBookedAt: null }),
+    ]);
+    adapter.getLtpsBatch.mockResolvedValue(new Map([['2885', 2587.5]])); // +3.5%
+    await service.pollMarketHours();
+
+    expect(repo.recordIntradayPartial).toHaveBeenCalledTimes(1);
+    expect(repo.recordIntradayPartial).toHaveBeenCalledWith(
+      'i1',
+      expect.objectContaining({
+        partialExitPrice: 2587.5,
+        partialFraction: 0.5,
+        stopMovedToBE: true,
+      }),
+    );
+    // Booking does not close the position (it is still WATCHING, no stop yet).
+    expect(repo.updateIntradayStatus).not.toHaveBeenCalled();
+  });
+
+  it('does NOT re-book the partial when partialBookedAt is already set (idempotent)', async () => {
+    repo.listWatchingIntraday.mockResolvedValue([
+      makeEntry({ entryPrice: 2500, partialBookedAt: new Date(), stopMovedToBE: true }),
+    ]);
+    adapter.getLtpsBatch.mockResolvedValue(new Map([['2885', 2600]])); // +4%
+    await service.pollMarketHours();
+
+    expect(repo.recordIntradayPartial).not.toHaveBeenCalled();
   });
 });
