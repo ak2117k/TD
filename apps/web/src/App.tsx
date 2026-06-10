@@ -20,6 +20,7 @@ import { StrategyReviewPage } from '@/pages/strategy-review/StrategyReviewPage';
 import SettingsPage from '@/pages/settings/SettingsPage';
 import { WatchPage } from '@/pages/watch/WatchPage';
 import { UngatedWatchPage } from '@/pages/ungated-watch/UngatedWatchPage';
+import { AdaptiveStopPage } from '@/pages/adaptive-stop/AdaptiveStopPage';
 import IntradayPage from '@/pages/intraday/IntradayPage';
 import SwingPage from '@/pages/swing/SwingPage';
 import ReinvestPage from '@/pages/reinvest/ReinvestPage';
@@ -47,6 +48,7 @@ export default function App() {
         <Route path="chartink" element={<ChartinkPage />} />
         <Route path="watch" element={<WatchPage />} />
         <Route path="ungated-watch" element={<UngatedWatchPage />} />
+        <Route path="adaptive-stop" element={<AdaptiveStopPage />} />
         <Route path="intraday" element={<IntradayPage />} />
         <Route path="swing" element={<SwingPage />} />
         <Route path="reinvest" element={<ReinvestPage />} />

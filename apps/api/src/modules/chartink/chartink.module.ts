@@ -12,6 +12,7 @@ import { ChartinkProcessWorker } from './workers/chartink-process.worker';
 import { ChartinkWebhookController } from './controllers/chartink-webhook.controller';
 import { ChartinkController } from './controllers/chartink.controller';
 import { UngatedTrackModule } from '../ungated-track/ungated-track.module';
+import { AdaptiveStopTrackModule } from '../adaptive-stop-track/adaptive-stop-track.module';
 import { AnandDualTrackModule } from '../anand-dual-track/anand-dual-track.module';
 
 // @Global so ChartinkRepository and ChartinkScoringService are injectable
@@ -28,6 +29,7 @@ import { AnandDualTrackModule } from '../anand-dual-track/anand-dual-track.modul
     MarketDataModule,
     SignalGeneratorModule,
     UngatedTrackModule,
+    AdaptiveStopTrackModule,
     AnandDualTrackModule,
     BullModule.registerQueue({ name: 'chartink-process' }),
   ],

@@ -25,6 +25,7 @@ import {
   Timer,
   TrendingUp,
   PiggyBank,
+  ShieldHalf,
 } from 'lucide-react';
 import type { NavItem } from '@/types';
 
@@ -38,6 +39,7 @@ const navItems: NavItem[] = [
   { path: '/chartink', label: 'Chartink', icon: Radio },
   { path: '/watch', label: 'Watch', icon: Eye },
   { path: '/ungated-watch', label: 'Ungated Watch', icon: GitCompareArrows, badge: 'EXP' },
+  { path: '/adaptive-stop', label: 'Adaptive-Stop', icon: ShieldHalf, badge: 'EXP' },
   { path: '/intraday', label: 'Intraday', icon: Timer },
   { path: '/swing', label: 'Swing', icon: TrendingUp },
   { path: '/reinvest', label: 'Reinvest', icon: PiggyBank },
