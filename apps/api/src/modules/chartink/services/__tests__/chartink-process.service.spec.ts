@@ -14,6 +14,7 @@ import { UngatedRejectionRepository } from '../../../ungated-track/repositories/
 import {
   UngatedCapitalExhaustedError, UngatedPositionCapError, UngatedKillSwitchError,
 } from '../../../ungated-track/services/ungated-paper-account.service';
+import { AdaptiveStopWatchService } from '../../../adaptive-stop-track/services/adaptive-stop-watch.service';
 import { AnandDualTrackService } from '../../../anand-dual-track/services/anand-dual-track.service';
 import { LevelBookService } from '../../../signal-generator/services/level-book.service';
 
@@ -45,6 +46,7 @@ describe('ChartinkProcessService', () => {
   let nseSector: { getSectorIndexForSymbol: jest.Mock };
   let watchSvc: { createFromAlert: jest.Mock };
   let ungatedWatch: { createFromAlert: jest.Mock };
+  let adaptiveStopWatch: { createFromAlert: jest.Mock };
   let ungatedRejections: { record: jest.Mock };
   let anandDualTrack: { createEntries: jest.Mock };
   let levelBook: { lazyLoad: jest.Mock };
@@ -82,6 +84,7 @@ describe('ChartinkProcessService', () => {
     nseSector = { getSectorIndexForSymbol: jest.fn().mockResolvedValue('99926019') };
     watchSvc = { createFromAlert: jest.fn().mockResolvedValue({ id: 'w1' }) };
     ungatedWatch = { createFromAlert: jest.fn().mockResolvedValue({ id: 'uw1' }) };
+    adaptiveStopWatch = { createFromAlert: jest.fn().mockResolvedValue({ id: 'as1' }) };
     ungatedRejections = { record: jest.fn().mockResolvedValue(undefined) };
     anandDualTrack = { createEntries: jest.fn().mockResolvedValue(undefined) };
     // Default: lazyLoad returns null so setupContext stays null in tests that
@@ -99,6 +102,7 @@ describe('ChartinkProcessService', () => {
         { provide: NseSectorIndexService, useValue: nseSector },
         { provide: WatchService, useValue: watchSvc },
         { provide: UngatedWatchService, useValue: ungatedWatch },
+        { provide: AdaptiveStopWatchService, useValue: adaptiveStopWatch },
         { provide: UngatedRejectionRepository, useValue: ungatedRejections },
         { provide: AnandDualTrackService, useValue: anandDualTrack },
         { provide: LevelBookService, useValue: levelBook },
@@ -320,28 +324,28 @@ describe('ChartinkProcessService', () => {
       }));
     });
 
-    it('persists kind=scored-low and does NOT call watch.createFromAlert when score < 45', async () => {
+    it('persists kind=scored-low and does NOT call watch.createFromAlert when score < 47', async () => {
       scoring.score.mockResolvedValue({ score: 30, lotCount: 0, checks: [] });
 
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
 
       expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
         kind: 'scored-low',
-        rejectReason: 'score 30 below 45',
+        rejectReason: 'score 30 below 47',
         score: 30,
         lotCount: 0,
       }));
       expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
     });
 
-    it('persists kind=scored-low for a score of 40 (below the lowered 45 floor)', async () => {
+    it('persists kind=scored-low for a score of 40 (below the 47 floor)', async () => {
       scoring.score.mockResolvedValue({ score: 40, lotCount: 0, checks: [macd5mCheck(true), supertrendCheck(true)] });
 
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 });
 
       expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
         kind: 'scored-low',
-        rejectReason: 'score 40 below 45',
+        rejectReason: 'score 40 below 47',
       }));
       expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
     });
@@ -474,7 +478,7 @@ describe('ChartinkProcessService', () => {
       expect(watchSvc.createFromAlert).toHaveBeenCalled();
     });
 
-    it('still rejects as scored-low when the 5m MACD passes but the total score is < 45', async () => {
+    it('still rejects as scored-low when the 5m MACD passes but the total score is < 47', async () => {
       scoring.score.mockResolvedValue({
         score: 35, lotCount: 0, checks: [macd5mCheck(true), supertrendCheck(true)],
       });
@@ -483,7 +487,7 @@ describe('ChartinkProcessService', () => {
 
       expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({
         kind: 'scored-low',
-        rejectReason: 'score 35 below 45',
+        rejectReason: 'score 35 below 47',
       }));
       expect(watchSvc.createFromAlert).not.toHaveBeenCalled();
     });
@@ -674,7 +678,7 @@ describe('ChartinkProcessService', () => {
       await service.processOne('alert-1', { symbol: 'RAYMOND', hitPrice: 496.6 }, 'ANAND HIGH GAINER');
 
       expect(logSpy).toHaveBeenCalledWith(
-        '[trade-rejected] RAYMOND | scan="ANAND HIGH GAINER" hit=496.6 side=BUY score=40 | stage=scoring reason="score 40 below 45"',
+        '[trade-rejected] RAYMOND | scan="ANAND HIGH GAINER" hit=496.6 side=BUY score=40 | stage=scoring reason="score 40 below 47"',
       );
     });
 
@@ -771,6 +775,64 @@ describe('ChartinkProcessService', () => {
       expect(ungatedRejections.record).toHaveBeenCalledWith(
         expect.objectContaining({ reason: 'capital-exhausted' }),
       );
+    });
+  });
+
+  // ─── Adaptive-Stop shadow track fork (Stage-4 hook on admitted entries) ─────
+  // The adaptive-stop track mirrors the ungated fork but fires ONLY on the
+  // policy.admitted (kind=setup) path, after the watch wiring. Its createFromAlert
+  // is wrapped in an independent try/catch — a throw must never affect the gated path.
+
+  describe('ChartinkProcessService — adaptive-stop fork', () => {
+    beforeEach(() => {
+      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', exchange: 'NSE' });
+      mdRepo.getInstrumentByToken.mockResolvedValue({ id: 'sec-1', token: '99926019', exchange: 'NSE' });
+      angelOne.getHistoricalData.mockResolvedValue(UP_CANDLES);
+    });
+
+    it('admitted alert: calls adaptiveStopWatch.createFromAlert exactly once', async () => {
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [macd5mCheck(true), supertrendCheck(true)] });
+
+      await service.processOne('alert-as-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      // Gated path admitted (kind=setup) and the adaptive-stop hook fired once.
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({ kind: 'setup' }));
+      expect(adaptiveStopWatch.createFromAlert).toHaveBeenCalledTimes(1);
+      expect(adaptiveStopWatch.createFromAlert).toHaveBeenCalledWith(expect.objectContaining({
+        alertId: 'alert-as-1',
+        setupId: 'setup-row-1',
+        symbol: 'RELIANCE',
+        token: '2885',
+        exchange: 'NSE',
+        side: 'BUY',
+        initialPrice: 2885,
+        initialScore: 70,
+      }));
+    });
+
+    it('does NOT call adaptiveStopWatch.createFromAlert on a scored-low rejection', async () => {
+      scoring.score.mockResolvedValue({ score: 40, lotCount: 0, checks: [] });
+
+      await service.processOne('alert-as-2', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({ kind: 'scored-low' }));
+      expect(adaptiveStopWatch.createFromAlert).not.toHaveBeenCalled();
+    });
+
+    it('adaptiveStopWatch.createFromAlert throw is swallowed — gated path still completes', async () => {
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [macd5mCheck(true), supertrendCheck(true)] });
+      adaptiveStopWatch.createFromAlert.mockRejectedValue(new Error('adaptive-stop db crash'));
+
+      // processOne must resolve cleanly — the adaptive-stop failure must not propagate.
+      await expect(
+        service.processOne('alert-as-3', { symbol: 'RELIANCE', hitPrice: 2885 }),
+      ).resolves.toBeUndefined();
+
+      // Gated path still produced the setup and the ungated fork still ran.
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({ kind: 'setup' }));
+      expect(repo.createAlertSetup).toHaveBeenCalledTimes(1);
+      expect(adaptiveStopWatch.createFromAlert).toHaveBeenCalledTimes(1);
+      expect(ungatedWatch.createFromAlert).toHaveBeenCalled();
     });
   });
 });
