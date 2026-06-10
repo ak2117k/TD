@@ -934,6 +934,10 @@ model IntradayEntry {
   alertId        String
   scoreBreakdown Json?
   trailing       Boolean   @default(false)
+  partialBookedAt  DateTime?
+  partialExitPrice Float?
+  partialFraction  Float?
+  stopMovedToBE    Boolean   @default(false)
   peakPrice      Float?
   exitReason     String?
 

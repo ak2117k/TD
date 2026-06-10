@@ -141,6 +141,13 @@ export class AnandDualTrackRepository {
     await this.prisma.intradayEntry.update({ where: { id }, data });
   }
 
+  async recordIntradayPartial(
+    id: string,
+    data: { partialExitPrice: number; partialFraction: number; partialBookedAt: Date; stopMovedToBE: boolean },
+  ): Promise<void> {
+    await this.prisma.intradayEntry.update({ where: { id }, data });
+  }
+
   async findActiveTradedBySymbol(
     track: 'intraday' | 'swing',
     symbol: string,
