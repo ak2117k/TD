@@ -16,6 +16,7 @@ import { WatchController } from './controllers/watch.controller';
 import { WatchGateway } from './gateways/watch.gateway';
 import { MarketFeedService } from '../market-data/services/market-feed.service';
 import { RiskGuardService } from './services/risk-guard.service';
+import { WatchBackstopPollerService } from './services/watch-backstop-poller.service';
 
 @Global()
 @Module({
@@ -34,6 +35,7 @@ import { RiskGuardService } from './services/risk-guard.service';
     WatchService,
     WatchMonitorService,
     RiskGuardService,
+    WatchBackstopPollerService,
     StrikeSelectorService,
     TargetCalculatorService,
     WatchRescoreWorker,
