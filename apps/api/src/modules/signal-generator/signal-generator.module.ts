@@ -25,6 +25,7 @@ import { AnandSniperV25CombinedStrategy } from './strategies/anand-sniper-v25-co
 import { ChartinkGatedStrategy } from './strategies/chartink-gated.strategy';
 import { LevelBookService } from './services/level-book.service';
 import { LevelBookCron } from './services/level-book.cron';
+import { ExitPriceService } from './services/exit-price.service';
 import { SetupTrackerService } from './services/setup-tracker.service';
 import { MtfAlignmentService } from './services/mtf-alignment.service';
 import { ZoneRepository } from './repositories/zone.repository';
@@ -92,6 +93,10 @@ import type { ContextFactor } from './services/context-scoring/types';
 
     // Level book — per-instrument VWAP / today H/L / spot tracker
     LevelBookService,
+
+    // Risk-critical exit pricing — fresh-or-surface resolver
+    // (REST batch -> per-token REST -> fresh level-book; never a stale seed).
+    ExitPriceService,
 
     // Cron jobs — pre-market session seeder (09:15) + opening range locker (09:30)
     LevelBookCron,
@@ -163,6 +168,7 @@ import type { ContextFactor } from './services/context-scoring/types';
     StrategyStorageService,
     SignalRepository,
     LevelBookService,
+    ExitPriceService,
     SetupTrackerService,
     ContextScoringService,
     MtfAlignmentService,

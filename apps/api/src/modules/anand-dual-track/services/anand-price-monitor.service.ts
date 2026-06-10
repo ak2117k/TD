@@ -4,6 +4,7 @@ import { AnandDualTrackRepository } from '../repositories/anand-dual-track.repos
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { supertrend } from '../../signal-generator/strategies/indicators';
 import { ReinvestmentService } from './reinvestment.service';
+import { ExitPriceService } from '../../signal-generator/services/exit-price.service';
 
 @Injectable()
 export class AnandPriceMonitorService {
@@ -13,6 +14,7 @@ export class AnandPriceMonitorService {
     private readonly repo: AnandDualTrackRepository,
     private readonly adapter: AngelOneAdapterService,
     private readonly reinvest: ReinvestmentService,
+    private readonly exitPrice: ExitPriceService,
   ) {}
 
   // Poll both tracks every 30s during market hours Mon–Fri 09:15–15:15 IST.
@@ -151,12 +153,16 @@ export class AnandPriceMonitorService {
     const withToken = entries.filter((e) => e.token);
     if (withToken.length === 0) return;
     const tokens = [...new Set(withToken.map((e) => e.token as string))];
-    const ltpMap = await this.adapter.getLtpsBatch('NSE', tokens).catch(() => new Map<string, number>());
+    const priceMap = await this.exitPrice.resolveExitPrices('NSE', tokens);
     const now = new Date();
 
     for (const entry of withToken) {
-      const ltp = ltpMap.get(entry.token as string);
-      if (ltp === undefined) continue;
+      const r = priceMap.get(entry.token as string);
+      if (!r || !r.fresh) {
+        this.logger.warn(`[anand-intraday] ${entry.id} unmonitored — no fresh price, stop not evaluated`);
+        continue;
+      }
+      const ltp = r.price;
 
       // Supertrend only matters once we are already trailing — the decision for
       // a not-yet-trailing entry never consults stLine — so fetch the
@@ -188,12 +194,16 @@ export class AnandPriceMonitorService {
     if (withToken.length === 0) return;
 
     const tokens = [...new Set(withToken.map((e) => e.token as string))];
-    const ltpMap = await this.adapter.getLtpsBatch('NSE', tokens).catch(() => new Map<string, number>());
+    const priceMap = await this.exitPrice.resolveExitPrices('NSE', tokens);
 
     const now = new Date();
     for (const entry of withToken) {
-      const ltp = ltpMap.get(entry.token as string);
-      if (ltp === undefined) continue;
+      const r = priceMap.get(entry.token as string);
+      if (!r || !r.fresh) {
+        this.logger.warn(`[anand-${track}] ${entry.symbol} unmonitored — no fresh price, stop not evaluated`);
+        continue;
+      }
+      const ltp = r.price;
 
       const pnlPct = ((ltp - entry.entryPrice) / entry.entryPrice) * 100;
 
@@ -225,14 +235,18 @@ export class AnandPriceMonitorService {
     const symbols = [...new Set(lots.map((l) => l.symbol))];
     const tokenMap = await this.repo.resolveTokens(symbols).catch(() => new Map<string, string>());
     const tokens = [...new Set([...tokenMap.values()])];
-    const ltpMap = tokens.length
-      ? await this.adapter.getLtpsBatch('NSE', tokens).catch(() => new Map<string, number>())
-      : new Map<string, number>();
+    const priceMap = tokens.length
+      ? await this.exitPrice.resolveExitPrices('NSE', tokens)
+      : new Map<string, import('../../signal-generator/services/exit-price.service').ExitPrice>();
 
     for (const lot of lots) {
       const token = tokenMap.get(lot.symbol);
-      const ltp = token ? ltpMap.get(token) : undefined;
-      if (ltp === undefined) continue;
+      const r = token ? priceMap.get(token) : undefined;
+      if (!r || !r.fresh) {
+        this.logger.warn(`[anand-reinvest] ${lot.symbol} unmonitored — no fresh price, stop not evaluated`);
+        continue;
+      }
+      const ltp = r.price;
       const pnlPct = ((ltp - lot.entryPrice) / lot.entryPrice) * 100;
       if (pnlPct >= lot.targetPct) {
         await this.reinvest.closeLot({ id: lot.id, capital: lot.capital, entryPrice: lot.entryPrice }, ltp, 'TARGET_HIT');

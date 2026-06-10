@@ -5,6 +5,7 @@ import { AngelOneAdapterService } from '../../market-data/services/angel-one-ada
 import { UngatedWatchRepository } from '../repositories/ungated-watch.repository';
 import { UngatedWatchService } from './ungated-watch.service';
 import { UngatedTradeExecutionService } from './ungated-trade-execution.service';
+import { ExitPriceService } from '../../signal-generator/services/exit-price.service';
 
 /**
  * REST-poll ungated open positions every 30 seconds during market hours.
@@ -34,6 +35,7 @@ export class UngatedTickPoller {
     private readonly repo: UngatedWatchRepository,
     private readonly watch: UngatedWatchService,
     private readonly exec: UngatedTradeExecutionService,
+    private readonly exitPrice: ExitPriceService,
   ) {}
 
   // Every 30s, Mon–Fri, 09:15–15:30 IST. The cron format is
@@ -62,10 +64,14 @@ export class UngatedTickPoller {
     const now = new Date();
     let dispatched = 0;
     for (const [exchange, tokens] of byExchange) {
-      const ltps = await this.adapter.getLtpsBatch(exchange, tokens);
-      for (const [token, ltp] of ltps) {
+      const priceMap = await this.exitPrice.resolveExitPrices(exchange, tokens);
+      for (const [token, r] of priceMap) {
+        if (!r.fresh) {
+          this.logger.warn(`[ungated-poll] ${token} unmonitored — no fresh price, onTick skipped`);
+          continue;
+        }
         try {
-          await this.watch.onTick(token, ltp, now);
+          await this.watch.onTick(token, r.price, now);
           dispatched++;
         } catch (err) {
           this.logger.warn(

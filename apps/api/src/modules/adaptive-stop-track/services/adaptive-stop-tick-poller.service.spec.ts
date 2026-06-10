@@ -1,13 +1,13 @@
 import { Test } from '@nestjs/testing';
-import { UngatedTickPoller } from './ungated-tick-poller.service';
+import { AdaptiveStopTickPoller } from './adaptive-stop-tick-poller.service';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
-import { UngatedWatchRepository } from '../repositories/ungated-watch.repository';
-import { UngatedWatchService } from './ungated-watch.service';
-import { UngatedTradeExecutionService } from './ungated-trade-execution.service';
+import { AdaptiveStopWatchRepository } from '../repositories/adaptive-stop-watch.repository';
+import { AdaptiveStopWatchService } from './adaptive-stop-watch.service';
+import { AdaptiveStopTradeExecutionService } from './adaptive-stop-trade-execution.service';
 import { ExitPriceService } from '../../signal-generator/services/exit-price.service';
 
-describe('UngatedTickPoller.pollOpenPositions', () => {
-  let poller: UngatedTickPoller;
+describe('AdaptiveStopTickPoller.pollOpenPositions', () => {
+  let poller: AdaptiveStopTickPoller;
   let adapter: { getLtpsBatch: jest.Mock };
   let repo: { findAllActive: jest.Mock };
   let watch: { onTick: jest.Mock };
@@ -18,7 +18,7 @@ describe('UngatedTickPoller.pollOpenPositions', () => {
     repo = { findAllActive: jest.fn() };
     watch = { onTick: jest.fn().mockResolvedValue(undefined) };
     // Default resolver: delegate to the adapter batch fixture and wrap each
-    // returned price as fresh, so existing getLtpsBatch fixtures keep working.
+    // returned price as fresh, so getLtpsBatch fixtures keep driving the path.
     exitPrice = {
       resolveExitPrices: jest.fn(async (exchange: string, tokens: string[]) => {
         const batch: Map<string, number> = await adapter.getLtpsBatch(exchange, tokens);
@@ -31,15 +31,15 @@ describe('UngatedTickPoller.pollOpenPositions', () => {
     };
     const mod = await Test.createTestingModule({
       providers: [
-        UngatedTickPoller,
+        AdaptiveStopTickPoller,
         { provide: AngelOneAdapterService, useValue: adapter },
-        { provide: UngatedWatchRepository, useValue: repo },
-        { provide: UngatedWatchService, useValue: watch },
-        { provide: UngatedTradeExecutionService, useValue: { closeTrade: jest.fn() } },
+        { provide: AdaptiveStopWatchRepository, useValue: repo },
+        { provide: AdaptiveStopWatchService, useValue: watch },
+        { provide: AdaptiveStopTradeExecutionService, useValue: { closeTrade: jest.fn() } },
         { provide: ExitPriceService, useValue: exitPrice },
       ],
     }).compile();
-    poller = mod.get(UngatedTickPoller);
+    poller = mod.get(AdaptiveStopTickPoller);
   });
 
   it('no-ops when no entries are TRADED', async () => {
@@ -48,43 +48,20 @@ describe('UngatedTickPoller.pollOpenPositions', () => {
       { status: 'STOPPED', token: '222', exchange: 'NSE' },
     ]);
     await poller.pollOpenPositions();
-    expect(adapter.getLtpsBatch).not.toHaveBeenCalled();
+    expect(exitPrice.resolveExitPrices).not.toHaveBeenCalled();
     expect(watch.onTick).not.toHaveBeenCalled();
   });
 
-  it('batches all TRADED tokens for the same exchange into one quote call', async () => {
+  it('dispatches a fresh-priced onTick for each TRADED token', async () => {
     repo.findAllActive.mockResolvedValue([
       { status: 'TRADED', token: '111', exchange: 'NSE' },
       { status: 'TRADED', token: '222', exchange: 'NSE' },
-      { status: 'TRADED', token: '333', exchange: 'NSE' },
     ]);
-    adapter.getLtpsBatch.mockResolvedValue(new Map([
-      ['111', 100.5],
-      ['222', 200.5],
-      ['333', 300.5],
-    ]));
+    adapter.getLtpsBatch.mockResolvedValue(new Map([['111', 100.5], ['222', 200.5]]));
     await poller.pollOpenPositions();
-    expect(adapter.getLtpsBatch).toHaveBeenCalledTimes(1);
-    expect(adapter.getLtpsBatch).toHaveBeenCalledWith(
-      'NSE',
-      expect.arrayContaining(['111', '222', '333']),
-    );
-    expect(watch.onTick).toHaveBeenCalledTimes(3);
+    expect(watch.onTick).toHaveBeenCalledTimes(2);
     expect(watch.onTick).toHaveBeenCalledWith('111', 100.5, expect.any(Date));
     expect(watch.onTick).toHaveBeenCalledWith('222', 200.5, expect.any(Date));
-    expect(watch.onTick).toHaveBeenCalledWith('333', 300.5, expect.any(Date));
-  });
-
-  it('tokens missing from the batch response are silently dropped (no onTick)', async () => {
-    repo.findAllActive.mockResolvedValue([
-      { status: 'TRADED', token: '111', exchange: 'NSE' },
-      { status: 'TRADED', token: '222', exchange: 'NSE' },
-    ]);
-    // Broker only returned a quote for 111 — 222 missing (e.g. delisted, halted)
-    adapter.getLtpsBatch.mockResolvedValue(new Map([['111', 100.5]]));
-    await poller.pollOpenPositions();
-    expect(watch.onTick).toHaveBeenCalledTimes(1);
-    expect(watch.onTick).toHaveBeenCalledWith('111', 100.5, expect.any(Date));
   });
 
   it('does NOT call onTick and warns when a token has no fresh price', async () => {
@@ -116,8 +93,6 @@ describe('UngatedTickPoller.pollOpenPositions', () => {
     adapter.getLtpsBatch.mockResolvedValue(new Map([['111', 100], ['222', 200]]));
     watch.onTick.mockImplementationOnce(() => { throw new Error('boom'); });
     await poller.pollOpenPositions();
-    // Both tokens should have been attempted — the second one despite the
-    // first throwing.
     expect(watch.onTick).toHaveBeenCalledTimes(2);
   });
 });
