@@ -5,6 +5,7 @@ import { ChartinkRepository } from '../../chartink/repositories/chartink.reposit
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
 import { resolvePriceFields } from '../price-fields';
+import { realizedIntradayPnlPct } from '../intraday-pnl';
 
 class UpdateCategoryDto {
   @IsString() @IsNotEmpty() category!: string;
@@ -137,8 +138,25 @@ export class AnandDualTrackController {
       // Closed positions report realized P&L from their actual exit price —
       // never live-priced, never stale.
       if (e.exitPrice != null) {
-        const pnlPct = ((e.exitPrice - e.entryPrice) / e.entryPrice) * 100;
-        return { ...e, currentPrice: e.exitPrice, pnlPct, targetLeftPct: e.targetPct - pnlPct, priceStale: false };
+        // Blends the booked partial leg with the final-exit leg for intraday
+        // partial-booked trades. Swing rows carry no partial fields, so the
+        // helper falls back to the plain final-exit %.
+        const pnlPct =
+          realizedIntradayPnlPct({
+            entryPrice: e.entryPrice,
+            exitPrice: e.exitPrice as number,
+            partialExitPrice: e.partialExitPrice as number | null | undefined,
+            partialFraction: e.partialFraction as number | null | undefined,
+          }) ?? 0;
+        return {
+          ...e,
+          currentPrice: e.exitPrice,
+          pnlPct,
+          targetLeftPct: e.targetPct - pnlPct,
+          priceStale: false,
+          partialBookedAt: (e as { partialBookedAt?: unknown }).partialBookedAt ?? null,
+          partialExitPrice: (e as { partialExitPrice?: unknown }).partialExitPrice ?? null,
+        };
       }
       return { ...e, ...resolvePriceFields(e, ltpMap, seedMap) };
     });

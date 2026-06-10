@@ -192,5 +192,17 @@ describe('AnandDualTrackRepository', () => {
       const summary = await repo.getPnlSummary('intraday');
       expect(summary.daily.totalPnlRs).toBeCloseTo(20000, 0);
     });
+
+    it('blends intraday partial-booked legs (50% @ +3%, runner stopped -2% → +0.5%)', async () => {
+      const now = new Date();
+      prisma.intradayEntry.findMany.mockResolvedValue([
+        { exitedAt: now, entryPrice: 100, exitPrice: 98, partialExitPrice: 103, partialFraction: 0.5 },
+      ]);
+      const summary = await repo.getPnlSummary('intraday');
+      // blended +0.5% (a raw final-leg calc would have read -2%)
+      expect(summary.daily.avgExitPct).toBeCloseTo(0.5, 6);
+      expect(summary.daily.winCount).toBe(1);
+      expect(summary.daily.totalPnlRs).toBeCloseTo((0.5 / 100) * 200000, 2);
+    });
   });
 });

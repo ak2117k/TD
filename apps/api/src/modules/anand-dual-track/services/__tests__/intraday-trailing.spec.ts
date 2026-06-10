@@ -1,6 +1,6 @@
 import { AnandPriceMonitorService } from '../anand-price-monitor.service';
 
-const entry = { entryPrice: 100, targetPct: 5, stopPct: 5, trailing: false, peakPrice: null as number | null };
+const entry = { entryPrice: 100, targetPct: 5, stopPct: 5, trailing: false, peakPrice: null as number | null, stopMovedToBE: false };
 
 describe('AnandPriceMonitorService.decideIntradayTrail', () => {
   it('arms trailing (no exit) the first time price reaches +5%', () => {
