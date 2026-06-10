@@ -256,6 +256,7 @@ export class AdaptiveStopWatchService {
   private readonly PARTIAL_EXIT_THRESHOLD_PCT = 0.01;
   private readonly PARTIAL_EXIT_FRACTION = 0.5;
   private readonly TRAILING_STOP_PCT = 0.005;
+  private readonly MATERIAL_CHANGE_PCT = 0.0025;
 
   // --- Public tick entrypoint ---
   async onTick(token: string, ltp: number, ts: Date): Promise<void> {
@@ -335,6 +336,24 @@ export class AdaptiveStopWatchService {
       await this.checkPartialExitTrigger(entry, ltp);
     } else {
       await this.updateTrailingStop(entry, ltp);
+    }
+
+    // Material price-move event so the entry's event log stays alive between
+    // transitions (mirrors the gated WatchService). Only fires on >=0.25% moves.
+    const last = entry.lastEventPrice ?? entry.initialPrice;
+    if (last > 0) {
+      const delta = (ltp - last) / last;
+      if (Math.abs(delta) >= this.MATERIAL_CHANGE_PCT) {
+        await this.repo.createEvent({
+          watchEntryId: entry.id,
+          eventType: WatchEventType.PRICE_CHANGE,
+          price: ltp,
+          priceDelta: delta * 100,
+          score: null,
+          breakdown: null,
+        });
+        await this.repo.update(entry.id, { lastEventPrice: ltp });
+      }
     }
   }
 
