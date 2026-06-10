@@ -5,6 +5,7 @@ import { AngelOneAdapterService } from '../../market-data/services/angel-one-ada
 import { AdaptiveStopWatchRepository } from '../repositories/adaptive-stop-watch.repository';
 import { AdaptiveStopWatchService } from './adaptive-stop-watch.service';
 import { AdaptiveStopTradeExecutionService } from './adaptive-stop-trade-execution.service';
+import { ExitPriceService } from '../../signal-generator/services/exit-price.service';
 
 /**
  * REST-poll adaptive-stop open positions every 30 seconds during market hours.
@@ -34,6 +35,7 @@ export class AdaptiveStopTickPoller {
     private readonly repo: AdaptiveStopWatchRepository,
     private readonly watch: AdaptiveStopWatchService,
     private readonly exec: AdaptiveStopTradeExecutionService,
+    private readonly exitPrice: ExitPriceService,
   ) {}
 
   // Every 30s, Mon–Fri, 09:15–15:30 IST. The cron format is
@@ -62,10 +64,14 @@ export class AdaptiveStopTickPoller {
     const now = new Date();
     let dispatched = 0;
     for (const [exchange, tokens] of byExchange) {
-      const ltps = await this.adapter.getLtpsBatch(exchange, tokens);
-      for (const [token, ltp] of ltps) {
+      const priceMap = await this.exitPrice.resolveExitPrices(exchange, tokens);
+      for (const [token, r] of priceMap) {
+        if (!r.fresh) {
+          this.logger.warn(`[adaptive-stop-poll] ${token} unmonitored — no fresh price, onTick skipped`);
+          continue;
+        }
         try {
-          await this.watch.onTick(token, ltp, now);
+          await this.watch.onTick(token, r.price, now);
           dispatched++;
         } catch (err) {
           this.logger.warn(

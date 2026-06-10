@@ -3,6 +3,7 @@ import { AnandPriceMonitorService } from '../anand-price-monitor.service';
 import { AnandDualTrackRepository } from '../../repositories/anand-dual-track.repository';
 import { AngelOneAdapterService } from '../../../market-data/services/angel-one-adapter.service';
 import { ReinvestmentService } from '../reinvestment.service';
+import { ExitPriceService } from '../../../signal-generator/services/exit-price.service';
 
 const makeEntry = (overrides: Partial<{
   id: string; symbol: string; token: string; entryPrice: number;
@@ -28,6 +29,7 @@ describe('AnandPriceMonitorService', () => {
   };
   let adapter: { getLtpsBatch: jest.Mock; getHistoricalData: jest.Mock };
   let reinvest: { onSwingTargetHit: jest.Mock; closeLot: jest.Mock };
+  let exitPrice: { resolveExitPrices: jest.Mock };
 
   beforeEach(async () => {
     repo = {
@@ -47,6 +49,25 @@ describe('AnandPriceMonitorService', () => {
       onSwingTargetHit: jest.fn().mockResolvedValue(undefined),
       closeLot: jest.fn().mockResolvedValue(undefined),
     };
+    // Default: delegate to the adapter batch fixture and wrap every returned
+    // price as fresh, so existing `adapter.getLtpsBatch.mockResolvedValue(...)`
+    // tests keep driving the fresh-price path through the new service.
+    exitPrice = {
+      resolveExitPrices: jest.fn(async (_exchange: string, tokens: string[]) => {
+        const batch: Map<string, number> = await adapter.getLtpsBatch('NSE', tokens);
+        const out = new Map();
+        for (const t of tokens) {
+          const p = batch.get(t);
+          out.set(
+            t,
+            p != null && p > 0
+              ? { price: p, fresh: true, source: 'rest-batch' as const }
+              : { price: 0, fresh: false, source: 'none' as const },
+          );
+        }
+        return out;
+      }),
+    };
 
     const mod = await Test.createTestingModule({
       providers: [
@@ -54,6 +75,7 @@ describe('AnandPriceMonitorService', () => {
         { provide: AnandDualTrackRepository, useValue: repo },
         { provide: AngelOneAdapterService, useValue: adapter },
         { provide: ReinvestmentService, useValue: reinvest },
+        { provide: ExitPriceService, useValue: exitPrice },
       ],
     }).compile();
 
@@ -138,6 +160,23 @@ describe('AnandPriceMonitorService', () => {
     jest.useRealTimers();
     expect(repo.listWatchingIntraday).not.toHaveBeenCalled();
     expect(repo.updateSwingStatus).toHaveBeenCalledWith('s1', expect.objectContaining({ status: 'TARGET_HIT' }));
+  });
+
+  it('does NOT fire a swing stop and warns when the resolved price is not fresh', async () => {
+    const warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+    repo.listWatchingSwing.mockResolvedValue([
+      makeEntry({ id: 's1', symbol: 'RELIANCE', token: '2885', entryPrice: 3000, targetPct: 10, stopPct: 10 }),
+    ]);
+    // Price would be a clear stop (-20%), but the resolver reports it stale —
+    // the stop MUST NOT be evaluated, and the position must be surfaced.
+    exitPrice.resolveExitPrices.mockResolvedValue(
+      new Map([['2885', { price: 2400, fresh: false, source: 'none' as const }]]),
+    );
+    await service.pollMarketHours();
+    expect(repo.updateSwingStatus).not.toHaveBeenCalled();
+    expect(reinvest.onSwingTargetHit).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('unmonitored — no fresh price'));
+    warnSpy.mockRestore();
   });
 
   it('skips token not found in ltp map', async () => {

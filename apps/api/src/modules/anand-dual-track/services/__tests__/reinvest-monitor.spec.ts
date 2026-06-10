@@ -8,7 +8,10 @@ describe('checkReinvestmentLots', () => {
       resolveTokens: jest.fn(async () => new Map([['TCS', 't1']])),
     };
     const adapter = { getLtpsBatch: jest.fn(async () => new Map([['t1', 111]])) };
-    const svc = new AnandPriceMonitorService(repo as any, adapter as any, reinvest as any);
+    const exitPrice = {
+      resolveExitPrices: jest.fn(async () => new Map([['t1', { price: 111, fresh: true, source: 'rest-batch' as const }]])),
+    };
+    const svc = new AnandPriceMonitorService(repo as any, adapter as any, reinvest as any, exitPrice as any);
     await (svc as any).checkReinvestmentLots();
     expect(reinvest.closeLot).toHaveBeenCalledWith(
       { id: 'lot1', capital: 20000, entryPrice: 100 }, 111, 'TARGET_HIT',
