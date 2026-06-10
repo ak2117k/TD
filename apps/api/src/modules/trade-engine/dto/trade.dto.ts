@@ -105,6 +105,14 @@ export class ExecuteTradeDto {
   @IsOptional()
   @IsString()
   strategy?: string;
+
+  /** Per-order paper/live override. When omitted, execution falls back to the
+   *  global `settings.paperTrading` (which defaults to paper). An explicit
+   *  `false` is the ONLY way to route a single order live — a missing flag
+   *  must NEVER default to live. */
+  @IsOptional()
+  @IsBoolean()
+  isPaper?: boolean;
 }
 
 export class ModifyTradeDto {

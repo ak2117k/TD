@@ -167,6 +167,16 @@ export interface TradeSignal {
   reason: string;
   timeframe: string;
   createdAt: Date;
+  /**
+   * Lifecycle flag set by the backend. A signal is created with
+   * `isActive: true`; a sweep flips it to `false` once its session-aware
+   * `expiresAt` passes (and emits a `signal-expired` ws event). The
+   * /signals/active endpoint still returns recently-expired rows carrying
+   * this flag so the UI can fade them rather than drop them. Optional to
+   * match the backend DTO and tolerate constructors that omit it (absent
+   * is treated as expired).
+   */
+  isActive?: boolean;
 }
 
 // ---- Orders & Positions ----

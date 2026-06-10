@@ -91,7 +91,10 @@ export class TradeExecutionService {
 
     // ---- STEP 2: Determine paper vs. real trading mode ----
     const settings = await this.settingsService.getSettings();
-    const isPaperTrade = settings.paperTrading;
+    // Paper-safe default: an explicit per-order flag wins, but a MISSING flag
+    // falls back to the global setting (which defaults to paper). A missing
+    // flag must NEVER route live — never invert this nullish-coalescing.
+    const isPaperTrade = request.isPaper ?? settings.paperTrading;
 
     // ---- STEP 3: Resolve instrument ID for the trade record ----
     const instrumentId = await this.tradeRepository.findInstrumentId(

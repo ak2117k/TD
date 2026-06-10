@@ -114,25 +114,6 @@ function getHistoryRangeDays(timeframe: string): number {
   return map[timeframe] ?? 15;
 }
 
-/**
- * Default-visible bar count per timeframe. The chart fetches `getHistoryRangeDays`
- * worth of data but initially zooms to show only the latest N bars below.
- * User can scroll/zoom out to see older bars without another fetch.
- */
-function getDefaultVisibleBars(timeframe: string): number {
-  const map: Record<string, number> = {
-    '1m': 100,
-    '5m': 80,
-    '15m': 100,  // ~3-4 trading days at default
-    '30m': 80,
-    '1h': 100,
-    '4h': 80,
-    '1d': 100,
-    '1w': 60,
-  };
-  return map[timeframe] ?? 100;
-}
-
 function candleToChart(c: Candle): ChartCandle {
   const ts = new Date(c.timestamp).getTime() / 1000;
   return {

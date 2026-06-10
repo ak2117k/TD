@@ -10,6 +10,7 @@ import SignalsPage from '@/pages/signals/SignalsPage';
 import RejectionsPage from '@/pages/signals/RejectionsPage';
 import ChartinkPage from '@/pages/chartink/ChartinkPage';
 import AutoTradePage from '@/pages/auto-trade/AutoTradePage';
+import ManualTradePage from '@/pages/manual-trade/ManualTradePage';
 import PositionsPage from '@/pages/positions/PositionsPage';
 import NewsPage from '@/pages/news/NewsPage';
 import JournalPage from '@/pages/journal/JournalPage';
@@ -53,6 +54,7 @@ export default function App() {
         <Route path="swing" element={<SwingPage />} />
         <Route path="reinvest" element={<ReinvestPage />} />
         <Route path="auto-trade" element={<AutoTradePage />} />
+        <Route path="manual-trade" element={<ManualTradePage />} />
         <Route path="positions" element={<PositionsPage />} />
         <Route path="news" element={<NewsPage />} />
         <Route path="journal" element={<JournalPage />} />
