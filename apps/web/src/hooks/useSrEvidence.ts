@@ -19,6 +19,7 @@ const POLL_INTERVAL_MS = 60_000;
 export function useSrEvidence(
   token: string | null,
   exchange: string | null,
+  timeframe: string | null,
 ): UseSrEvidenceReturn {
   const [evidence, setEvidence] = useState<EvidenceLevel[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -38,7 +39,7 @@ export function useSrEvidence(
     setIsLoading(true);
     try {
       const response = await api.get('/signals/sr-evidence', {
-        params: { token, exchange },
+        params: { token, exchange, interval: timeframe ?? '15m' },
         signal: controller.signal,
       });
       const payload = response.data;
@@ -57,7 +58,7 @@ export function useSrEvidence(
     } finally {
       if (abortRef.current === controller) setIsLoading(false);
     }
-  }, [token, exchange]);
+  }, [token, exchange, timeframe]);
 
   useEffect(() => {
     if (!token || !exchange) {
@@ -73,7 +74,7 @@ export function useSrEvidence(
       abortRef.current?.abort();
       abortRef.current = null;
     };
-  }, [fetchEvidence, token, exchange]);
+  }, [fetchEvidence, token, exchange, timeframe]);
 
   return { evidence, isLoading, error, refetch: fetchEvidence };
 }

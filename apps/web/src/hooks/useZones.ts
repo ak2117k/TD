@@ -30,6 +30,7 @@ const POLL_INTERVAL_MS = 60_000;
 export function useZones(
   token: string | null,
   exchange: string | null,
+  timeframe: string | null,
 ): UseZonesReturn {
   const [zones, setZones] = useState<StrongZone[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -53,7 +54,7 @@ export function useZones(
     setIsLoading(true);
     try {
       const response = await api.get('/signals/zones', {
-        params: { token, exchange },
+        params: { token, exchange, interval: timeframe ?? '15m' },
         signal: controller.signal,
       });
       // Defensive unwrap — backend may wrap or return bare array.
@@ -84,7 +85,7 @@ export function useZones(
         setIsLoading(false);
       }
     }
-  }, [token, exchange]);
+  }, [token, exchange, timeframe]);
 
   useEffect(() => {
     // Reset zones immediately when inputs change so a stale chart overlay
@@ -104,7 +105,7 @@ export function useZones(
       abortRef.current?.abort();
       abortRef.current = null;
     };
-  }, [fetchZones, token, exchange]);
+  }, [fetchZones, token, exchange, timeframe]);
 
   return { zones, isLoading, error, refetch: fetchZones };
 }
