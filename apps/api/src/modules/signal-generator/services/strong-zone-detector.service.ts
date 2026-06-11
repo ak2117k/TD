@@ -20,6 +20,14 @@ export interface DetectZonesInput {
   ltp: number;
   /** 14-period ATR (daily preferred, but any consistent ATR works). */
   atr14: number;
+  /**
+   * Working timeframe for cache keying only (default treated as '15m').
+   * Bar-count windows are timeframe-relative, so the compute math is
+   * unchanged — `candles15m` may hold per-TF candles for the chart path.
+   * Lets the chart cache non-15m zones without colliding with the
+   * trading-path 15m entry under the same token.
+   */
+  interval?: string;
 }
 
 /** Internal raw pivot before clustering. */
@@ -101,14 +109,15 @@ export class StrongZoneDetectorService {
    * {@link invalidateCache}.
    */
   detectZones(input: DetectZonesInput): StrongZone[] {
-    const cached = this.cache.get(input.token);
+    const cacheKey = `${input.token}:${input.interval ?? '15m'}`;
+    const cached = this.cache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
       return cached.zones;
     }
 
     const zones = this.compute(input);
 
-    this.cache.set(input.token, {
+    this.cache.set(cacheKey, {
       computedAt: Date.now(),
       expiresAt: Date.now() + CACHE_TTL_MS,
       zones,
@@ -117,9 +126,17 @@ export class StrongZoneDetectorService {
     return zones;
   }
 
-  /** Force the next detectZones() to recompute. Called when a new 15m bar closes. */
+  /**
+   * Force the next detectZones() to recompute. Called when a new 15m bar
+   * closes. Clears ALL interval-keyed entries for the token (`${token}:*`)
+   * so the scanner's 15m invalidation still works after the cache key
+   * gained an interval suffix.
+   */
   invalidateCache(token: string): void {
-    this.cache.delete(token);
+    const prefix = `${token}:`;
+    for (const key of this.cache.keys()) {
+      if (key.startsWith(prefix)) this.cache.delete(key);
+    }
   }
 
   /** Test/admin helper — clear everything. */

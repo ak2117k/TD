@@ -631,3 +631,98 @@ describe('StrongZoneDetectorService — swap zone detection', () => {
     expect(flipped!.classification).toBe('MEDIUM');
   });
 });
+
+describe('StrongZoneDetectorService — interval-aware cache key', () => {
+  let svc: StrongZoneDetectorService;
+
+  beforeEach(() => {
+    svc = new StrongZoneDetectorService();
+  });
+
+  // Build a series whose pivot price differs so we can prove which candle
+  // set was actually computed (the cached entry returns the price baked in
+  // at first compute).
+  function seriesWithResistance(price: number): CandleData[] {
+    const candles = flatSeries(60, 99, 101);
+    injectPivot(candles, 10, 'high', price);
+    injectPivot(candles, 25, 'high', price);
+    return candles;
+  }
+
+  it('does not share a cache entry across intervals for the same token', () => {
+    const z15 = svc.detectZones({
+      token: 'TKN', symbol: 'X', exchange: 'NSE',
+      candles15m: seriesWithResistance(110), ltp: 100, atr14: 5,
+      interval: '15m',
+    });
+    // Same token, different interval, DIFFERENT pivot price. If the cache
+    // collided on token alone this would return the 15m zones (110).
+    const z5 = svc.detectZones({
+      token: 'TKN', symbol: 'X', exchange: 'NSE',
+      candles15m: seriesWithResistance(120), ltp: 100, atr14: 5,
+      interval: '5m',
+    });
+    const r15 = z15.find((z) => z.type === 'resistance')!;
+    const r5 = z5.find((z) => z.type === 'resistance')!;
+    expect(r15.upper).toBeCloseTo(110, 1);
+    expect(r5.upper).toBeCloseTo(120, 1); // recomputed, not the cached 110
+  });
+
+  it('no interval behaves as 15m (cache shared with explicit 15m)', () => {
+    // First call with NO interval primes the token:15m entry with price 110.
+    svc.detectZones({
+      token: 'DEF', symbol: 'X', exchange: 'NSE',
+      candles15m: seriesWithResistance(110), ltp: 100, atr14: 5,
+    });
+    // Second call WITH interval '15m' but a different price must hit the
+    // cached entry (proving no-interval == '15m'): returns 110, not 130.
+    const z = svc.detectZones({
+      token: 'DEF', symbol: 'X', exchange: 'NSE',
+      candles15m: seriesWithResistance(130), ltp: 100, atr14: 5,
+      interval: '15m',
+    });
+    const r = z.find((z) => z.type === 'resistance')!;
+    expect(r.upper).toBeCloseTo(110, 1);
+  });
+
+  it('invalidateCache(token) clears the token:15m entry (recompute on next call)', () => {
+    svc.detectZones({
+      token: 'INV', symbol: 'X', exchange: 'NSE',
+      candles15m: seriesWithResistance(110), ltp: 100, atr14: 5,
+    });
+    svc.invalidateCache('INV');
+    const z = svc.detectZones({
+      token: 'INV', symbol: 'X', exchange: 'NSE',
+      candles15m: seriesWithResistance(130), ltp: 100, atr14: 5,
+    });
+    const r = z.find((z) => z.type === 'resistance')!;
+    expect(r.upper).toBeCloseTo(130, 1); // recomputed after invalidation
+  });
+
+  it('invalidateCache(token) clears ALL interval keys for the token', () => {
+    svc.detectZones({
+      token: 'MULTI', symbol: 'X', exchange: 'NSE',
+      candles15m: seriesWithResistance(110), ltp: 100, atr14: 5,
+      interval: '15m',
+    });
+    svc.detectZones({
+      token: 'MULTI', symbol: 'X', exchange: 'NSE',
+      candles15m: seriesWithResistance(120), ltp: 100, atr14: 5,
+      interval: '5m',
+    });
+    svc.invalidateCache('MULTI');
+    // Both keys must have been cleared → both recompute with new prices.
+    const z15 = svc.detectZones({
+      token: 'MULTI', symbol: 'X', exchange: 'NSE',
+      candles15m: seriesWithResistance(140), ltp: 100, atr14: 5,
+      interval: '15m',
+    });
+    const z5 = svc.detectZones({
+      token: 'MULTI', symbol: 'X', exchange: 'NSE',
+      candles15m: seriesWithResistance(150), ltp: 100, atr14: 5,
+      interval: '5m',
+    });
+    expect(z15.find((z) => z.type === 'resistance')!.upper).toBeCloseTo(140, 1);
+    expect(z5.find((z) => z.type === 'resistance')!.upper).toBeCloseTo(150, 1);
+  });
+});
