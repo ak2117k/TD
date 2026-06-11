@@ -27,6 +27,8 @@ import { LevelBookService } from '../services/level-book.service';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { SrEvidenceService } from '../services/sr-evidence.service';
+import { isIntradayInterval, lookbackDaysFor } from '../services/timeframe-lookback';
+import { computeAtrFromCandles } from '../services/per-tf-atr';
 
 @Controller('api/signals')
 export class SignalGeneratorController {
@@ -101,15 +103,16 @@ export class SignalGeneratorController {
    * starves the DB-by-instrumentId path. Returns [] when the adapter is
    * unwired or the fetch fails/throttles, so the caller can fall back to DB.
    */
-  private async fetchLiveCandles15m(
+  private async fetchLiveCandles(
     token: string,
     exchange: string,
+    interval: string,
     from: Date,
     to: Date,
   ): Promise<Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>> {
     if (!this.angelOneAdapter) return [];
     try {
-      const live = await this.angelOneAdapter.getHistoricalData(token, exchange, '15m', from, to);
+      const live = await this.angelOneAdapter.getHistoricalData(token, exchange, interval, from, to);
       return (live ?? []).map((c: any) => ({
         timestamp: c.timestamp,
         open: c.open,
@@ -149,18 +152,29 @@ export class SignalGeneratorController {
     @Query('token') token: string,
     @Query('exchange') exchange?: string,
     @Query('symbol') symbol?: string,
+    @Query('interval') interval?: string,
   ) {
     if (!token) {
       throw new BadRequestException('token is required');
     }
-    if (!this.zoneRepository) return [];
+    // Validate interval against the intraday set; anything else (1d, bogus,
+    // omitted) collapses to the proven 15m path.
+    const tf = isIntradayInterval(interval ?? '') ? interval! : '15m';
+    const isFifteen = tf === '15m';
 
-    // Cache hit — done.
-    const cached = await this.zoneRepository.findActiveByToken(token);
-    if (cached.length > 0) return cached;
+    // The 15m path is the only one allowed to touch the shared zone DB.
+    // Non-15m (chart-only) computes in-memory and NEVER reads/writes it.
+    if (isFifteen) {
+      if (!this.zoneRepository) return [];
 
-    // Cache miss — try to compute inline. All deps optional so an
-    // unwired test container still returns []; production has them.
+      // Cache hit — done.
+      const cached = await this.zoneRepository.findActiveByToken(token);
+      if (cached.length > 0) return cached;
+    }
+
+    // Cache miss (15m) or chart-only path (non-15m) — compute inline. All
+    // deps optional so an unwired test container still returns []; production
+    // has them.
     if (!this.strongZoneDetector || !this.levelBookService || !this.marketDataRepository) {
       return [];
     }
@@ -188,18 +202,20 @@ export class SignalGeneratorController {
       if (!book) return [];
 
       const now = new Date();
-      const tenDaysAgo = new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000);
+      const lookbackMs = lookbackDaysFor(tf) * 24 * 60 * 60 * 1000;
+      const from = new Date(now.getTime() - lookbackMs);
 
-      // Prefer LIVE 15m candles (token-based) — robust to duplicate instrument
-      // rows that split candle history and starve the DB-by-instrumentId path.
-      // Fall back to the DB only when the live fetch is unavailable (throttle /
-      // offline) so indices with seeded DB candles still produce zones.
-      let candles15m = await this.fetchLiveCandles15m(token, resolvedExchange, tenDaysAgo, now);
-      if (candles15m.length < 10 && resolvedInstrument) {
+      // Prefer LIVE candles at the selected interval (token-based) — robust to
+      // duplicate instrument rows that split candle history and starve the
+      // DB-by-instrumentId path. Fall back to the DB only when the live fetch
+      // is unavailable (throttle / offline) so indices with seeded DB candles
+      // still produce zones.
+      let candles = await this.fetchLiveCandles(token, resolvedExchange, tf, from, now);
+      if (candles.length < 10 && resolvedInstrument) {
         const rows = await this.marketDataRepository.getCandles(
-          resolvedInstrument.id, '15m', tenDaysAgo, now, 200,
+          resolvedInstrument.id, tf, from, now, 200,
         );
-        candles15m = rows.map((r) => ({
+        candles = rows.map((r) => ({
           timestamp: r.timestamp,
           open: r.open,
           high: r.high,
@@ -209,25 +225,35 @@ export class SignalGeneratorController {
         }));
       }
 
-      if (candles15m.length < 10) return [];
+      if (candles.length < 10) return [];
+
+      // 15m keeps the daily book ATR (frozen). Non-15m derives a per-TF ATR
+      // from the selected-interval candles, falling back to the book ATR.
+      const atr14 = isFifteen
+        ? book.atr14
+        : computeAtrFromCandles(candles, 14) || book.atr14;
 
       const zones = this.strongZoneDetector.detectZones({
         token,
         symbol: resolvedSymbol,
         exchange: resolvedExchange,
-        candles15m,
+        candles15m: candles,
         levelBook: book,
         ltp: book.spot,
-        atr14: book.atr14,
+        atr14,
+        interval: tf,
       });
 
-      // Best-effort persist so the next call hits the cache.
-      try {
-        await this.zoneRepository.upsertMany(token, zones);
-      } catch (err) {
-        this.logger.warn(
-          `getZones: persist failed for ${token}: ${err instanceof Error ? err.message : err}`,
-        );
+      // Persist ONLY on the 15m path — the chart-only non-15m path must never
+      // pollute the shared zone DB the scanner reads.
+      if (isFifteen && this.zoneRepository) {
+        try {
+          await this.zoneRepository.upsertMany(token, zones);
+        } catch (err) {
+          this.logger.warn(
+            `getZones: persist failed for ${token}: ${err instanceof Error ? err.message : err}`,
+          );
+        }
       }
 
       return zones;
@@ -249,9 +275,12 @@ export class SignalGeneratorController {
     @Query('token') token: string,
     @Query('exchange') exchange?: string,
     @Query('symbol') symbol?: string,
+    @Query('interval') interval?: string,
   ) {
     if (!token) throw new BadRequestException('token is required');
     if (!this.srEvidenceService) return [];
+    // Validate against the intraday set; anything else falls back to 15m.
+    const tf = isIntradayInterval(interval ?? '') ? interval! : '15m';
     let resolvedSymbol = symbol;
     let resolvedExchange = exchange ?? 'NSE';
     if (!resolvedSymbol && this.marketDataRepository) {
@@ -263,7 +292,7 @@ export class SignalGeneratorController {
         /* fall through — service handles missing symbol */
       }
     }
-    return this.srEvidenceService.levelsFor(token, resolvedExchange, resolvedSymbol ?? '');
+    return this.srEvidenceService.levelsFor(token, resolvedExchange, resolvedSymbol ?? '', tf);
   }
 
   /**

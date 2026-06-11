@@ -56,4 +56,65 @@ describe('SrEvidenceService', () => {
     const levels = await s.levelsFor('99926000', 'NSE', 'NIFTY');
     expect(levels.some((l) => l.kinds.includes('OI_CALL'))).toBe(true);
   });
+
+  // ── Regression guard: 15m path is FROZEN ────────────────────────
+
+  it('regression: no interval ⇒ fetches 5m candles, uses book.atr14, uses DB pivots', async () => {
+    const adapter = { getHistoricalData: jest.fn().mockResolvedValue(candles) };
+    const zoneRepo = { findActiveByToken: jest.fn().mockResolvedValue([]) };
+    const s = build({ angelOneAdapter: adapter, zoneRepository: zoneRepo });
+    await s.levelsFor('18520', 'NSE', 'CUPID');
+    // Candle fetch is at 5m over the proven 10-day window.
+    expect(adapter.getHistoricalData).toHaveBeenCalledWith('18520', 'NSE', '5m', expect.any(Date), expect.any(Date));
+    // HISTORY comes from the DB-stored zones (frozen path).
+    expect(zoneRepo.findActiveByToken).toHaveBeenCalledWith('18520');
+  });
+
+  it("regression: explicit interval='15m' behaves identically to no interval", async () => {
+    const adapter = { getHistoricalData: jest.fn().mockResolvedValue(candles) };
+    const zoneRepo = { findActiveByToken: jest.fn().mockResolvedValue([]) };
+    const s = build({ angelOneAdapter: adapter, zoneRepository: zoneRepo });
+    await s.levelsFor('18520', 'NSE', 'CUPID', '15m');
+    expect(adapter.getHistoricalData).toHaveBeenCalledWith('18520', 'NSE', '5m', expect.any(Date), expect.any(Date));
+    expect(zoneRepo.findActiveByToken).toHaveBeenCalledWith('18520');
+  });
+
+  // ── Native non-15m path ─────────────────────────────────────────
+
+  it("interval='5m' ⇒ fetches 5m candles natively and does NOT read the zone DB", async () => {
+    const adapter = { getHistoricalData: jest.fn().mockResolvedValue(candles) };
+    const zoneRepo = { findActiveByToken: jest.fn().mockResolvedValue([]) };
+    const s = build({ angelOneAdapter: adapter, zoneRepository: zoneRepo });
+    await s.levelsFor('18520', 'NSE', 'CUPID', '5m');
+    expect(adapter.getHistoricalData).toHaveBeenCalledWith('18520', 'NSE', '5m', expect.any(Date), expect.any(Date));
+    // Native path derives HISTORY from swing pivots, never the shared DB.
+    expect(zoneRepo.findActiveByToken).not.toHaveBeenCalled();
+  });
+
+  it("interval='1m' ⇒ fetches 1m candles with the 1-day lookback window", async () => {
+    const adapter = { getHistoricalData: jest.fn().mockResolvedValue(candles) };
+    const s = build({ angelOneAdapter: adapter });
+    await s.levelsFor('18520', 'NSE', 'CUPID', '1m');
+    const call = adapter.getHistoricalData.mock.calls[0];
+    expect(call[2]).toBe('1m');
+    const from = call[3] as Date;
+    const to = call[4] as Date;
+    const days = (to.getTime() - from.getTime()) / (24 * 60 * 60 * 1000);
+    expect(days).toBeCloseTo(1, 1); // 1-day lookback for 1m
+  });
+
+  it('caches per interval — no cross-timeframe collision', async () => {
+    const adapter = { getHistoricalData: jest.fn().mockResolvedValue(candles) };
+    const s = build({ angelOneAdapter: adapter });
+    await s.levelsFor('18520', 'NSE', 'CUPID', '5m');
+    await s.levelsFor('18520', 'NSE', 'CUPID', '1m');
+    // Different interval keys ⇒ both recompute ⇒ two fetches with distinct intervals.
+    const intervals = adapter.getHistoricalData.mock.calls.map((c) => c[2]);
+    expect(intervals).toContain('5m');
+    expect(intervals).toContain('1m');
+    // A repeat of the same interval hits the cache (no extra fetch).
+    adapter.getHistoricalData.mockClear();
+    await s.levelsFor('18520', 'NSE', 'CUPID', '5m');
+    expect(adapter.getHistoricalData).not.toHaveBeenCalled();
+  });
 });

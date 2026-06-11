@@ -7,6 +7,9 @@ import { OiWallService } from './oi-wall.service';
 import { computeVolumeNodes, type ProfileCandle } from './volume-profile';
 import { adaptiveRoundNumbers, adaptiveRoundStep, roundScore } from './adaptive-round-numbers';
 import { scoreAndCluster } from './sr-evidence-scoring';
+import { lookbackDaysFor } from './timeframe-lookback';
+import { computeAtrFromCandles } from './per-tf-atr';
+import { detectSwingPivots } from './swing-pivots';
 import type { EvidenceLevel, LevelCandidate } from '../types/evidence-level.types';
 
 interface CacheEntry { at: number; levels: EvidenceLevel[]; }
@@ -31,9 +34,26 @@ export class SrEvidenceService {
     @Optional() private readonly oiWallService?: OiWallService,
   ) {}
 
-  async levelsFor(token: string, exchange: string, symbol: string): Promise<EvidenceLevel[]> {
+  /**
+   * Evidence-weighted S/R levels for a token. `interval` selects the branch:
+   *
+   * - `'15m'` (default — the trading/chart 15m path) is FROZEN: it computes
+   *   the overlay from 5m candles + the daily `book.atr14` + the DB-stored
+   *   15m zone pivots, byte-for-byte as before. Trading callers omit the
+   *   arg and execute this path unchanged.
+   * - any other intraday interval gets a NATIVE per-timeframe path: candles
+   *   are fetched at that interval (per-TF lookback), the ATR is computed
+   *   from those candles, and HISTORY candidates come from swing pivots in
+   *   the same candles — never touching the shared 15m zone DB.
+   */
+  async levelsFor(
+    token: string,
+    exchange: string,
+    symbol: string,
+    interval: string = '15m',
+  ): Promise<EvidenceLevel[]> {
     if (!token || !this.levelBookService) return [];
-    const cacheKey = `${token}:${exchange}`;
+    const cacheKey = `${token}:${exchange}:${interval}`;
     const cached = this.cache.get(cacheKey);
     if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.levels;
 
@@ -41,15 +61,24 @@ export class SrEvidenceService {
       const book = await this.levelBookService.lazyLoad(token, exchange, symbol);
       if (!book) return [];
       const ltp = book.spot;
-      const atr14 = book.atr14;
       if (!(ltp > 0)) return [];
 
-      const candles5m = await this.fetch5mCandles(token, exchange);
-      const volNodes = computeVolumeNodes(candles5m, atr14, ltp);
+      const isFifteen = interval === '15m';
+
+      // Candle source + ATR unit differ by branch. 15m keeps the proven
+      // 5m-candles + daily-ATR basis; non-15m uses native per-TF candles
+      // and a per-TF ATR (falling back to the daily ATR only if zero).
+      const candles = isFifteen
+        ? await this.fetchCandles(token, exchange, '5m', 10)
+        : await this.fetchCandles(token, exchange, interval, lookbackDaysFor(interval));
+      const atr14 = isFifteen
+        ? book.atr14
+        : computeAtrFromCandles(candles, 14) || book.atr14;
+
+      const volNodes = computeVolumeNodes(candles, atr14, ltp);
       const step = adaptiveRoundStep(ltp);
       const roundGrid = adaptiveRoundNumbers(ltp);
       const oiWalls = this.oiWallService ? await this.oiWallService.walls(symbol, ltp) : [];
-      const pivots = this.zoneRepository ? await this.zoneRepository.findActiveByToken(token) : [];
 
       const candidates: LevelCandidate[] = [];
       for (const n of volNodes) candidates.push({ price: n.price, kind: 'VOLUME', score: n.score });
@@ -58,9 +87,21 @@ export class SrEvidenceService {
         if (rs > 0) candidates.push({ price: r, kind: 'ROUND', score: rs });
       }
       for (const w of oiWalls) candidates.push(w);
-      for (const p of pivots as any[]) {
-        const edge = p.type === 'resistance' ? p.lower : p.upper;
-        candidates.push({ price: edge, kind: 'HISTORY', score: 25 * ((p.strength ?? 0) / 100) });
+
+      if (isFifteen) {
+        // FROZEN 15m path — HISTORY from the DB-stored 15m zones.
+        const pivots = this.zoneRepository ? await this.zoneRepository.findActiveByToken(token) : [];
+        for (const p of pivots as any[]) {
+          const edge = p.type === 'resistance' ? p.lower : p.upper;
+          candidates.push({ price: edge, kind: 'HISTORY', score: 25 * ((p.strength ?? 0) / 100) });
+        }
+      } else {
+        // NATIVE non-15m path — HISTORY from swing pivots in the per-TF
+        // candles. Fixed score 25 (no DB strength available); never reads
+        // the shared zone DB.
+        for (const piv of detectSwingPivots(candles)) {
+          candidates.push({ price: piv.price, kind: 'HISTORY', score: 25 });
+        }
       }
 
       const levels = scoreAndCluster(candidates, ltp, atr14, { softRoundGrid: roundGrid });
@@ -72,24 +113,33 @@ export class SrEvidenceService {
     }
   }
 
-  /** Live 5m candles (last 10 days) via the adapter; DB fallback. */
-  private async fetch5mCandles(token: string, exchange: string): Promise<ProfileCandle[]> {
+  /**
+   * Live candles at the given interval over the last `lookbackDays` via the
+   * adapter; DB fallback. Generalises the old hardcoded-5m fetch — the 15m
+   * branch passes `'5m'`/10 to keep its proven basis identical.
+   */
+  private async fetchCandles(
+    token: string,
+    exchange: string,
+    interval: string,
+    lookbackDays: number,
+  ): Promise<ProfileCandle[]> {
     const now = new Date();
-    const from = new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000);
+    const from = new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
     if (this.angelOneAdapter) {
       try {
-        const live = await this.angelOneAdapter.getHistoricalData(token, exchange, '5m', from, now);
+        const live = await this.angelOneAdapter.getHistoricalData(token, exchange, interval, from, now);
         if (Array.isArray(live) && live.length >= 10) {
           return live.map((c: any) => ({ high: c.high, low: c.low, close: c.close, volume: Number(c.volume) }));
         }
       } catch (err) {
-        this.logger.debug(`SrEvidence live 5m fetch failed for ${token}: ${err instanceof Error ? err.message : err}`);
+        this.logger.debug(`SrEvidence live ${interval} fetch failed for ${token}: ${err instanceof Error ? err.message : err}`);
       }
     }
     if (this.marketDataRepository) {
       const inst = await this.marketDataRepository.getInstrumentByToken(token);
       if (inst) {
-        const rows = await this.marketDataRepository.getCandles(inst.id, '5m', from, now, 800);
+        const rows = await this.marketDataRepository.getCandles(inst.id, interval, from, now, 800);
         return rows.map((r: any) => ({ high: r.high, low: r.low, close: r.close, volume: Number(r.volume) }));
       }
     }
