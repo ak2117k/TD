@@ -7,6 +7,16 @@ import { AutoTradeMode } from '@/types';
 import api from '@/services/api';
 import { Search, AlertTriangle, Loader2, ShieldAlert } from 'lucide-react';
 import ConfirmLiveTradeModal, { type LiveTradeSummary } from './ConfirmLiveTradeModal';
+import { useInstrumentQuote } from '@/hooks/useInstrumentQuote';
+import {
+  estimatedValue as calcOrderValue,
+  maxAffordable,
+  riskReward,
+} from './order-ticket/order-math';
+import PriceHeader from './order-ticket/PriceHeader';
+import CapitalStrip from './order-ticket/CapitalStrip';
+import RiskRewardBar from './order-ticket/RiskRewardBar';
+import QuantityField from './order-ticket/QuantityField';
 
 export interface OrderTicketProps {
   /** Called after a successful submit (paper) or confirmed live submit. */
@@ -49,7 +59,6 @@ export default function OrderTicket({
   const [positionType, setPositionType] = useState<PositionType>(PositionType.INTRADAY);
   const [stoploss, setStoploss] = useState<string>('');
   const [target, setTarget] = useState<string>('');
-  const [ltp, setLtp] = useState<number>(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [searchTimer, setSearchTimer] = useState<ReturnType<typeof setTimeout> | null>(null);
   // M5: capture trader rationale + tag chips at entry so the journal
@@ -64,10 +73,27 @@ export default function OrderTicket({
   const needsPrice = orderType === OrderType.LIMIT || orderType === OrderType.STOPLOSS;
   const needsTrigger = orderType === OrderType.STOPLOSS || orderType === OrderType.STOPLOSS_MARKET;
 
-  const estimatedValue = quantity * (needsPrice ? price : ltp);
-  const riskPercent = riskStatus.capitalLimit > 0
-    ? ((riskStatus.capitalDeployed + estimatedValue) / riskStatus.capitalLimit) * 100
-    : 0;
+  // Live quote for the selected instrument (polls every 3s; unwraps the
+  // /instruments/:token/quote envelope). Replaces the old dead /ltp/:sym call.
+  const quote = useInstrumentQuote(
+    selectedInstrument?.token ?? null,
+    selectedInstrument?.exchange ?? null,
+  );
+  const ltp = quote.ltp;
+
+  // MARKET orders fill at LTP; LIMIT/SL use the entered price.
+  const entryPrice = needsPrice ? price : ltp;
+  const estimatedValue = calcOrderValue(quantity, entryPrice);
+  const remainingCapital = Math.max(0, riskStatus.capitalLimit - riskStatus.capitalDeployed);
+  const affordableQty = maxAffordable(remainingCapital, entryPrice);
+  const rr = riskReward({
+    entry: entryPrice,
+    sl: stoploss ? Number(stoploss) : undefined,
+    target: target ? Number(target) : undefined,
+    qty: quantity,
+    side,
+  });
+  const showRiskReward = Boolean(stoploss || target);
 
   // Search instruments
   const searchInstruments = useCallback(async (query: string) => {
@@ -103,17 +129,7 @@ export default function OrderTicket({
     setSelectedInstrument(instrument);
     setShowSuggestions(false);
     setSuggestions([]);
-    // Fetch LTP
-    fetchLTP(instrument.symbol);
-  };
-
-  const fetchLTP = async (sym: string) => {
-    try {
-      const { data } = await api.get<{ ltp: number }>(`/market-data/ltp/${sym}`);
-      setLtp(data.ltp);
-    } catch {
-      setLtp(0);
-    }
+    // LTP now flows from useInstrumentQuote once selectedInstrument.token is set.
   };
 
   // Pre-fill the symbol search from initialSymbol and trigger instrument search
@@ -146,7 +162,6 @@ export default function OrderTicket({
     setPositionType(PositionType.INTRADAY);
     setStoploss('');
     setTarget('');
-    setLtp(0);
     setEntryReason('');
     setEntryTags([]);
   };
@@ -283,14 +298,20 @@ export default function OrderTicket({
             ))}
           </div>
         )}
-        {ltp > 0 && selectedInstrument && (
-          <div className="mt-1 text-xs text-gray-400">
-            LTP: <span className="text-[var(--color-text-primary)] font-medium">
-              {ltp.toLocaleString('en-IN', { style: 'currency', currency: 'INR' })}
-            </span>
-          </div>
-        )}
       </div>
+
+      {/* Live price header */}
+      {selectedInstrument && (
+        <PriceHeader
+          ltp={ltp}
+          change={quote.change}
+          changePct={quote.changePct}
+          high={quote.high}
+          low={quote.low}
+          open={quote.open}
+          loading={quote.loading}
+        />
+      )}
 
       {/* Side toggle */}
       <div>
@@ -330,18 +351,14 @@ export default function OrderTicket({
         </select>
       </div>
 
-      {/* Quantity + Price row */}
+      {/* Quantity */}
+      <div>
+        <label className="block text-xs font-medium text-gray-400 mb-1">Quantity</label>
+        <QuantityField value={quantity} onChange={setQuantity} />
+      </div>
+
+      {/* Price + Trigger row */}
       <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className="block text-xs font-medium text-gray-400 mb-1">Quantity</label>
-          <input
-            type="number"
-            min={1}
-            value={quantity}
-            onChange={(e) => setQuantity(Math.max(1, parseInt(e.target.value) || 1))}
-            className="w-full rounded-md border border-gray-700 bg-gray-800 py-2 px-3 text-sm text-gray-100 outline-none focus:border-blue-500"
-          />
-        </div>
         <div>
           <label className="block text-xs font-medium text-gray-400 mb-1">
             Price {!needsPrice && <span className="text-gray-600">(N/A)</span>}
@@ -359,25 +376,23 @@ export default function OrderTicket({
             )}
           />
         </div>
-      </div>
-
-      {/* Trigger price */}
-      <div>
-        <label className="block text-xs font-medium text-gray-400 mb-1">
-          Trigger Price {!needsTrigger && <span className="text-gray-600">(N/A)</span>}
-        </label>
-        <input
-          type="number"
-          min={0}
-          step={0.05}
-          value={triggerPrice}
-          onChange={(e) => setTriggerPrice(parseFloat(e.target.value) || 0)}
-          disabled={!needsTrigger}
-          className={cn(
-            'w-full rounded-md border border-gray-700 bg-gray-800 py-2 px-3 text-sm text-gray-100 outline-none focus:border-blue-500',
-            !needsTrigger && 'opacity-40 cursor-not-allowed',
-          )}
-        />
+        <div>
+          <label className="block text-xs font-medium text-gray-400 mb-1">
+            Trigger {!needsTrigger && <span className="text-gray-600">(N/A)</span>}
+          </label>
+          <input
+            type="number"
+            min={0}
+            step={0.05}
+            value={triggerPrice}
+            onChange={(e) => setTriggerPrice(parseFloat(e.target.value) || 0)}
+            disabled={!needsTrigger}
+            className={cn(
+              'w-full rounded-md border border-gray-700 bg-gray-800 py-2 px-3 text-sm text-gray-100 outline-none focus:border-blue-500',
+              !needsTrigger && 'opacity-40 cursor-not-allowed',
+            )}
+          />
+        </div>
       </div>
 
       {/* Position type toggle */}
@@ -469,21 +484,24 @@ export default function OrderTicket({
         </div>
       </div>
 
-      {/* Estimated value + Risk */}
-      <div className="rounded-md bg-gray-800/80 border border-gray-700/50 px-3 py-2 space-y-1">
-        <div className="flex items-center justify-between text-xs">
-          <span className="text-gray-400">Estimated Order Value</span>
-          <span className="text-[var(--color-text-primary)] font-medium">
-            {estimatedValue.toLocaleString('en-IN', { style: 'currency', currency: 'INR' })}
-          </span>
-        </div>
-        {riskPercent > 80 && (
-          <div className="flex items-center gap-1 text-xs text-amber-400">
-            <AlertTriangle size={12} />
-            Capital usage will exceed 80% of limit
-          </div>
-        )}
-      </div>
+      {/* Capital usage + affordability */}
+      <CapitalStrip
+        orderValue={estimatedValue}
+        capitalLimit={riskStatus.capitalLimit}
+        capitalDeployed={riskStatus.capitalDeployed}
+        maxAffordable={affordableQty}
+      />
+
+      {/* Risk / reward (only when SL or target is set) */}
+      {showRiskReward && (
+        <RiskRewardBar
+          riskAmt={rr.riskAmt}
+          rewardAmt={rr.rewardAmt}
+          rr={rr.rr}
+          slPct={rr.slPct}
+          tgtPct={rr.tgtPct}
+        />
+      )}
 
       {/* Submit */}
       <button
