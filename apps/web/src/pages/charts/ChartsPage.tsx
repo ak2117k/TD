@@ -215,12 +215,22 @@ export default function ChartsPage() {
 
   useDrawingPersistence(selectedSymbol.token);
 
+  // S/R overlays render on every native intraday timeframe; the backend
+  // computes per-TF levels. `1d` is intentionally excluded.
+  const SR_INTRADAY = new Set(['1m', '3m', '5m', '15m', '30m', '1h']);
+  const showSR = SR_INTRADAY.has(timeframe);
+
   // Strong-zone S/R (display-only). Polls /signals/zones every 60s.
   const { zones } = useZones(
     selectedSymbol.token,
     selectedSymbol.exchange,
+    timeframe,
   );
-  const { evidence } = useSrEvidence(selectedSymbol.token, selectedSymbol.exchange);
+  const { evidence } = useSrEvidence(
+    selectedSymbol.token,
+    selectedSymbol.exchange,
+    timeframe,
+  );
 
   // Last candle close — memoised separately so it only recomputes when a new
   // candle actually arrives (not on every live tick that re-creates the
@@ -438,15 +448,15 @@ export default function ChartsPage() {
             />
           )}
           {/* Strong-zone S/R overlay — immediate (next wall) + major (STRONG
-              structural) tiers. Detector basis is 15m, so only render there. */}
-          {timeframe === '15m' && ltp > 0 && (
+              structural) tiers. Rendered on every native intraday timeframe. */}
+          {showSR && ltp > 0 && (
             <ChartZoneOverlay
               candleSeries={chartRef.current?.candleSeries ?? null}
               zones={zones}
               ltp={ltp}
             />
           )}
-          {timeframe === '15m' && ltp > 0 && (
+          {showSR && ltp > 0 && (
             <EvidenceLevelOverlay
               candleSeries={chartRef.current?.candleSeries ?? null}
               evidence={evidence}
@@ -476,7 +486,7 @@ export default function ChartsPage() {
           {/* S/R status chip — an empty overlay is normal when candle history
               is insufficient (e.g. Angel daily session expiry). Surface that
               explicitly so a blank chart doesn't look like a bug. */}
-          {timeframe === '15m' && (
+          {showSR && (
             <div className="absolute top-3 right-3 z-20 rounded-full bg-[var(--color-bg-secondary)]/90 px-3 py-1 text-[11px] font-medium tabular-nums text-[var(--color-text-secondary)] shadow backdrop-blur-sm">
               {(() => {
                 const fmt = (n: number) =>
