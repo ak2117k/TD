@@ -1,5 +1,5 @@
-import { scoreAndCluster } from './sr-evidence-scoring';
-import type { LevelCandidate } from '../types/evidence-level.types';
+import { scoreAndCluster, capLevelsPerSide } from './sr-evidence-scoring';
+import type { EvidenceLevel, LevelCandidate } from '../types/evidence-level.types';
 
 const ATR = 2;
 const LTP = 100;
@@ -100,5 +100,55 @@ describe('scoreAndCluster', () => {
     expect(out.filter((l) => l.soft && l.side === 'support')).toHaveLength(1);
     expect(out.find((l) => l.side === 'resistance')!.price).toBe(110);
     expect(out.find((l) => l.side === 'support')!.price).toBe(90);
+  });
+});
+
+describe('capLevelsPerSide', () => {
+  const mk = (price: number, side: EvidenceLevel['side'], score: number, soft = false): EvidenceLevel => ({
+    price,
+    side,
+    score,
+    kinds: ['HISTORY'],
+    soft,
+    distancePct: ((price - LTP) / LTP) * 100,
+  });
+
+  it('keeps only the top-N highest-scored non-soft levels per side', () => {
+    // 4 resistances + 4 supports, distinct scores; cap to 2 per side.
+    const levels = [
+      mk(101, 'resistance', 40), mk(102, 'resistance', 80),
+      mk(103, 'resistance', 60), mk(104, 'resistance', 20),
+      mk(99, 'support', 35), mk(98, 'support', 90),
+      mk(97, 'support', 50), mk(96, 'support', 10),
+    ];
+    const out = capLevelsPerSide(levels, 2);
+    const res = out.filter((l) => l.side === 'resistance').map((l) => l.score).sort((a, b) => b - a);
+    const sup = out.filter((l) => l.side === 'support').map((l) => l.score).sort((a, b) => b - a);
+    expect(res).toEqual([80, 60]); // dropped 40 and 20
+    expect(sup).toEqual([90, 50]); // dropped 35 and 10
+  });
+
+  it('always retains soft fallback levels even when over the cap', () => {
+    const levels = [
+      mk(102, 'resistance', 80), mk(103, 'resistance', 60), mk(104, 'resistance', 40),
+      mk(110, 'resistance', 0, true), // soft fallback
+    ];
+    const out = capLevelsPerSide(levels, 1);
+    expect(out.filter((l) => !l.soft).map((l) => l.score)).toEqual([80]); // top 1 hard
+    expect(out.some((l) => l.soft && l.price === 110)).toBe(true); // soft kept
+  });
+
+  it('preserves input ordering (nearest-first) of the kept levels', () => {
+    const levels = [
+      mk(101, 'resistance', 40), mk(102, 'resistance', 80), mk(103, 'resistance', 60),
+    ];
+    const out = capLevelsPerSide(levels, 2);
+    // Kept the 80 and 60 (drop 40); original order had 102 before 103.
+    expect(out.map((l) => l.price)).toEqual([102, 103]);
+  });
+
+  it('is a no-op when each side already has <= N levels', () => {
+    const levels = [mk(102, 'resistance', 80), mk(98, 'support', 70)];
+    expect(capLevelsPerSide(levels, 3)).toEqual(levels);
   });
 });

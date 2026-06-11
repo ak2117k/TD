@@ -108,3 +108,28 @@ export function scoreAndCluster(
 
   return kept.sort((a, b) => Math.abs(a.distancePct) - Math.abs(b.distancePct));
 }
+
+/**
+ * Keep at most `maxPerSide` non-soft levels per side, ranked by score (desc).
+ * Soft fallback levels are always retained — there is at most one per side and
+ * it only appears when that side is otherwise empty. The kept levels preserve
+ * their input ordering (scoreAndCluster returns nearest-first).
+ *
+ * Used on native non-15m intervals, where swing-pivot HISTORY candidates
+ * over-produce levels and clutter the chart. The frozen 15m path is left
+ * uncapped, so its output is unchanged.
+ */
+export function capLevelsPerSide(levels: EvidenceLevel[], maxPerSide: number): EvidenceLevel[] {
+  if (maxPerSide < 0) return levels;
+  const keep = new Set<EvidenceLevel>();
+  for (const side of ['resistance', 'support'] as const) {
+    levels
+      .filter((l) => l.side === side && !l.soft)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, maxPerSide)
+      .forEach((l) => keep.add(l));
+    // Soft fallbacks are always kept regardless of the cap.
+    levels.filter((l) => l.side === side && l.soft).forEach((l) => keep.add(l));
+  }
+  return levels.filter((l) => keep.has(l));
+}

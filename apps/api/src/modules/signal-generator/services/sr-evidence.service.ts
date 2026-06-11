@@ -6,7 +6,7 @@ import { ZoneRepository } from '../repositories/zone.repository';
 import { OiWallService } from './oi-wall.service';
 import { computeVolumeNodes, type ProfileCandle } from './volume-profile';
 import { adaptiveRoundNumbers, adaptiveRoundStep, roundScore } from './adaptive-round-numbers';
-import { scoreAndCluster } from './sr-evidence-scoring';
+import { scoreAndCluster, capLevelsPerSide } from './sr-evidence-scoring';
 import { lookbackDaysFor } from './timeframe-lookback';
 import { computeAtrFromCandles } from './per-tf-atr';
 import { detectSwingPivots } from './swing-pivots';
@@ -14,6 +14,14 @@ import type { EvidenceLevel, LevelCandidate } from '../types/evidence-level.type
 
 interface CacheEntry { at: number; levels: EvidenceLevel[]; }
 const CACHE_TTL_MS = 15 * 60 * 1000;
+
+/**
+ * Max evidence levels drawn per side on native (non-15m) intervals. Lower
+ * timeframes generate many swing-pivot HISTORY candidates; without a cap the
+ * chart floods (e.g. 17 lines on 5m) and buries the primary zone walls. The
+ * frozen 15m path is never capped.
+ */
+const EVIDENCE_MAX_PER_SIDE_INTRADAY = 3;
 
 /**
  * Orchestrates evidence-weighted S/R: volume nodes + adaptive round numbers +
@@ -105,8 +113,13 @@ export class SrEvidenceService {
       }
 
       const levels = scoreAndCluster(candidates, ltp, atr14, { softRoundGrid: roundGrid });
-      this.cache.set(cacheKey, { at: Date.now(), levels });
-      return levels;
+      // Native low timeframes over-produce levels; cap per side to keep the
+      // chart readable. 15m is FROZEN — never capped.
+      const finalLevels = isFifteen
+        ? levels
+        : capLevelsPerSide(levels, EVIDENCE_MAX_PER_SIDE_INTRADAY);
+      this.cache.set(cacheKey, { at: Date.now(), levels: finalLevels });
+      return finalLevels;
     } catch (err) {
       this.logger.warn(`SrEvidence levelsFor failed for ${token}: ${err instanceof Error ? err.message : err}`);
       return [];
