@@ -76,10 +76,14 @@ export default function OrderTicket({
       return;
     }
     try {
-      const { data } = await api.get<Instrument[]>('/market-data/instruments', {
+      // The endpoint returns a wrapper `{ instruments, count, source }`, not a
+      // bare array — unwrap it. (Reading it as Instrument[] silently set
+      // suggestions to the object, whose `.length` is undefined, so the
+      // dropdown never rendered.)
+      const { data } = await api.get<{ instruments: Instrument[] }>('/market-data/instruments', {
         params: { search: query },
       });
-      setSuggestions(data);
+      setSuggestions(data.instruments ?? []);
       setShowSuggestions(true);
     } catch {
       setSuggestions([]);
