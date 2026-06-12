@@ -30,6 +30,10 @@ export interface ExecuteTradeDto {
   [key: string]: unknown;
 }
 
+// Provenance filter for GET /trades/open. Mirrors the backend `source`
+// column on the Trade model (MANUAL | WATCH | AUTO | SCANNER).
+export type TradeSource = 'MANUAL' | 'WATCH' | 'AUTO' | 'SCANNER';
+
 interface TradeState {
   openTrades: Trade[];
   positions: Position[];
@@ -39,7 +43,12 @@ interface TradeState {
   isKillSwitchActive: boolean;
   isLoading: boolean;
 
-  fetchOpenTrades: () => Promise<void>;
+  // `source` is an optional broker-side filter (MANUAL | WATCH | AUTO |
+  // SCANNER). Omitted ⇒ all open trades (unchanged behaviour for the
+  // shared useTrades hook → Positions / Auto-Trade pages). The Manual
+  // Trade page passes 'MANUAL' so the page is scoped to the user's own
+  // orders only. See GET /api/trades/open?source=MANUAL contract.
+  fetchOpenTrades: (source?: TradeSource) => Promise<void>;
   fetchPositions: () => Promise<void>;
   fetchRiskStatus: () => Promise<void>;
   executeTrade: (dto: ExecuteTradeDto) => Promise<void>;
@@ -71,9 +80,11 @@ export const useTradeStore = create<TradeState>((set) => ({
   isKillSwitchActive: false,
   isLoading: false,
 
-  fetchOpenTrades: async () => {
+  fetchOpenTrades: async (source) => {
     try {
-      const { data } = await api.get<any[]>('/trades/open');
+      const { data } = await api.get<any[]>('/trades/open', {
+        params: source ? { source } : undefined,
+      });
       // Normalize backend's isPaperTrade → frontend's isPaper field name,
       // and lift instrument.symbol/exchange to the top level (the JournalPage
       // and TradeCard read t.symbol / t.exchange directly).
@@ -186,3 +197,67 @@ export const useTradeStore = create<TradeState>((set) => ({
   setRiskStatus: (status) => set({ riskStatus: status }),
   setKillSwitchActive: (active) => set({ isKillSwitchActive: active }),
 }));
+
+// ── Derived values from openTrades ─────────────────────────────────────
+// The Manual Trade page derives its capital-deployed and open-position
+// count from the (MANUAL-scoped) openTrades it fetched, NOT from the
+// in-memory position-manager (`/trades/positions`) which only holds the
+// trades that passed the non-₹0 entryPrice guard and so diverges from the
+// DB. Deriving here guarantees the top strip/panel and the bottom order
+// book read the same single source.
+
+/** Sum of `entryPrice * quantity` over the given open trades. */
+export function deriveCapitalDeployed(trades: Trade[]): number {
+  return trades.reduce(
+    (sum, t) => sum + (t.entryPrice ?? 0) * (t.quantity ?? 0),
+    0,
+  );
+}
+
+/** Open-position count = number of open trades. */
+export function derivePositionsCount(trades: Trade[]): number {
+  return trades.length;
+}
+
+/**
+ * Map open Trade rows to the `Position` shape the PositionsPanel renders.
+ * Uses entryPrice as the average and the trade's own ltp/pnl/pnlPercent
+ * (which the live-tick handler on the page re-marks). Falls back to
+ * entryPrice-based values without crashing when ltp is absent.
+ */
+export function tradesToPositions(trades: Trade[]): Position[] {
+  return trades.map((t) => {
+    const averagePrice = t.entryPrice ?? 0;
+    const ltp = t.ltp ?? averagePrice;
+    const direction = t.side === 'BUY' ? 1 : -1;
+    const pnl =
+      typeof t.pnl === 'number'
+        ? t.pnl
+        : (ltp - averagePrice) * (t.quantity ?? 0) * direction;
+    const cost = averagePrice * (t.quantity ?? 0);
+    const pnlPercent =
+      typeof t.pnlPercent === 'number'
+        ? t.pnlPercent
+        : cost > 0
+          ? (pnl / cost) * 100
+          : 0;
+    return {
+      symbol: t.symbol,
+      exchange: t.exchange,
+      side: t.side,
+      quantity: t.quantity ?? 0,
+      averagePrice,
+      ltp,
+      pnl,
+      pnlPercent,
+    };
+  });
+}
+
+/** Selector: capital deployed across the store's current open trades. */
+export const selectManualCapitalDeployed = (s: TradeState): number =>
+  deriveCapitalDeployed(s.openTrades as Trade[]);
+
+/** Selector: open-position count from the store's current open trades. */
+export const selectManualPositionsCount = (s: TradeState): number =>
+  derivePositionsCount(s.openTrades as Trade[]);

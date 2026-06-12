@@ -1,7 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Send, Power, X, Inbox } from 'lucide-react';
 import OrderTicket from '@/components/trading/OrderTicket';
-import { useTradeStore } from '@/stores/trade-store';
+import {
+  useTradeStore,
+  tradesToPositions,
+  deriveCapitalDeployed,
+} from '@/stores/trade-store';
 import { wsService } from '@/services/websocket';
 import api from '@/services/api';
 import { cn } from '@/utils/cn';
@@ -73,15 +77,24 @@ function RiskMetric({
 function RiskStrip({
   onKillSwitch,
   killSwitchActive,
+  capitalDeployed,
+  positionsCount,
 }: {
   onKillSwitch: () => void;
   killSwitchActive: boolean;
+  // Derived from the MANUAL open trades (single source = DB), NOT the
+  // in-memory position-manager that diverged and only counted one trade.
+  capitalDeployed: number;
+  positionsCount: number;
 }) {
+  // Limits (capitalLimit / dailyLossLimit / positionsLimit) still come from
+  // /trades/risk-status — only the *used* values are derived from the page's
+  // MANUAL open trades so the strip matches the panel + order book below.
   const riskStatus = useTradeStore((s) => s.riskStatus);
 
   const capitalPct =
     riskStatus.capitalLimit > 0
-      ? (riskStatus.capitalDeployed / riskStatus.capitalLimit) * 100
+      ? (capitalDeployed / riskStatus.capitalLimit) * 100
       : 0;
   // Daily P&L: positive loss-used means a loss; expose it as a signed P&L.
   const dailyPnl = -(riskStatus.dailyLossUsed ?? 0);
@@ -91,7 +104,7 @@ function RiskStrip({
       <div className="flex flex-wrap items-center gap-x-8 gap-y-3">
         <RiskMetric
           label="Capital Deployed"
-          value={formatINR(riskStatus.capitalDeployed ?? 0)}
+          value={formatINR(capitalDeployed ?? 0)}
           sub={`${capitalPct.toFixed(0)}% of ${formatINR(riskStatus.capitalLimit ?? 0)}`}
           tone={capitalPct >= 90 ? 'bad' : 'neutral'}
         />
@@ -103,11 +116,11 @@ function RiskStrip({
         />
         <RiskMetric
           label="Positions"
-          value={`${riskStatus.positionsUsed ?? 0} / ${riskStatus.positionsLimit ?? 0}`}
+          value={`${positionsCount} / ${riskStatus.positionsLimit ?? 0}`}
           sub="used / limit"
           tone={
             (riskStatus.positionsLimit ?? 0) > 0 &&
-            (riskStatus.positionsUsed ?? 0) >= (riskStatus.positionsLimit ?? 0)
+            positionsCount >= (riskStatus.positionsLimit ?? 0)
               ? 'bad'
               : 'neutral'
           }
@@ -380,64 +393,75 @@ function OrderBook({ openTrades }: { openTrades: Trade[] }) {
 
 // ---- Page ----
 export default function ManualTradePage() {
-  const positions = useTradeStore((s) => s.positions);
   const openTrades = useTradeStore((s) => s.openTrades);
   const isKillSwitchActive = useTradeStore((s) => s.isKillSwitchActive);
-  const fetchPositions = useTradeStore((s) => s.fetchPositions);
   const fetchOpenTrades = useTradeStore((s) => s.fetchOpenTrades);
   const fetchRiskStatus = useTradeStore((s) => s.fetchRiskStatus);
   const closeTrade = useTradeStore((s) => s.closeTrade);
   const closeAllPositions = useTradeStore((s) => s.closeAllPositions);
-  const updatePosition = useTradeStore((s) => s.updatePosition);
+
+  // Live LTP overlay by symbol. Fed by the tick WS; merged onto the derived
+  // positions for live P&L without round-tripping through the position-manager
+  // store (which is no longer this page's source of truth).
+  const [ltpBySymbol, setLtpBySymbol] = useState<Record<string, number>>({});
 
   const pollRef = useRef<ReturnType<typeof setInterval>>(undefined);
 
-  const refetchAll = useCallback(() => {
-    fetchPositions();
-    fetchOpenTrades();
-    fetchRiskStatus();
-  }, [fetchPositions, fetchOpenTrades, fetchRiskStatus]);
+  // Single source of truth for the whole page: the MANUAL open trades.
+  // The top PositionsPanel, the Capital Deployed / Positions metrics, and the
+  // bottom Order Book all derive from this list, so they cannot diverge.
+  const positions = useMemo<Position[]>(() => {
+    const base = tradesToPositions(openTrades as Trade[]);
+    // Overlay live LTP (and recompute P&L) where we have a fresh tick.
+    return base.map((p) => {
+      const ltp = ltpBySymbol[p.symbol];
+      if (typeof ltp !== 'number' || ltp === p.ltp) return p;
+      const direction = p.side === 'BUY' ? 1 : -1;
+      const pnl = (ltp - p.averagePrice) * p.quantity * direction;
+      const cost = p.averagePrice * p.quantity;
+      const pnlPercent = cost > 0 ? (pnl / cost) * 100 : 0;
+      return { ...p, ltp, pnl, pnlPercent };
+    });
+  }, [openTrades, ltpBySymbol]);
 
-  // Initial load + 5s positions poll fallback.
+  const capitalDeployed = useMemo(
+    () => deriveCapitalDeployed(openTrades as Trade[]),
+    [openTrades],
+  );
+  const positionsCount = openTrades.length;
+
+  const refetchAll = useCallback(() => {
+    fetchOpenTrades('MANUAL');
+    fetchRiskStatus();
+  }, [fetchOpenTrades, fetchRiskStatus]);
+
+  // Initial load + 5s poll fallback (refetch the MANUAL open trades).
   useEffect(() => {
     refetchAll();
     pollRef.current = setInterval(() => {
-      fetchPositions();
+      fetchOpenTrades('MANUAL');
     }, 5000);
     return () => {
       clearInterval(pollRef.current);
     };
-  }, [refetchAll, fetchPositions]);
+  }, [refetchAll, fetchOpenTrades]);
 
-  // Live LTP/P&L: re-mark positions on each tick that matches a held symbol.
-  // Backend also pushes `position-update`; subscribe to both so the panel
-  // stays fresh between the 5s polls.
+  // Live LTP/P&L: capture each tick that matches a held symbol into the local
+  // overlay. The `positions` memo recomputes P&L from it. We deliberately do
+  // NOT write back to the position-manager store here — this page derives its
+  // positions from openTrades, not /trades/positions.
   useEffect(() => {
-    const unsubPos = wsService.subscribe('position-update', (data) => {
-      updatePosition(data as Position);
-    });
-
     const unsubTick = wsService.subscribe('tick', (data) => {
       const q = data as Quote;
       if (!q?.symbol || typeof q.ltp !== 'number') return;
-      const current = useTradeStore
-        .getState()
-        .positions.find((p) => p.symbol === q.symbol);
-      if (!current || current.ltp === q.ltp) return;
-
-      const direction = current.side === 'BUY' ? 1 : -1;
-      const pnl =
-        (q.ltp - current.averagePrice) * current.quantity * direction;
-      const cost = current.averagePrice * current.quantity;
-      const pnlPercent = cost > 0 ? (pnl / cost) * 100 : 0;
-      updatePosition({ ...current, ltp: q.ltp, pnl, pnlPercent });
+      setLtpBySymbol((prev) =>
+        prev[q.symbol] === q.ltp ? prev : { ...prev, [q.symbol]: q.ltp },
+      );
     });
-
     return () => {
-      unsubPos();
       unsubTick();
     };
-  }, [updatePosition]);
+  }, []);
 
   const handleKillSwitch = useCallback(() => {
     if (
@@ -478,6 +502,8 @@ export default function ManualTradePage() {
       <RiskStrip
         onKillSwitch={handleKillSwitch}
         killSwitchActive={isKillSwitchActive}
+        capitalDeployed={capitalDeployed}
+        positionsCount={positionsCount}
       />
 
       {/* Two-column workspace */}
