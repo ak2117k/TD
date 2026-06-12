@@ -5,6 +5,7 @@ import {
   Optional,
   HttpException,
   HttpStatus,
+  BadRequestException,
 } from '@nestjs/common';
 import {
   BrokerAdapter,
@@ -96,6 +97,11 @@ export class TradeExecutionService {
     // flag must NEVER route live — never invert this nullish-coalescing.
     const isPaperTrade = request.isPaper ?? settings.paperTrading;
 
+    // Origin track — defaults to MANUAL when the caller doesn't tag it, so the
+    // manual-trade page (which scopes to source = 'MANUAL') only ever shows
+    // user-placed orders. Watch / auto-trade / scanner set this explicitly.
+    const source = request.source ?? 'MANUAL';
+
     // ---- STEP 3: Resolve instrument ID for the trade record ----
     const instrumentId = await this.tradeRepository.findInstrumentId(
       request.symbol,
@@ -121,6 +127,7 @@ export class TradeExecutionService {
       price: request.price,
       triggerPrice: request.triggerPrice,
       positionType: request.positionType,
+      source,
     };
 
     let orderId: string | undefined;
@@ -144,11 +151,20 @@ export class TradeExecutionService {
           paperResponse.fillPrice ?? request.price ?? request.triggerPrice;
         entryTime = new Date();
 
+        // Refuse to persist a ₹0/undefined paper fill. A MARKET order on an
+        // instrument with no live quote previously logged an error but
+        // persisted entryPrice = 0, corrupting P&L and the position ledger.
+        // Reject BEFORE creating the trade row. A LIMIT/SL order still fills
+        // at request.price / triggerPrice even when the LTP is 0.
         if (!entryPrice || entryPrice <= 0) {
           this.logger.error(
             `Paper trade ${orderId} filled but no entryPrice resolved — ` +
               `fillPrice=${paperResponse.fillPrice}, request.price=${request.price}, ` +
-              `triggerPrice=${request.triggerPrice}. This will corrupt P&L.`,
+              `triggerPrice=${request.triggerPrice}. Rejecting (no ₹0 fills).`,
+          );
+          throw new BadRequestException(
+            `No live price available for ${request.symbol} — cannot place a ` +
+              `MARKET paper order at ₹0. Try a LIMIT order or wait for a live quote.`,
           );
         }
       }
@@ -206,6 +222,7 @@ export class TradeExecutionService {
       status: initialStatus,
       strategy: request.strategy,
       isPaperTrade,
+      source,
       entryTime,
       entryReason: request.entryReason ?? null,
       entryTags: request.entryTags ?? [],
@@ -614,8 +631,8 @@ export class TradeExecutionService {
   /**
    * Get all currently open trades.
    */
-  async getOpenTrades(): Promise<Trade[]> {
-    return this.tradeRepository.getOpenTrades();
+  async getOpenTrades(source?: string): Promise<Trade[]> {
+    return this.tradeRepository.getOpenTrades(source);
   }
 
   /**

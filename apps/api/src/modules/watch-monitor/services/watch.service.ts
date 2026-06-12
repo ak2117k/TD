@@ -511,6 +511,7 @@ export class WatchService {
       price: referencePrice,
       stoploss: (entry as any).stopLoss ?? undefined,
       target: (entry as any).profitTarget ?? undefined,
+      source: 'WATCH',
     } as any);
 
     const actualEntryPrice =

@@ -40,6 +40,7 @@ export class TradeRepository {
     status: string;
     strategy?: string;
     isPaperTrade: boolean;
+    source?: string;
     entryTime?: Date;
     notes?: string;
     // ---- M5: entry context capture ----
@@ -94,10 +95,13 @@ export class TradeRepository {
     });
   }
 
-  async getOpenTrades(): Promise<Trade[]> {
+  async getOpenTrades(source?: string): Promise<Trade[]> {
     return this.prisma.trade.findMany({
       where: {
         status: { in: ['OPEN', 'PARTIALLY_FILLED'] },
+        // Optional origin filter (e.g. 'MANUAL'). Omitted ⇒ all open trades,
+        // so existing consumers (kill-switch, positions sync) are unaffected.
+        ...(source ? { source } : {}),
       },
       include: { instrument: true, signal: true },
       orderBy: { createdAt: 'desc' },

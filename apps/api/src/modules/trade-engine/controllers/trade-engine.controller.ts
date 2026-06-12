@@ -78,10 +78,13 @@ export class TradeEngineController {
 
   /**
    * GET /api/trades/open — Get all open trades.
+   *
+   * Optional `?source=MANUAL|WATCH|AUTO|SCANNER` scopes the result to one
+   * origin track. Omitted ⇒ all open trades (unchanged for existing callers).
    */
   @Get('open')
-  async getOpenTrades() {
-    return this.tradeExecutionService.getOpenTrades();
+  async getOpenTrades(@Query('source') source?: string) {
+    return this.tradeExecutionService.getOpenTrades(source);
   }
 
   /**

@@ -158,6 +158,10 @@ model Trade {
   entryTime       DateTime?
   exitTime        DateTime?
   notes           String?
+  // Origin track of the trade: MANUAL (user order) | WATCH (gated-watch /
+  // Chartink) | AUTO (signal auto-trade) | SCANNER (universe scanner). Lets
+  // the manual-trade page scope to MANUAL-only without mixing in auto rows.
+  source          String   @default("MANUAL")
 
   // ---- M5: Entry context capture ----
   entryReason       String?
@@ -183,6 +187,7 @@ model Trade {
   @@index([isPaperTrade])
   @@index([vixRegimeAtEntry])
   @@index([exitReasonTag])
+  @@index([source])
   @@map("trades")
 }
 

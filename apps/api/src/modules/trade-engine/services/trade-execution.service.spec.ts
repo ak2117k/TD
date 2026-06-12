@@ -320,6 +320,116 @@ describe('TradeExecutionService.executeTrade — paper-trade entry price', () =>
     const fees = (repo.updateTrade as jest.Mock).mock.calls[0][1].fees;
     expect(fees).toBeGreaterThan(0);
   });
+
+  // ----- ₹0 paper-fill rejection (Task 3) -----
+
+  it('rejects a paper MARKET fill at ₹0 (no fillPrice, no request.price) and creates NO trade', async () => {
+    // Simulator fills but returns no price — a MARKET order on a quiet feed.
+    paperService.simulateOrder.mockResolvedValueOnce({
+      orderId: 'paper_order_zero',
+      status: 'FILLED',
+      message: 'no ltp',
+      // no fillPrice
+    });
+
+    await expect(
+      service.executeTrade({
+        symbol: 'ILLIQUIDCE',
+        token: '12345',
+        exchange: 'NFO',
+        side: 'BUY' as any,
+        orderType: 'MARKET' as any,
+        quantity: 50,
+        positionType: 'INTRADAY' as any,
+        // no price / triggerPrice — nothing to fall back to
+      } as any),
+    ).rejects.toThrow(/No live price available for ILLIQUIDCE/);
+
+    expect(repo.createTrade).not.toHaveBeenCalled();
+  });
+
+  it('rejects a paper MARKET fill at literal 0 and creates NO trade', async () => {
+    paperService.simulateOrder.mockResolvedValueOnce({
+      orderId: 'paper_order_zero2',
+      status: 'FILLED',
+      message: 'zero fill',
+      fillPrice: 0,
+    });
+
+    await expect(
+      service.executeTrade({
+        symbol: 'NIFTY24MAY22500CE',
+        token: '99926000',
+        exchange: 'NFO',
+        side: 'BUY' as any,
+        orderType: 'MARKET' as any,
+        quantity: 50,
+        positionType: 'INTRADAY' as any,
+      } as any),
+    ).rejects.toThrow(/cannot place a .*MARKET paper order/);
+
+    expect(repo.createTrade).not.toHaveBeenCalled();
+  });
+
+  it('a LIMIT order with request.price still fills at that price when fillPrice is 0/absent', async () => {
+    // LTP is unavailable so the simulator returns no fillPrice, but a LIMIT
+    // order carries an explicit price — it must fill at request.price, not throw.
+    paperService.simulateOrder.mockResolvedValueOnce({
+      orderId: 'paper_order_limit',
+      status: 'FILLED',
+      message: 'limit fill',
+      // no fillPrice
+    });
+
+    const trade = await service.executeTrade({
+      symbol: 'NIFTY24MAY22500CE',
+      token: '99926000',
+      exchange: 'NFO',
+      side: 'BUY' as any,
+      orderType: 'LIMIT' as any,
+      quantity: 50,
+      price: 101.25,
+      positionType: 'INTRADAY' as any,
+    } as any);
+
+    expect(trade.entryPrice).toBe(101.25);
+    expect(trade.status).toBe('OPEN');
+  });
+
+  // ----- source tagging (Task 2) -----
+
+  it('defaults source to MANUAL when the caller omits it', async () => {
+    const trade = await service.executeTrade({
+      symbol: 'NIFTY24MAY22500CE',
+      token: '99926000',
+      exchange: 'NFO',
+      side: 'BUY' as any,
+      orderType: 'MARKET' as any,
+      quantity: 50,
+      positionType: 'INTRADAY' as any,
+    } as any);
+
+    expect((trade as any).source).toBe('MANUAL');
+    const created = (repo.createTrade as jest.Mock).mock.calls[0][0];
+    expect(created.source).toBe('MANUAL');
+  });
+
+  it('persists an explicit source (WATCH) through to createTrade', async () => {
+    const trade = await service.executeTrade({
+      symbol: 'NIFTY24MAY22500CE',
+      token: '99926000',
+      exchange: 'NFO',
+      side: 'BUY' as any,
+      orderType: 'MARKET' as any,
+      quantity: 50,
+      positionType: 'INTRADAY' as any,
+      source: 'WATCH' as any,
+    } as any);
+
+    expect((trade as any).source).toBe('WATCH');
+    const created = (repo.createTrade as jest.Mock).mock.calls[0][0];
+    expect(created.source).toBe('WATCH');
+  });
 });
 
 /**

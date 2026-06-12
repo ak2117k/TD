@@ -113,6 +113,14 @@ export class ExecuteTradeDto {
   @IsOptional()
   @IsBoolean()
   isPaper?: boolean;
+
+  /** Origin track of the order. Defaults to 'MANUAL' (user-placed) when
+   *  omitted — the manual controller path relies on this default. Non-manual
+   *  call sites (watch / auto-trade / scanner) set it explicitly so the
+   *  manual-trade page can scope its ledger to MANUAL trades only. */
+  @IsOptional()
+  @IsEnum(['MANUAL', 'WATCH', 'AUTO', 'SCANNER'])
+  source?: 'MANUAL' | 'WATCH' | 'AUTO' | 'SCANNER';
 }
 
 export class ModifyTradeDto {

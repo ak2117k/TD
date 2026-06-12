@@ -150,6 +150,7 @@ export class AutoTradeService {
           target: signal.targetPrice,
           signalId: signal.id,
           strategy: signal.strategy,
+          source: 'AUTO',
         };
 
         // Route based on auto-trade mode
@@ -340,6 +341,7 @@ export class AutoTradeService {
       target: signal.targetPrice,
       signalId: signal.id,
       strategy: signal.strategy,
+      source: 'AUTO',
     };
 
     try {

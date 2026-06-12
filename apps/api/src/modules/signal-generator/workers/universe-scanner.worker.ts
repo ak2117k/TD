@@ -385,6 +385,7 @@ export class UniverseScannerWorker implements OnModuleInit {
         price: strike.ltp,
         positionType: PositionTypeDto.INTRADAY,
         strategy: this.strategy.name,
+        source: 'SCANNER',
         // Mirror the underlying's stop/target into option-premium space using
         // delta — first-order estimate, good enough for paper trading. Actual
         // production code would manage stops at the underlying level via a

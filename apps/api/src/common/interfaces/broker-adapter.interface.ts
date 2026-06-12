@@ -33,6 +33,10 @@ export interface OrderRequest {
   price?: number;
   triggerPrice?: number;
   positionType: 'INTRADAY' | 'DELIVERY' | 'CARRYFORWARD';
+  /** Origin track of the order: MANUAL | WATCH | AUTO | SCANNER. Carried
+   *  through execution so the persisted Trade row records where it came from.
+   *  Defaults to MANUAL at the execution boundary when omitted. */
+  source?: 'MANUAL' | 'WATCH' | 'AUTO' | 'SCANNER';
 }
 
 export interface OrderResponse {
