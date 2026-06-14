@@ -8,7 +8,7 @@ import { AdaptiveStopAccountService } from './adaptive-stop-account.service';
 import { AdaptiveStopTradeExecutionService } from './adaptive-stop-trade-execution.service';
 import { AdaptiveStopGateway } from '../gateways/adaptive-stop.gateway';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
-import { resolveStop, sizeQuantity } from '../adaptive-stop-math';
+import { resolveStop, resolveTrail, sizeQuantity } from '../adaptive-stop-math';
 import { GRACE_MS, PROFIT_TARGET_PCT, RISK_PER_TRADE } from '../constants';
 import { atr } from '../../signal-generator/strategies/indicators';
 // Note: NO MarketFeedService dependency — the adaptive-stop track uses
@@ -255,7 +255,8 @@ export class AdaptiveStopWatchService {
   // --- Constants ---
   private readonly PARTIAL_EXIT_THRESHOLD_PCT = 0.01;
   private readonly PARTIAL_EXIT_FRACTION = 0.5;
-  private readonly TRAILING_STOP_PCT = 0.005;
+  // Trailing give-back is now ATR-based (resolveTrail), not a flat percent — see
+  // TRAIL_ATR_MULT/TRAIL_MIN_PCT/TRAIL_MAX_PCT in constants.ts.
   private readonly MATERIAL_CHANGE_PCT = 0.0025;
 
   // --- Public tick entrypoint ---
@@ -401,9 +402,8 @@ export class AdaptiveStopWatchService {
       Math.max(1, Math.floor(2_00_000 / Math.max(ref, 1)));
     const partialQty = Math.floor(initialQty * this.PARTIAL_EXIT_FRACTION);
     const remainingQty = initialQty - partialQty;
-    const trailingStopPrice = sideMul === 1
-      ? ltp * (1 - this.TRAILING_STOP_PCT)
-      : ltp * (1 + this.TRAILING_STOP_PCT);
+    // ATR-based give-back from the partial-exit price (the first high-water).
+    const trailingStopPrice = resolveTrail(ltp, entry.atrAtEntry, sideMul).stopPrice;
 
     await this.exec.closeTrade(entry.paperTradeId, {
       reason: 'partial-exit', quantity: partialQty, exitPrice: ltp,
@@ -429,7 +429,8 @@ export class AdaptiveStopWatchService {
     const moves = sideMul === 1 ? ltp > highWater : ltp < highWater;
     if (moves) {
       highWater = ltp;
-      newStop = sideMul === 1 ? ltp * (1 - this.TRAILING_STOP_PCT) : ltp * (1 + this.TRAILING_STOP_PCT);
+      // Ratchet the ATR-based give-back up with each new high-water.
+      newStop = resolveTrail(ltp, entry.atrAtEntry, sideMul).stopPrice;
       await this.repo.update(entry.id, {
         trailingHighWater: highWater,
         trailingStopPrice: newStop,

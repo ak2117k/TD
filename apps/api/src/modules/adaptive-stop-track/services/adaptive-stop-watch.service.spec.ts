@@ -261,3 +261,121 @@ describe('AdaptiveStopWatchService.onTick — per-entry stop + 2-min grace', () 
     expect(repo.update).not.toHaveBeenCalledWith('aw1', { lastEventPrice: 2003 });
   });
 });
+
+describe('AdaptiveStopWatchService.onTick — ATR-based trailing give-back', () => {
+  let svc: AdaptiveStopWatchService;
+  let repo: any, exec: any;
+
+  // entry @2000, atrAtEntry=20 → trail give-back = 1.0×20 = 20 (1.0%, within
+  // the [0.6%,1.5%] band). vol-stop from ATR=6 → stopPrice 1992.8.
+  const stop = resolveStop(2000, 6);
+
+  function tradedEntry(overrides: Record<string, any> = {}) {
+    return {
+      id: 'aw1', token: '11536', symbol: 'TCS', side: 'BUY', status: 'TRADED',
+      initialPrice: 2000, executedPrice: 2000, profitTarget: 2040,
+      stopPrice: stop.stopPrice, atrAtEntry: 20,
+      executedAt: new Date(Date.now() - 10 * 60_000), // past grace
+      paperTradeId: 'at1', quantity: 100, remainingQty: 100,
+      partialExitedAt: null, trailingHighWater: null, trailingStopPrice: null,
+      slBreachCount: 0, lastEventPrice: 2000,
+      ...overrides,
+    };
+  }
+
+  beforeEach(async () => {
+    repo = {
+      findActiveByToken: jest.fn(),
+      findById: jest.fn().mockResolvedValue(null),
+      createEvent: jest.fn(),
+      update: jest.fn().mockResolvedValue({}),
+    };
+    exec = { closeTrade: jest.fn().mockResolvedValue({}) };
+    const gateway = { emitEntry: jest.fn() };
+    const adapter = {
+      getLiveQuote: jest.fn().mockResolvedValue({ ltp: 2000 }),
+      getHistoricalData: jest.fn().mockResolvedValue([]),
+    };
+    const mod = await Test.createTestingModule({
+      providers: [
+        AdaptiveStopWatchService,
+        { provide: AdaptiveStopWatchRepository, useValue: repo },
+        { provide: AdaptiveStopTradeRepository, useValue: {} },
+        { provide: AdaptiveStopAccountService, useValue: {} },
+        { provide: AdaptiveStopTradeExecutionService, useValue: exec },
+        { provide: AdaptiveStopGateway, useValue: gateway },
+        { provide: AngelOneAdapterService, useValue: adapter },
+      ],
+    }).compile();
+    svc = mod.get(AdaptiveStopWatchService);
+  });
+
+  it('partial-exit arms an ATR-based trail (1.0×ATR below price), NOT the flat 0.5%', async () => {
+    // ltp=2030 (+1.5%, past the +1% partial trigger). Trail = 2030 - 20 = 2010.
+    // The old flat 0.5% would have been 2030×0.995 = 2019.85 (much tighter).
+    repo.findActiveByToken.mockResolvedValue([tradedEntry()]);
+    await svc.onTick('11536', 2030, new Date());
+
+    expect(exec.closeTrade).toHaveBeenCalledWith('at1', expect.objectContaining({
+      reason: 'partial-exit', quantity: 50,
+    }));
+    expect(repo.update).toHaveBeenCalledWith('aw1', expect.objectContaining({
+      trailingHighWater: 2030,
+      trailingStopPrice: 2010,
+    }));
+  });
+
+  it('a shallow pullback that the flat 0.5% trail would have cut is now HELD', async () => {
+    // Already partial-exited, high-water 2030, ATR trail at 2010. Price dips to
+    // 2015 — below the old flat-trail level (2019.85) but above the ATR trail.
+    repo.findActiveByToken.mockResolvedValue([
+      tradedEntry({
+        partialExitedAt: new Date(), trailingHighWater: 2030,
+        trailingStopPrice: 2010, remainingQty: 50,
+      }),
+    ]);
+    await svc.onTick('11536', 2015, new Date());
+    expect(exec.closeTrade).not.toHaveBeenCalled();
+    expect(repo.update).not.toHaveBeenCalledWith('aw1', expect.objectContaining({
+      closedReason: 'trailing-stop',
+    }));
+  });
+
+  it('exits trailing-stop only when price breaks the (wider) ATR give-back', async () => {
+    // Same armed state; price breaks below the ATR trail (2010).
+    repo.findActiveByToken.mockResolvedValue([
+      tradedEntry({
+        partialExitedAt: new Date(), trailingHighWater: 2030,
+        trailingStopPrice: 2010, remainingQty: 50,
+      }),
+    ]);
+    await svc.onTick('11536', 2008, new Date());
+    expect(exec.closeTrade).toHaveBeenCalledWith('at1', expect.objectContaining({
+      reason: 'trailing-stop', exitPrice: 2008,
+    }));
+    expect(repo.update).toHaveBeenCalledWith('aw1', expect.objectContaining({
+      status: 'EXITED', closedReason: 'trailing-stop',
+    }));
+  });
+
+  it('ratchets the ATR trail up on a new high-water', async () => {
+    // Armed at high-water 2030 / trail 2010; price makes a new high 2038 (still
+    // below the +2% target 2040, so target-hit does not pre-empt). New trail =
+    // 2038 - 20 = 2018.
+    repo.findActiveByToken.mockResolvedValue([
+      tradedEntry({
+        partialExitedAt: new Date(), trailingHighWater: 2030,
+        trailingStopPrice: 2010, remainingQty: 50,
+      }),
+    ]);
+    await svc.onTick('11536', 2038, new Date());
+    expect(repo.update).toHaveBeenCalledWith('aw1', expect.objectContaining({
+      trailingHighWater: 2038,
+      trailingStopPrice: 2018,
+    }));
+    // New high is not a trail breach — no exit.
+    expect(repo.update).not.toHaveBeenCalledWith('aw1', expect.objectContaining({
+      closedReason: 'trailing-stop',
+    }));
+  });
+});
