@@ -394,6 +394,62 @@ export class AnandDualTrackRepository {
     return map;
   }
 
+  // ── Swing Daily OHLC ─────────────────────────────────────────────────────
+  /** Fetch a single swing entry (or null) — used by the OHLC backfill + API. */
+  async findSwingEntryById(id: string) {
+    return this.prisma.swingEntry.findUnique({ where: { id } });
+  }
+
+  /**
+   * Every swing entry (no date window) — the OHLC worker needs the full set so
+   * it can keep recording up to 60 post-exit days for already-closed trades.
+   */
+  async listAllSwingEntries() {
+    return this.prisma.swingEntry.findMany({
+      select: { id: true, token: true, symbol: true, enteredAt: true, exitedAt: true, status: true },
+      orderBy: { enteredAt: 'desc' },
+    });
+  }
+
+  /** Idempotent upsert of one day's candle for a swing entry (unique [swingEntryId, date]). */
+  async upsertSwingDailyOhlc(
+    swingEntryId: string,
+    date: Date,
+    o: { open: number; high: number; low: number; close: number },
+    phase: string,
+  ): Promise<void> {
+    await this.prisma.swingDailyOhlc.upsert({
+      where: { swingEntryId_date: { swingEntryId, date } },
+      create: { swingEntryId, date, ...o, phase },
+      update: { ...o, phase },
+    });
+  }
+
+  /** All recorded daily-OHLC rows for an entry, oldest → newest. */
+  async listSwingDailyOhlc(swingEntryId: string) {
+    return this.prisma.swingDailyOhlc.findMany({
+      where: { swingEntryId },
+      orderBy: { date: 'asc' },
+    });
+  }
+
+  /** Most-recent recorded OHLC date for an entry, or null if none recorded yet. */
+  async latestSwingOhlcDate(swingEntryId: string): Promise<Date | null> {
+    const row = await this.prisma.swingDailyOhlc.findFirst({
+      where: { swingEntryId },
+      orderBy: { date: 'desc' },
+      select: { date: true },
+    });
+    return row?.date ?? null;
+  }
+
+  /** Count of POST_EXIT rows recorded for an entry (drives the 60-day stop). */
+  async countSwingPostExitRows(swingEntryId: string): Promise<number> {
+    return this.prisma.swingDailyOhlc.count({
+      where: { swingEntryId, phase: 'POST_EXIT' },
+    });
+  }
+
   async getPnlSummary(track: 'intraday' | 'swing'): Promise<PnlSummary> {
     // IST midnight N days ago. IST = UTC+05:30; this matches the pattern in
     // UngatedRejectionRepository which pins the offset rather than using the

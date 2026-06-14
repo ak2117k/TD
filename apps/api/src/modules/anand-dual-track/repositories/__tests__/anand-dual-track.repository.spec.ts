@@ -16,7 +16,14 @@ describe('AnandDualTrackRepository', () => {
       create: jest.Mock;
       findMany: jest.Mock;
       findFirst: jest.Mock;
+      findUnique: jest.Mock;
       update: jest.Mock;
+    };
+    swingDailyOhlc: {
+      upsert: jest.Mock;
+      findMany: jest.Mock;
+      findFirst: jest.Mock;
+      count: jest.Mock;
     };
     chartinkAlert: {
       findMany: jest.Mock;
@@ -36,7 +43,14 @@ describe('AnandDualTrackRepository', () => {
         create: jest.fn(),
         findMany: jest.fn().mockResolvedValue([]),
         findFirst: jest.fn().mockResolvedValue(null),
+        findUnique: jest.fn().mockResolvedValue(null),
         update: jest.fn(),
+      },
+      swingDailyOhlc: {
+        upsert: jest.fn().mockResolvedValue({}),
+        findMany: jest.fn().mockResolvedValue([]),
+        findFirst: jest.fn().mockResolvedValue(null),
+        count: jest.fn().mockResolvedValue(0),
       },
       chartinkAlert: {
         findMany: jest.fn().mockResolvedValue([]),
@@ -234,6 +248,52 @@ describe('AnandDualTrackRepository', () => {
       expect(prisma.chartinkAlert.findMany).toHaveBeenCalledWith({
         where: { id: { in: ['a1', 'a2'] } },
         select: { id: true, scanner: { select: { scanName: true } } },
+      });
+    });
+  });
+
+  describe('swing daily OHLC', () => {
+    it('upsertSwingDailyOhlc upserts on the [swingEntryId, date] unique key', async () => {
+      const date = new Date('2026-06-10T00:00:00Z');
+      await repo.upsertSwingDailyOhlc('s1', date, { open: 100, high: 110, low: 95, close: 105 }, 'HOLD');
+      expect(prisma.swingDailyOhlc.upsert).toHaveBeenCalledWith({
+        where: { swingEntryId_date: { swingEntryId: 's1', date } },
+        create: { swingEntryId: 's1', date, open: 100, high: 110, low: 95, close: 105, phase: 'HOLD' },
+        update: { open: 100, high: 110, low: 95, close: 105, phase: 'HOLD' },
+      });
+    });
+
+    it('listSwingDailyOhlc returns rows ordered by date asc', async () => {
+      const rows = [{ id: 'o1', swingEntryId: 's1', date: new Date(), phase: 'HOLD' }];
+      prisma.swingDailyOhlc.findMany.mockResolvedValue(rows);
+      const result = await repo.listSwingDailyOhlc('s1');
+      expect(result).toBe(rows);
+      expect(prisma.swingDailyOhlc.findMany).toHaveBeenCalledWith({
+        where: { swingEntryId: 's1' },
+        orderBy: { date: 'asc' },
+      });
+    });
+
+    it('latestSwingOhlcDate returns the max recorded date or null', async () => {
+      const date = new Date('2026-06-11T00:00:00Z');
+      prisma.swingDailyOhlc.findFirst.mockResolvedValue({ date });
+      expect(await repo.latestSwingOhlcDate('s1')).toBe(date);
+      expect(prisma.swingDailyOhlc.findFirst).toHaveBeenCalledWith({
+        where: { swingEntryId: 's1' },
+        orderBy: { date: 'desc' },
+        select: { date: true },
+      });
+
+      prisma.swingDailyOhlc.findFirst.mockResolvedValue(null);
+      expect(await repo.latestSwingOhlcDate('s1')).toBeNull();
+    });
+
+    it('countSwingPostExitRows counts only POST_EXIT rows', async () => {
+      prisma.swingDailyOhlc.count.mockResolvedValue(42);
+      const result = await repo.countSwingPostExitRows('s1');
+      expect(result).toBe(42);
+      expect(prisma.swingDailyOhlc.count).toHaveBeenCalledWith({
+        where: { swingEntryId: 's1', phase: 'POST_EXIT' },
       });
     });
   });

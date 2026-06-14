@@ -107,6 +107,26 @@ export class AnandDualTrackController {
     });
   }
 
+  // Read-only: returns the recorded daily OHLC for a swing trade (entry → exit
+  // + up to 60 post-exit days). Rows are pre-sorted by date asc. Does NOT
+  // trigger fetching — the EOD worker + boot backfill populate the rows.
+  @Get('swing/:id/daily-ohlc')
+  async swingDailyOhlc(@Param('id') id: string) {
+    const entry = await this.repo.findSwingEntryById(id);
+    if (!entry) throw new NotFoundException(`Swing entry ${id} not found`);
+    const rows = await this.repo.listSwingDailyOhlc(id);
+    return {
+      entry: {
+        id: entry.id,
+        symbol: entry.symbol,
+        enteredAt: entry.enteredAt,
+        exitedAt: entry.exitedAt,
+        status: entry.status,
+      },
+      rows,
+    };
+  }
+
   @Patch('scanners/:id/category')
   async tagScanner(
     @Param('id') id: string,

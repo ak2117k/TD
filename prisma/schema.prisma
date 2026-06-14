@@ -965,9 +965,31 @@ model SwingEntry {
   alertId        String
   scoreBreakdown Json?
 
+  dailyOhlc      SwingDailyOhlc[]
+
   @@index([status, enteredAt])
   @@index([alertId])
   @@map("swing_entries")
+}
+
+/// Day-wise OHLC of a swing trade's underlying, recorded for the holding period
+/// PLUS up to 60 post-exit trading days. One row per (trade, trading day).
+model SwingDailyOhlc {
+  id           String     @id @default(cuid())
+  swingEntryId String
+  date         DateTime
+  open         Float
+  high         Float
+  low          Float
+  close        Float
+  phase        String     @default("HOLD") // HOLD = on/before exit; POST_EXIT = after exit
+  createdAt    DateTime   @default(now())
+
+  swingEntry   SwingEntry @relation(fields: [swingEntryId], references: [id], onDelete: Cascade)
+
+  @@unique([swingEntryId, date])
+  @@index([swingEntryId])
+  @@map("swing_daily_ohlc")
 }
 
 model SymbolLeadStat {

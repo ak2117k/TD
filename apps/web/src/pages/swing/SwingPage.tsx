@@ -4,6 +4,7 @@ import { useSwingEntries } from '../../hooks/useSwingEntries';
 import { useSwingExits } from '../../hooks/useSwingExits';
 import { useSwingOpenBook } from '../../hooks/useSwingOpenBook';
 import { useSwingCapital } from '../../hooks/useSwingCapital';
+import { useSwingDailyOhlc } from '../../hooks/useSwingDailyOhlc';
 import { summarizeOpenBook } from '../../utils/swingOpenBook';
 import { CapitalStrip } from '../../components/anand/CapitalStrip';
 import { SymbolChartLink } from '../../components/common';
@@ -69,6 +70,20 @@ function fmtIstDate(iso: string): string {
   });
 }
 
+/** Readable "Jun 09" style day label for the OHLC detail table. */
+function fmtOhlcDate(iso: string): string {
+  return new Date(iso).toLocaleDateString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    day: '2-digit',
+    month: 'short',
+  });
+}
+
+/** IST calendar day (YYYY-MM-DD) of an ISO timestamp, for exit-day matching. */
+function istDayKey(iso: string): string {
+  return new Date(iso).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+}
+
 /** Collapse a lossless ISO-timestamp lead log to distinct IST calendar days, newest first. */
 function distinctDays(isoList: string[]): string[] {
   const seen = new Set<string>();
@@ -112,6 +127,68 @@ function PnlCards({ pnl }: { pnl: PnlSummary }) {
   );
 }
 
+/** Lazy-loaded day-wise OHLC table for an expanded swing trade. Mounted only
+ *  while the row is expanded, so the fetch fires on expand. Visually
+ *  subordinate: smaller text, muted header. */
+function SwingOhlcDetail({ entry }: { entry: AnandEntry }) {
+  const { data, loading, error } = useSwingDailyOhlc(entry.id, true);
+  const exitDay = entry.exitedAt ? istDayKey(entry.exitedAt) : null;
+
+  if (loading) return <div className="px-3 py-3 text-xs text-[var(--color-text-muted)]">Loading OHLC…</div>;
+  if (error) return <div className="px-3 py-3 text-xs text-red-400">Error: {error}</div>;
+  if (!data || data.rows.length === 0)
+    return <div className="px-3 py-3 text-xs text-[var(--color-text-muted)]">No OHLC recorded yet.</div>;
+
+  return (
+    <div className="overflow-hidden rounded border border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)]/40">
+      <table className="w-full text-xs">
+        <thead className="text-left uppercase tracking-wider text-[var(--color-text-muted)]">
+          <tr>
+            <th className="px-3 py-1.5 font-medium">Date</th>
+            <th className="px-3 py-1.5 text-right font-medium">Open</th>
+            <th className="px-3 py-1.5 text-right font-medium">High</th>
+            <th className="px-3 py-1.5 text-right font-medium">Low</th>
+            <th className="px-3 py-1.5 text-right font-medium">Close</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.rows.map((r) => {
+            const isExit = exitDay != null && istDayKey(r.date) === exitDay;
+            const postExit = r.phase === 'POST_EXIT';
+            return (
+              <tr
+                key={r.date}
+                className={clsx(
+                  'border-t border-[var(--color-border-subtle)]',
+                  postExit && 'bg-[var(--color-bg-tertiary)]/40 text-[var(--color-text-muted)]',
+                )}
+              >
+                <td className="px-3 py-1.5 tabular-nums">
+                  {fmtOhlcDate(r.date)}
+                  {isExit && (
+                    <span className="ml-2 rounded bg-blue-500/20 px-1 py-0.5 text-[9px] font-semibold uppercase text-blue-300">
+                      ← exit
+                    </span>
+                  )}
+                  {postExit && !isExit && (
+                    <span className="ml-2 text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">
+                      (post-exit)
+                    </span>
+                  )}
+                </td>
+                <td className="px-3 py-1.5 text-right tabular-nums">₹{r.open.toFixed(2)}</td>
+                <td className="px-3 py-1.5 text-right tabular-nums">₹{r.high.toFixed(2)}</td>
+                <td className="px-3 py-1.5 text-right tabular-nums">₹{r.low.toFixed(2)}</td>
+                <td className="px-3 py-1.5 text-right tabular-nums">₹{r.close.toFixed(2)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function EntryRow({ entry }: { entry: AnandEntry }) {
   const [expanded, setExpanded] = useState(false);
   const ongoing = entry.exitPrice == null;
@@ -134,6 +211,12 @@ function EntryRow({ entry }: { entry: AnandEntry }) {
       >
         {/* 1. Symbol */}
         <td className="px-3 py-2 font-mono font-medium">
+          <span
+            aria-hidden
+            className="mr-1.5 inline-block w-3 text-[var(--color-text-muted)]"
+          >
+            {expanded ? '▾' : '▸'}
+          </span>
           <SymbolChartLink symbol={entry.symbol} token={entry.token} />
           {ongoing && (
             <span className="ml-2 rounded bg-amber-500/20 px-1 py-0.5 text-[9px] font-semibold uppercase text-amber-300">
@@ -218,6 +301,16 @@ function EntryRow({ entry }: { entry: AnandEntry }) {
               lotCount={0}
               checks={entry.scoreBreakdown}
             />
+          </td>
+        </tr>
+      )}
+      {expanded && (
+        <tr className="border-t border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)]/40">
+          <td colSpan={13} className="px-3 py-2">
+            <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+              Daily OHLC
+            </div>
+            <SwingOhlcDetail entry={entry} />
           </td>
         </tr>
       )}

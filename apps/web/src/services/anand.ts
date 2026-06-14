@@ -115,3 +115,28 @@ export async function listReinvestLots(status?: string): Promise<ReinvestLot[]> 
   const r = await api.get<ReinvestLot[]>('/anand/reinvest/lots', { params: { status } });
   return r.data;
 }
+
+export interface SwingDailyOhlcRow {
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  phase: 'HOLD' | 'POST_EXIT';
+}
+
+export interface SwingDailyOhlcResponse {
+  entry: {
+    id: string;
+    symbol: string;
+    enteredAt: string;
+    exitedAt: string | null;
+    status: string;
+  };
+  rows: SwingDailyOhlcRow[];
+}
+
+export async function getSwingDailyOhlc(id: string): Promise<SwingDailyOhlcResponse> {
+  const r = await api.get<SwingDailyOhlcResponse>(`/anand/swing/${id}/daily-ohlc`);
+  return r.data;
+}
