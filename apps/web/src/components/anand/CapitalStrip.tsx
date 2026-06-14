@@ -44,16 +44,21 @@ export function CapitalStrip({
   invested,
   currentValue,
   unrealizedRs,
+  available,
+  realizedRs,
 }: {
   openCount: number;
   invested: number;
   currentValue: number;
   unrealizedRs: number;
+  available?: number;
+  realizedRs?: number;
 }) {
   const pct = invested > 0 ? (unrealizedRs / invested) * 100 : 0;
   return (
     <div className="flex flex-wrap gap-3">
       <Cell label={`Invested · ${openCount} open`} value={rs(invested)} />
+      {available != null && <Cell label="Available" value={rs(available)} />}
       <Cell label="Current Value" value={rs(currentValue)} />
       <Cell
         label="Unrealized"
@@ -61,6 +66,9 @@ export function CapitalStrip({
         valueClass={moneyColor(unrealizedRs)}
         sub={`${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`}
       />
+      {realizedRs != null && (
+        <Cell label="Realized" value={signedRs(realizedRs)} valueClass={moneyColor(realizedRs)} />
+      )}
     </div>
   );
 }

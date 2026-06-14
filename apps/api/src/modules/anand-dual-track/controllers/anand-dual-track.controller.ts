@@ -48,13 +48,26 @@ export class AnandDualTrackController {
     });
     const enriched = await this.enrichWithLivePrice(entries);
     const withScanner = await this.enrichWithScannerName(enriched);
-    const leadMap = await this.repo
-      .getLeadStats('swing', withScanner.map((e) => e.symbol as string))
-      .catch(() => new Map<string, { count: number; dates: string[] }>());
-    return withScanner.map((e) => {
-      const lead = leadMap.get(e.symbol as string);
-      return { ...e, leadCount: lead?.count ?? 0, leadDates: lead?.dates ?? [] };
+    return this.enrichWithLeadStat(withScanner);
+  }
+
+  @Get('swing/exits')
+  async listSwingExits(
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('status') status?: string,
+  ) {
+    const entries = await this.repo.listSwingExits({
+      from: from ? new Date(from) : undefined,
+      to: to ? new Date(to) : undefined,
+      status: status || undefined,
     });
+    // These rows are all closed (terminal status + non-null exitedAt), so
+    // enrichWithLivePrice never live-prices them — it reports realized pnlPct
+    // from the exit price, keeping the row shape identical to swing/entries.
+    const enriched = await this.enrichWithLivePrice(entries);
+    const withScanner = await this.enrichWithScannerName(enriched);
+    return this.enrichWithLeadStat(withScanner);
   }
 
   @Get('intraday/pnl-summary')
@@ -65,6 +78,11 @@ export class AnandDualTrackController {
   @Get('swing/pnl-summary')
   async swingPnl() {
     return this.repo.getPnlSummary('swing');
+  }
+
+  @Get('swing/capital')
+  async getSwingCapital() {
+    return this.repo.getSwingCapital();
   }
 
   @Get('reinvest/pool')
@@ -159,6 +177,18 @@ export class AnandDualTrackController {
         };
       }
       return { ...e, ...resolvePriceFields(e, ltpMap, seedMap) };
+    });
+  }
+
+  private async enrichWithLeadStat<T extends { symbol: string; [key: string]: unknown }>(
+    entries: T[],
+  ): Promise<Array<T & { leadCount: number; leadDates: string[] }>> {
+    const leadMap = await this.repo
+      .getLeadStats('swing', entries.map((e) => e.symbol))
+      .catch(() => new Map<string, { count: number; dates: string[] }>());
+    return entries.map((e) => {
+      const lead = leadMap.get(e.symbol);
+      return { ...e, leadCount: lead?.count ?? 0, leadDates: lead?.dates ?? [] };
     });
   }
 

@@ -92,6 +92,80 @@ describe('AnandDualTrackRepository', () => {
     expect(result).toHaveLength(1);
   });
 
+  describe('listSwingExits', () => {
+    it('queries exited swing rows (non-TRADED + non-null exitedAt), ordered by exitedAt desc', async () => {
+      const row = { id: 's1', symbol: 'TCS', token: '456', entryPrice: 3500, exitPrice: 3850, exitedAt: new Date(), status: 'TARGET_HIT', targetPct: 10, stopPct: 10 };
+      prisma.swingEntry.findMany.mockResolvedValue([row]);
+      const result = await repo.listSwingExits({});
+      expect(result).toHaveLength(1);
+      expect(prisma.swingEntry.findMany).toHaveBeenCalledWith({
+        where: { status: { not: 'TRADED' }, exitedAt: { not: null } },
+        orderBy: { exitedAt: 'desc' },
+        take: 200,
+      });
+    });
+
+    it('applies from/to as an exitedAt window (gte/lte) alongside the not-null guard', async () => {
+      prisma.swingEntry.findMany.mockResolvedValue([]);
+      const from = new Date('2026-06-01T00:00:00Z');
+      const to = new Date('2026-06-12T00:00:00Z');
+      await repo.listSwingExits({ from, to });
+      expect(prisma.swingEntry.findMany).toHaveBeenCalledWith({
+        where: { status: { not: 'TRADED' }, exitedAt: { not: null, gte: from, lte: to } },
+        orderBy: { exitedAt: 'desc' },
+        take: 200,
+      });
+    });
+
+    it('filters by a specific exit status when one is provided', async () => {
+      prisma.swingEntry.findMany.mockResolvedValue([]);
+      await repo.listSwingExits({ status: 'STOPPED' });
+      expect(prisma.swingEntry.findMany).toHaveBeenCalledWith({
+        where: { status: 'STOPPED', exitedAt: { not: null } },
+        orderBy: { exitedAt: 'desc' },
+        take: 200,
+      });
+    });
+
+    it('falls back to the not-TRADED guard when status is empty', async () => {
+      prisma.swingEntry.findMany.mockResolvedValue([]);
+      await repo.listSwingExits({ status: '' });
+      expect(prisma.swingEntry.findMany).toHaveBeenCalledWith({
+        where: { status: { not: 'TRADED' }, exitedAt: { not: null } },
+        orderBy: { exitedAt: 'desc' },
+        take: 200,
+      });
+    });
+  });
+
+  describe('getSwingCapital', () => {
+    it('derives invested/realized/available from SwingEntry rows', async () => {
+      // open: floor(200000/2000)=100 lots @ 2000 → invested 200000
+      // exited: floor(200000/100)=2000 lots, (105-100)*2000 = +10000 realized
+      prisma.swingEntry.findMany
+        .mockResolvedValueOnce([{ entryPrice: 2000, status: 'TRADED' }])
+        .mockResolvedValueOnce([{ entryPrice: 100, exitPrice: 105, status: 'TARGET_HIT' }]);
+      const result = await repo.getSwingCapital();
+      expect(result.baseCapital).toBe(2_000_000);
+      expect(result.investedOpen).toBe(200_000);
+      expect(result.realizedPnl).toBe(10_000);
+      expect(result.available).toBe(2_000_000 - 200_000 + 10_000);
+      expect(result.openCount).toBe(1);
+    });
+
+    it('counts stop-outs as realized losses that still recycle capital', async () => {
+      // floor(200000/100)=2000 lots, (90-100)*2000 = -20000 realized
+      prisma.swingEntry.findMany
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ entryPrice: 100, exitPrice: 90, status: 'STOPPED' }]);
+      const result = await repo.getSwingCapital();
+      expect(result.investedOpen).toBe(0);
+      expect(result.realizedPnl).toBe(-20_000);
+      expect(result.available).toBe(2_000_000 - 20_000);
+      expect(result.openCount).toBe(0);
+    });
+  });
+
   it('updateIntradayStatus sets status, exitPrice, exitedAt', async () => {
     prisma.intradayEntry.update.mockResolvedValue({});
     const now = new Date('2026-06-03T05:00:00Z');

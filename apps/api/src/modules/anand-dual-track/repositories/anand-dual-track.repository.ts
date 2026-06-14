@@ -4,6 +4,8 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { realizedIntradayPnlPct } from '../intraday-pnl';
 
 const NOTIONAL = 200_000;
+// swing track's notional capital base (₹20,00,000), adjustable
+const SWING_BASE_CAPITAL = 2_000_000;
 
 export interface CreateEntryInput {
   symbol: string;
@@ -128,6 +130,65 @@ export class AnandDualTrackRepository {
       orderBy: { enteredAt: 'desc' },
       take: 200,
     });
+  }
+
+  /**
+   * Exited ("closed") swing rows, filtered by EXIT date — the complement of
+   * `listSwingEntries`, which filters by ENTRY date and therefore hides
+   * multi-day positions entered earlier but cut/closed recently. A row counts
+   * as exited when it has a terminal status (not 'TRADED') and a non-null
+   * `exitedAt`. Mirrors `listSwingEntries`' date-window guard, but on `exitedAt`.
+   */
+  async listSwingExits(filter: { from?: Date; to?: Date; status?: string } = {}) {
+    return this.prisma.swingEntry.findMany({
+      where: {
+        status: filter.status ? filter.status : { not: 'TRADED' },
+        exitedAt: {
+          not: null,
+          ...(filter.from ? { gte: filter.from } : {}),
+          ...(filter.to ? { lte: filter.to } : {}),
+        },
+      },
+      orderBy: { exitedAt: 'desc' },
+      take: 200,
+    });
+  }
+
+  /**
+   * DERIVED swing capital summary — computed live from `SwingEntry`, never from
+   * the (buggy) `ReinvestmentPool` ledger. Models a recycling capital base: each
+   * exit returns its engaged capital ± realized P&L. `available` = base capital
+   * minus capital tied up in open positions, plus all realized P&L to date.
+   *
+   * Quantity uses the same `floor(NOTIONAL / entryPrice)` lot formula for both
+   * invested and realized so the two are internally consistent.
+   */
+  async getSwingCapital(): Promise<{
+    baseCapital: number;
+    investedOpen: number;
+    realizedPnl: number;
+    available: number;
+    openCount: number;
+  }> {
+    const open = await this.prisma.swingEntry.findMany({ where: { status: 'TRADED' } });
+    let investedOpen = 0;
+    for (const e of open) {
+      const qty = e.entryPrice > 0 ? Math.floor(NOTIONAL / e.entryPrice) : 0;
+      investedOpen += qty * e.entryPrice;
+    }
+
+    const exited = await this.prisma.swingEntry.findMany({
+      where: { status: { not: 'TRADED' }, exitPrice: { not: null } },
+    });
+    let realizedPnl = 0;
+    for (const e of exited) {
+      const qty = Math.floor(NOTIONAL / e.entryPrice);
+      realizedPnl += (e.exitPrice! - e.entryPrice) * qty;
+    }
+
+    const baseCapital = SWING_BASE_CAPITAL;
+    const available = baseCapital - investedOpen + realizedPnl;
+    return { baseCapital, investedOpen, realizedPnl, available, openCount: open.length };
   }
 
   async updateIntradayStatus(id: string, data: UpdateStatusInput): Promise<void> {

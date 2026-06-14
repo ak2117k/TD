@@ -1,16 +1,22 @@
 import React, { useState } from 'react';
 import clsx from 'clsx';
 import { useSwingEntries } from '../../hooks/useSwingEntries';
+import { useSwingExits } from '../../hooks/useSwingExits';
 import { useSwingOpenBook } from '../../hooks/useSwingOpenBook';
+import { useSwingCapital } from '../../hooks/useSwingCapital';
 import { summarizeOpenBook } from '../../utils/swingOpenBook';
 import { CapitalStrip } from '../../components/anand/CapitalStrip';
 import { SymbolChartLink } from '../../components/common';
 import ChartinkScoreTable from '../../components/chartink/ChartinkScoreTable';
 import type { AnandEntry, PnlPeriod, PnlSummary } from '../../services/anand';
 
-const FILTERS = [
+const ENTRY_FILTERS = [
   { label: 'All', value: undefined },
   { label: 'Traded', value: 'TRADED' },
+] as const;
+
+const EXIT_FILTERS = [
+  { label: 'All', value: undefined },
   { label: 'Target Hit', value: 'TARGET_HIT' },
   { label: 'Stopped', value: 'STOPPED' },
 ] as const;
@@ -19,6 +25,14 @@ const NOTIONAL = 200_000;
 
 function todayIST(): string {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+}
+
+/** IST date N days before today, as YYYY-MM-DD. Used to default the Recent
+ *  Exits window to a recent lookback so multi-day cuts aren't hidden. */
+function daysAgoIST(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  return d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 }
 
 function fmtPct(n: number): string {
@@ -263,7 +277,21 @@ function EntriesTable({
 export default function SwingPage() {
   const [filter, setFilter] = useState<string | undefined>(undefined);
   const [from, setFrom] = useState(todayIST());
+  const [exitFrom, setExitFrom] = useState(daysAgoIST(7));
+  const [exitStatus, setExitStatus] = useState<string | undefined>(undefined);
   const { entries, pnl, loading, error } = useSwingEntries(filter, from);
+  // Recent Exits: closed/exited swing positions filtered by EXIT date and
+  // status. The Entries log above filters by ENTRY date, so a multi-day swing
+  // entered earlier but cut recently shows nowhere — this section surfaces it.
+  const { exits, loading: exitsLoading, error: exitsError } = useSwingExits(exitFrom, exitStatus);
+  // Capital summary: engaged vs available, recycles as positions exit.
+  const { capital } = useSwingCapital();
+  // Total realized P&L of the listed exits, using the same per-row notional
+  // basis EntryRow uses for its P&L ₹ column ((pnlPct / 100) * NOTIONAL).
+  const exitsRealizedRs = exits.reduce(
+    (sum, e) => sum + (e.pnlPct == null ? 0 : (e.pnlPct / 100) * NOTIONAL),
+    0,
+  );
   // Open Book: every currently-open position (status TRADED), with NO date
   // filter — the live-exposure source of truth. Kept separate from the
   // date-filtered `entries` above so overnight/multi-day positions are always
@@ -300,6 +328,8 @@ export default function SwingPage() {
           invested={invested}
           currentValue={currentValue}
           unrealizedRs={unrealizedRs}
+          available={capital?.available}
+          realizedRs={capital?.realizedPnl}
         />
       )}
 
@@ -326,7 +356,7 @@ export default function SwingPage() {
           Entries
         </h2>
         <div className="flex flex-wrap gap-2">
-          {FILTERS.map((f) => (
+          {ENTRY_FILTERS.map((f) => (
             <button
               key={f.label}
               onClick={() => setFilter(f.value)}
@@ -356,6 +386,53 @@ export default function SwingPage() {
           loading={loading}
           error={error}
           emptyMessage="No swing entries yet. Waiting for Anand Swing scanner alerts."
+        />
+      </section>
+
+      {/* Recent Exits — closed positions filtered by EXIT date. Surfaces
+          multi-day swings entered earlier but cut recently, which the
+          entry-date-filtered Entries log above cannot show. */}
+      <section className="flex flex-col gap-2">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">
+          Recent Exits
+        </h2>
+        <div className="flex flex-wrap items-center gap-2">
+          {EXIT_FILTERS.map((f) => (
+            <button
+              key={f.label}
+              onClick={() => setExitStatus(f.value)}
+              className={clsx(
+                'rounded px-3 py-1 text-sm transition-colors',
+                exitStatus === f.value
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]',
+              )}
+            >
+              {f.label}
+            </button>
+          ))}
+          {exits.length > 0 && (
+            <span className="text-sm text-[var(--color-text-muted)]">
+              {exits.length} exit{exits.length === 1 ? '' : 's'} ·{' '}
+              <span className={rsColor(exitsRealizedRs)}>{fmtRs(exitsRealizedRs)} realized</span>
+            </span>
+          )}
+          <div className="ml-auto flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
+            <label>Exited from:</label>
+            <input
+              type="date"
+              value={exitFrom}
+              onChange={(e) => setExitFrom(e.target.value)}
+              className="rounded bg-[var(--color-bg-tertiary)] px-2 py-1 text-[var(--color-text-secondary)]"
+            />
+          </div>
+        </div>
+
+        <EntriesTable
+          entries={exits}
+          loading={exitsLoading}
+          error={exitsError}
+          emptyMessage="No swing exits in this range."
         />
       </section>
     </div>

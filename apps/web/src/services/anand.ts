@@ -51,6 +51,26 @@ export async function listSwingEntries(params: {
   return r.data;
 }
 
+export async function listSwingExits(params: {
+  from?: string; to?: string; status?: string;
+} = {}): Promise<AnandEntry[]> {
+  const r = await api.get<AnandEntry[]>('/anand/swing/exits', { params });
+  return r.data;
+}
+
+export interface SwingCapital {
+  baseCapital: number;
+  investedOpen: number;
+  realizedPnl: number;
+  available: number;
+  openCount: number;
+}
+
+export async function getSwingCapital(): Promise<SwingCapital> {
+  const r = await api.get<SwingCapital>('/anand/swing/capital');
+  return r.data;
+}
+
 export async function getIntradayPnl(): Promise<PnlSummary> {
   const r = await api.get<PnlSummary>('/anand/intraday/pnl-summary');
   return r.data;
