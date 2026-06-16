@@ -1,5 +1,5 @@
 import { Test } from '@nestjs/testing';
-import { AdaptiveStopWatchService, AdaptiveStopRiskBudgetError } from './adaptive-stop-watch.service';
+import { AdaptiveStopWatchService, AdaptiveStopRiskBudgetError, AdaptiveStopDecisionGateError } from './adaptive-stop-watch.service';
 import { AdaptiveStopWatchRepository } from '../repositories/adaptive-stop-watch.repository';
 import { AdaptiveStopTradeRepository } from '../repositories/adaptive-stop-trade.repository';
 import { AdaptiveStopAccountService } from './adaptive-stop-account.service';
@@ -127,6 +127,32 @@ describe('AdaptiveStopWatchService.createFromAlert — vol-stop + risk-first siz
     // The gate fires before entry creation and execution.
     expect(repo.createEntry).not.toHaveBeenCalled();
     expect(exec.openTrade).not.toHaveBeenCalled();
+  });
+
+  it('decision gate REJECTS an extended / no-support entry — no entry, no trade', async () => {
+    // A 15m series trending 1900→2000 ending at "now" so the live fill (2000)
+    // sits at the top: far from any support (nearest round support ~1950, 2.5%
+    // away). Anchored to real now because evaluateGate uses new Date() for the
+    // session-day filter.
+    const now = Date.now();
+    const rising = Array.from({ length: 16 }, (_, i) => {
+      const c = 1900 + i * 6.7; // ~1900 → ~2000
+      return { timestamp: new Date(now - (16 - i) * 15 * 60_000), high: c + 1, low: c - 1, close: c, volume: 1000 };
+    });
+    adapter.getLiveQuote.mockResolvedValue({ ltp: 2000 });
+    adapter.getHistoricalData.mockResolvedValue(rising);
+
+    await expect(svc.createFromAlert(baseInput)).rejects.toBeInstanceOf(AdaptiveStopDecisionGateError);
+    expect(repo.createEntry).not.toHaveBeenCalled();
+    expect(exec.openTrade).not.toHaveBeenCalled();
+  });
+
+  it('decision gate SKIPS (fails open) on timestampless/insufficient candles — entry proceeds', async () => {
+    // The default mock candles carry no timestamp ⇒ the gate cannot evaluate ⇒
+    // it fails OPEN and the entry is still created (existing behaviour intact).
+    await svc.createFromAlert(baseInput);
+    expect(repo.createEntry).toHaveBeenCalled();
+    expect(exec.openTrade).toHaveBeenCalled();
   });
 });
 

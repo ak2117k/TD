@@ -19,3 +19,14 @@ export const GRACE_MS = 2 * 60_000;        // no stop honored in the first 2 min
 export const TRAIL_ATR_MULT = 1.0;         // give-back = TRAIL_ATR_MULT × intraday ATR(14, 5m)
 export const TRAIL_MIN_PCT = 0.6;          // floor on give-back (% of high-water)
 export const TRAIL_MAX_PCT = 1.5;          // cap on give-back (% of high-water)
+
+// --- Decision Gate (CORE2) ---
+// Post-score structural filter: take the entry only if price is AT support and
+// NOT extended. The score gate was non-predictive (rewarded extension); this
+// adds the experienced-trader read. Forward-validated on this track's history
+// (held-out: 50% win / +₹373/trade vs ungated 31% / −₹5,075). Toggle off to A/B.
+export const DECISION_GATE_ENABLED = true;
+export const GATE_NEAR_SUPPORT_PCT = 0.6;  // entry within this % above a support level
+export const GATE_RSI_HOT = 70;            // RSI(15m) >= this = extended
+export const GATE_VWAP_EXT_PCT = 1.5;      // entry > this % above session VWAP = extended
+export const GATE_SR_LOOKBACK_DAYS = 5;    // 15m candle window for swing-pivot support

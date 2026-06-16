@@ -9,7 +9,11 @@ import { AdaptiveStopTradeExecutionService } from './adaptive-stop-trade-executi
 import { AdaptiveStopGateway } from '../gateways/adaptive-stop.gateway';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { resolveStop, resolveTrail, sizeQuantity } from '../adaptive-stop-math';
-import { GRACE_MS, PROFIT_TARGET_PCT, RISK_PER_TRADE } from '../constants';
+import { evaluateDecisionGate, type GateCandle } from '../adaptive-stop-decision-gate';
+import {
+  GRACE_MS, PROFIT_TARGET_PCT, RISK_PER_TRADE,
+  DECISION_GATE_ENABLED, GATE_NEAR_SUPPORT_PCT, GATE_RSI_HOT, GATE_VWAP_EXT_PCT, GATE_SR_LOOKBACK_DAYS,
+} from '../constants';
 import { atr } from '../../signal-generator/strategies/indicators';
 // Note: NO MarketFeedService dependency — the adaptive-stop track uses
 // a REST poller (mirrors the ungated track) to sidestep the broker's
@@ -63,6 +67,13 @@ export class AdaptiveStopRiskBudgetError extends Error {
   }
 }
 
+export class AdaptiveStopDecisionGateError extends Error {
+  constructor(public readonly symbol: string, public readonly gateReason: string) {
+    super(`adaptive-stop: ${symbol} rejected by decision gate — ${gateReason}`);
+    this.name = 'AdaptiveStopDecisionGateError';
+  }
+}
+
 export interface AdaptiveStopCreateFromAlertInput {
   alertId: string | null;
   setupId: string | null;
@@ -107,6 +118,30 @@ export class AdaptiveStopWatchService {
       return a ?? 0;
     } catch {
       return 0;
+    }
+  }
+
+  /**
+   * Decision Gate (CORE2): fetch the multi-day 15m series and evaluate the
+   * structural filter at the live fill price. Fails OPEN on any data/fetch
+   * problem (a candle gap must never silently suppress an entry — that would
+   * corrupt the A/B vs the other tracks). See adaptive-stop-decision-gate.ts.
+   */
+  private async evaluateGate(token: string, exchange: string, entry: number) {
+    try {
+      const now = new Date();
+      const from = new Date(now.getTime() - GATE_SR_LOOKBACK_DAYS * 24 * 3600 * 1000);
+      const candles = await this.adapter.getHistoricalData(token, exchange, '15m', from, now);
+      return evaluateDecisionGate(entry, (candles ?? []) as GateCandle[], now.getTime(), {
+        nearSupportPct: GATE_NEAR_SUPPORT_PCT,
+        rsiHot: GATE_RSI_HOT,
+        vwapExtPct: GATE_VWAP_EXT_PCT,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `[adaptive-stop] decision-gate fetch failed for ${token}: ${err instanceof Error ? err.message : err} — failing open`,
+      );
+      return { pass: true, skipped: true } as ReturnType<typeof evaluateDecisionGate>;
     }
   }
 
@@ -178,6 +213,22 @@ export class AdaptiveStopWatchService {
     }
     const executedPrice = liveQuote;
     const profitTarget = executedPrice * (1 + PROFIT_TARGET_PCT); // 2% from fill
+
+    // 5b. DECISION GATE (CORE2) — the post-score structural filter. The score
+    //     gate is non-predictive (rewards extension); this only admits entries
+    //     that are AT support and NOT extended, the read that forward-validated
+    //     (held-out: 50% win / +₹373/trade vs ungated 31% / −₹5,075). Evaluated
+    //     at the live fill price. Toggle via DECISION_GATE_ENABLED to A/B.
+    if (DECISION_GATE_ENABLED) {
+      const gate = await this.evaluateGate(input.token, input.exchange, executedPrice);
+      if (!gate.pass) {
+        this.logger.warn(`[adaptive-stop] ${input.symbol}: decision-gate REJECT — ${gate.reason}`);
+        throw new AdaptiveStopDecisionGateError(input.symbol, gate.reason);
+      }
+      if (!gate.skipped) {
+        this.logger.log(`[adaptive-stop] ${input.symbol}: decision-gate PASS — ${gate.reason}`);
+      }
+    }
 
     // 6. Admission (capital + position cap + kill switch).
     const openTrades = await this.repo.countOpenTrades();
