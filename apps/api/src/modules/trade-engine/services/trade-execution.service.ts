@@ -13,6 +13,7 @@ import {
   TickData,
 } from '../../../common/interfaces/broker-adapter.interface';
 import { BROKER_ADAPTER_TOKEN } from '../../market-data/services/market-feed.service';
+import { isLiveTradingEnabled, LIVE_TRADING_DISABLED_MESSAGE } from '../live-trading';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { MarketContextService } from '../../market-data/services/market-context.service';
 import { SettingsService } from '../../settings/services/settings.service';
@@ -173,7 +174,20 @@ export class TradeExecutionService {
         `[Paper] Order ${orderId}: ${paperResponse.status} — ${paperResponse.message}`,
       );
     } else {
-      // Real trading — place via broker adapter
+      // Real trading — place via broker adapter.
+      // Hard backstop: refuse live placement unless LIVE_TRADING_ENABLED=true,
+      // even though isPaper:false reached here. This is the single chokepoint for
+      // real-money OPENING orders — downstream auto-SL/tracking only run for live
+      // orders, so blocking here keeps the whole live path dormant by default.
+      if (!isLiveTradingEnabled()) {
+        this.logger.warn(
+          `[Live BLOCKED] ${request.side} ${request.symbol} x${request.quantity} — ${LIVE_TRADING_DISABLED_MESSAGE}`,
+        );
+        throw new HttpException(
+          LIVE_TRADING_DISABLED_MESSAGE,
+          HttpStatus.FORBIDDEN,
+        );
+      }
       if (!this.brokerAdapter) {
         throw new HttpException(
           'No broker adapter configured — cannot place real orders',

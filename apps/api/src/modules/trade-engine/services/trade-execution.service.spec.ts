@@ -805,3 +805,69 @@ describe('TradeExecutionService.closeTrade — broker charge', () => {
     expect(paperService.applyExitAccounting).not.toHaveBeenCalled();
   });
 });
+
+describe('TradeExecutionService.executeTrade — LIVE_TRADING_ENABLED backstop', () => {
+  let service: TradeExecutionService;
+  let brokerAdapter: { placeOrder: jest.Mock; getLiveQuote: jest.Mock };
+  const ORIGINAL_FLAG = process.env.LIVE_TRADING_ENABLED;
+
+  const liveOrder = {
+    symbol: 'SBIN-EQ', token: '3045', exchange: 'NSE',
+    side: 'BUY' as any, orderType: 'MARKET' as any, quantity: 1,
+    positionType: 'DELIVERY' as any, isPaper: false,
+  } as any;
+
+  async function buildService() {
+    const repo = buildMockRepo();
+    brokerAdapter = {
+      placeOrder: jest.fn(async () => ({ orderId: 'live_1', status: 'PLACED', message: 'ok' })),
+      getLiveQuote: jest.fn(async () => ({ ltp: 600 })),
+    };
+    const module = await Test.createTestingModule({
+      providers: [
+        TradeExecutionService,
+        { provide: BROKER_ADAPTER_TOKEN, useValue: brokerAdapter },
+        { provide: PaperTradeService, useValue: { simulateOrder: jest.fn(), applyEntryCharge: jest.fn() } },
+        { provide: RiskManagerService, useValue: { validateTrade: jest.fn(async () => ({ allowed: true })) } },
+        { provide: OrderTrackerService, useValue: { trackOrder: jest.fn() } },
+        { provide: PositionManagerService, useValue: { addPosition: jest.fn() } },
+        { provide: TradeRepository, useValue: repo },
+        { provide: TradeGateway, useValue: { emitTradeUpdate: jest.fn(), emitRiskStatus: jest.fn() } },
+        // Global setting is paper, but the per-order isPaper:false routes live.
+        { provide: SettingsService, useValue: { getSettings: jest.fn(async () => ({ paperTrading: true })) } },
+        { provide: MarketFeedService, useValue: { getQuote: jest.fn(() => null) } },
+        { provide: MarketContextService, useValue: { snapshot: jest.fn(async () => null) } },
+      ],
+    }).compile();
+    return module.get(TradeExecutionService);
+  }
+
+  afterEach(() => {
+    if (ORIGINAL_FLAG === undefined) delete process.env.LIVE_TRADING_ENABLED;
+    else process.env.LIVE_TRADING_ENABLED = ORIGINAL_FLAG;
+  });
+
+  it('BLOCKS a live order (isPaper:false) when LIVE_TRADING_ENABLED is unset — never calls placeOrder', async () => {
+    delete process.env.LIVE_TRADING_ENABLED;
+    service = await buildService();
+    await expect(service.executeTrade(liveOrder)).rejects.toThrow(/Live trading is disabled/i);
+    expect(brokerAdapter.placeOrder).not.toHaveBeenCalled();
+  });
+
+  it('BLOCKS a live order when the flag is any non-"true" value (paper-safe)', async () => {
+    process.env.LIVE_TRADING_ENABLED = 'yes';
+    service = await buildService();
+    await expect(service.executeTrade(liveOrder)).rejects.toThrow(/Live trading is disabled/i);
+    expect(brokerAdapter.placeOrder).not.toHaveBeenCalled();
+  });
+
+  it('ALLOWS a live order — routes to broker placeOrder — only when LIVE_TRADING_ENABLED="true"', async () => {
+    process.env.LIVE_TRADING_ENABLED = 'true';
+    service = await buildService();
+    await service.executeTrade(liveOrder);
+    expect(brokerAdapter.placeOrder).toHaveBeenCalledTimes(1);
+    expect(brokerAdapter.placeOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ symbol: 'SBIN-EQ', side: 'BUY', quantity: 1 }),
+    );
+  });
+});

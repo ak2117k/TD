@@ -26,10 +26,6 @@ import { TradeRepository } from './repositories/trade.repository';
 // Gateway
 import { TradeGateway } from './gateways/trade.gateway';
 
-// Broker adapter token — re-use the same token defined in MarketDataModule.
-// The parent AppModule provides the concrete adapter (AngelOneAdapterService).
-import { BROKER_ADAPTER_TOKEN } from '../market-data/services/market-feed.service';
-
 @Module({
   imports: [
     PrismaModule,
@@ -58,12 +54,16 @@ import { BROKER_ADAPTER_TOKEN } from '../market-data/services/market-feed.servic
     // WebSocket gateway
     TradeGateway,
 
-    // Broker adapter — defaults to null if not provided by parent module.
-    // The AppModule wires AngelOneAdapterService to this token.
-    {
-      provide: BROKER_ADAPTER_TOKEN,
-      useValue: null,
-    },
+    // NOTE: BROKER_ADAPTER_TOKEN is intentionally NOT re-declared here.
+    // MarketDataModule (imported above) provides it as
+    // `useExisting: AngelOneAdapterService` and exports it, so the executor and
+    // its siblings resolve the REAL adapter. A previous local
+    // `{ provide: BROKER_ADAPTER_TOKEN, useValue: null }` shadowed that import
+    // (a module's own provider wins over an imported one), which silently
+    // disabled all live order placement. Real-money writes are instead gated by
+    // the LIVE_TRADING_ENABLED env flag (see live-trading.ts), not by a null
+    // adapter. The injection sites keep `@Optional()` so tests can still run
+    // without a broker.
   ],
   exports: [
     TradeExecutionService,

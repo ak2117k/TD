@@ -56,10 +56,12 @@ export class AngelOneAuthService implements OnModuleInit, OnModuleDestroy {
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private authenticated = false;
 
-  private readonly apiKey: string;
-  private readonly clientId: string;
-  private readonly password: string;
-  private readonly totpSecret: string;
+  // Mutable so updateCredentials() can swap in DB-stored credentials at runtime
+  // (the broker settings flow); seeded from env in the constructor.
+  private apiKey: string;
+  private clientId: string;
+  private password: string;
+  private totpSecret: string;
 
   private static readonly MAX_LOGIN_RETRIES = 3;
   private static readonly RETRY_DELAY_MS = 2000;
@@ -213,6 +215,49 @@ export class AngelOneAuthService implements OnModuleInit, OnModuleDestroy {
    */
   getSmartApi(): any {
     return this.smartApi;
+  }
+
+  /** Account profile (name, email, exchanges, products). Requires an active session. */
+  async getProfile(): Promise<any> {
+    this.assertAuthenticated();
+    return this.smartApi.getProfile();
+  }
+
+  /** Risk-management squareoff / funds + margin (RMS). Requires an active session. */
+  async getRMS(): Promise<any> {
+    this.assertAuthenticated();
+    return this.smartApi.getRMS();
+  }
+
+  /** Today's order book. Requires an active session. */
+  async getOrderBook(): Promise<any> {
+    this.assertAuthenticated();
+    return this.smartApi.getOrderBook();
+  }
+
+  private assertAuthenticated(): void {
+    if (!this.isAuthenticated()) {
+      throw new Error('Not authenticated. Call login() first.');
+    }
+  }
+
+  /**
+   * Swap in new credentials at runtime (broker settings flow). Recreates the
+   * SmartAPI client with the new API key and clears the current session so the
+   * next login() uses the new values. Does NOT auto-login — the caller decides.
+   */
+  updateCredentials(
+    apiKey: string,
+    clientId: string,
+    password: string,
+    totpSecret: string,
+  ): void {
+    this.apiKey = apiKey;
+    this.clientId = clientId;
+    this.password = password;
+    this.totpSecret = totpSecret;
+    this.smartApi = new SmartAPI({ api_key: apiKey });
+    this.clearSession();
   }
 
   /**

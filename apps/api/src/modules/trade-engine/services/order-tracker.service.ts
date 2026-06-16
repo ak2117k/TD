@@ -12,6 +12,7 @@ import {
 import { BROKER_ADAPTER_TOKEN } from '../../market-data/services/market-feed.service';
 import { TradeRepository } from '../repositories/trade.repository';
 import { TradeGateway } from '../gateways/trade.gateway';
+import { isLiveTradingEnabled, LIVE_TRADING_DISABLED_MESSAGE } from '../live-trading';
 
 /** Poll interval for order status (ms). */
 const POLL_INTERVAL_MS = 2000;
@@ -319,6 +320,15 @@ export class OrderTrackerService implements OnModuleDestroy {
 
   private async placeAutoStoploss(tracked: TrackedOrder): Promise<void> {
     if (!this.brokerAdapter || !tracked.originalRequest || !tracked.autoStoploss) {
+      return;
+    }
+    // Defense-in-depth: auto-SL is a real order. It can only be reached for a
+    // live tracked order (paper trades are never tracked), but gate it on the
+    // same flag as the entry so the live path is dormant by default.
+    if (!isLiveTradingEnabled()) {
+      this.logger.warn(
+        `[Live BLOCKED] auto-stoploss for trade ${tracked.tradeId} suppressed — ${LIVE_TRADING_DISABLED_MESSAGE}`,
+      );
       return;
     }
 
