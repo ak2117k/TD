@@ -302,6 +302,21 @@ export class RiskManagerService {
   }
 
   private checkMarketHours(request: ExecuteTradeDto): RiskValidation {
+    // Resting paper orders (LIMIT / STOPLOSS) are exempt from the trading-hours
+    // gate: their whole point is to sit unfilled until price reaches them, and
+    // the paper engine only fills them on live ticks (which arrive during market
+    // hours anyway). This lets a trader stage a resting order after hours for
+    // the next session. MARKET orders still need a live fill, and LIVE orders
+    // (isPaper === false) still respect hours + the LIVE_TRADING_ENABLED gate.
+    const isResting =
+      request.orderType === 'LIMIT' ||
+      request.orderType === 'STOPLOSS' ||
+      request.orderType === 'STOPLOSS_MARKET';
+    const isPaperOrder = request.isPaper !== false; // missing ⇒ paper-safe default
+    if (isResting && isPaperOrder) {
+      return { allowed: true };
+    }
+
     const exchange = request.exchange;
     const now = new Date();
     // Convert to IST (UTC+5:30)

@@ -209,6 +209,38 @@ export class PaperTradeService implements OnModuleInit {
           `current=₹${bal.toLocaleString('en-IN')} ` +
           `(realized=₹${realized.toFixed(0)}, open=${openCount}, deployed=₹${deployed.toFixed(0)})`,
       );
+
+      // Rebuild the resting-order map so PENDING limit/stop orders survive a
+      // restart instead of being silently dropped. The limit/trigger price now
+      // lives on the trade row (limitPrice/triggerPrice), so we can fully
+      // reconstruct the OrderRequest the tick-checker needs.
+      const pendingTrades = await this.tradeRepository.findPendingPaperTrades();
+      this.pendingOrders.clear();
+      let restored = 0;
+      for (const t of pendingTrades) {
+        const inst = (t as any).instrument;
+        if (!inst?.token || !t.orderId) continue;
+        this.pendingOrders.set(t.orderId, {
+          id: t.orderId,
+          request: {
+            symbol: inst.symbol,
+            token: inst.token,
+            exchange: inst.exchange,
+            side: t.side as 'BUY' | 'SELL',
+            orderType: t.orderType as OrderRequest['orderType'],
+            quantity: t.quantity,
+            price: t.limitPrice ?? undefined,
+            triggerPrice: t.triggerPrice ?? undefined,
+            positionType: t.positionType as OrderRequest['positionType'],
+            source: t.source as OrderRequest['source'],
+          },
+          createdAt: t.createdAt,
+        });
+        restored++;
+      }
+      if (restored > 0) {
+        this.logger.log(`[Paper] Restored ${restored} pending resting order(s) from DB`);
+      }
     } catch (err) {
       this.logger.warn(
         `[Paper] Balance recovery failed — keeping default ₹${DEFAULT_VIRTUAL_CAPITAL.toLocaleString('en-IN')}: ${
@@ -289,6 +321,12 @@ export class PaperTradeService implements OnModuleInit {
           this.fillCallbacks.delete(orderId);
         }
 
+        // Settle the persisted trade row so a deferred fill becomes a visible
+        // OPEN position. Without this the DB row stayed PENDING forever even
+        // after the in-memory order filled (the old callback was never wired
+        // for manual orders, and was lost on restart anyway).
+        this.persistDeferredFill(orderId, response.fillPrice ?? tick.ltp);
+
         this.logger.log(
           `[Paper] Pending order ${orderId} filled at ${tick.ltp}`,
         );
@@ -301,6 +339,41 @@ export class PaperTradeService implements OnModuleInit {
    */
   onOrderFill(orderId: string, callback: (response: OrderResponse) => void): void {
     this.fillCallbacks.set(orderId, callback);
+  }
+
+  /**
+   * Remove a resting order from the in-memory map (user cancel). No-op if the
+   * order already filled or was never tracked here. The DB row is marked
+   * CANCELLED by the caller (TradeExecutionService.cancelPendingOrder).
+   */
+  cancelPendingOrder(orderId: string): void {
+    this.pendingOrders.delete(orderId);
+    this.fillCallbacks.delete(orderId);
+  }
+
+  /**
+   * Settle the persisted trade row for a resting order that filled on a later
+   * tick. Fire-and-forget: simulateTick is sync and on the hot tick path, so we
+   * don't await the write; failures are logged, not thrown.
+   */
+  private persistDeferredFill(orderId: string, fillPrice: number): void {
+    this.tradeRepository
+      .findByOrderId(orderId)
+      .then((trade) => {
+        if (!trade || trade.status !== 'PENDING') return undefined;
+        return this.tradeRepository.updateTrade(trade.id, {
+          status: 'OPEN',
+          entryPrice: fillPrice,
+          entryTime: new Date(),
+        });
+      })
+      .catch((err) =>
+        this.logger.warn(
+          `[Paper] failed to settle deferred fill ${orderId}: ${
+            err instanceof Error ? err.message : err
+          }`,
+        ),
+      );
   }
 
   getVirtualBalance(): number {

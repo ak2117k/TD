@@ -88,6 +88,16 @@ export class TradeEngineController {
   }
 
   /**
+   * GET /api/trades/pending — Resting (PENDING) LIMIT/STOPLOSS orders awaiting
+   * their price. Optional `?source=MANUAL|WATCH|AUTO|SCANNER` scopes the result.
+   * Declared before `@Get(':id')` so "pending" isn't matched as a trade id.
+   */
+  @Get('pending')
+  async getPendingTrades(@Query('source') source?: string) {
+    return this.tradeExecutionService.getPendingTrades(source);
+  }
+
+  /**
    * GET /api/trades/positions — Live positions with real-time P&L.
    */
   @Get('positions')
@@ -144,6 +154,16 @@ export class TradeEngineController {
       exitNotes: dto.exitNotes,
       reason: dto.reason,
     });
+  }
+
+  /**
+   * POST /api/trades/:id/cancel — Cancel a resting (PENDING) order.
+   */
+  @Post(':id/cancel')
+  @HttpCode(HttpStatus.OK)
+  async cancelPendingOrder(@Param('id') id: string) {
+    this.logger.log(`Cancel pending order: ${id}`);
+    return this.tradeExecutionService.cancelPendingOrder(id);
   }
 
   /**

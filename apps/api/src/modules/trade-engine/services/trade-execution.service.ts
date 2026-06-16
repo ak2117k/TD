@@ -231,6 +231,10 @@ export class TradeExecutionService {
       positionType: request.positionType,
       quantity: request.quantity,
       entryPrice,
+      // Persist resting-order prices so a PENDING limit/stop survives a restart
+      // and the UI can show what it's waiting for. Null for MARKET orders.
+      limitPrice: initialStatus === 'PENDING' ? (request.price ?? null) : null,
+      triggerPrice: initialStatus === 'PENDING' ? (request.triggerPrice ?? null) : null,
       stoploss: request.stoploss,
       target: request.target,
       status: initialStatus,
@@ -647,6 +651,50 @@ export class TradeExecutionService {
    */
   async getOpenTrades(source?: string): Promise<Trade[]> {
     return this.tradeRepository.getOpenTrades(source);
+  }
+
+  /**
+   * Resting (PENDING) orders — LIMIT/STOPLOSS orders waiting for their price.
+   * Optional `source` scopes to one origin track (e.g. 'MANUAL').
+   */
+  async getPendingTrades(source?: string): Promise<Trade[]> {
+    return this.tradeRepository.getPendingTrades(source);
+  }
+
+  /**
+   * Cancel a resting (PENDING) order: drop it from the paper engine's pending
+   * map and mark the DB row CANCELLED. Only PENDING orders can be cancelled —
+   * an OPEN position must be closed via closeTrade, not cancelled.
+   */
+  async cancelPendingOrder(tradeId: string): Promise<Trade> {
+    const trade = await this.tradeRepository.getTradeById(tradeId);
+    if (!trade) {
+      throw new HttpException('Trade not found', HttpStatus.NOT_FOUND);
+    }
+    if (trade.status !== 'PENDING') {
+      throw new HttpException(
+        `Cannot cancel a ${trade.status} order — only PENDING orders can be cancelled`,
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    // Drop from the paper engine's in-memory resting map (no-op if absent).
+    if (trade.orderId) {
+      this.paperTradeService.cancelPendingOrder(trade.orderId);
+    }
+    // Live resting orders cancel at the broker too (risk-reducing — not gated).
+    if (!trade.isPaperTrade && trade.orderId && this.brokerAdapter) {
+      try {
+        await this.brokerAdapter.cancelOrder(trade.orderId);
+      } catch (err) {
+        this.logger.warn(
+          `Broker cancel failed for ${trade.orderId}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+    await this.tradeRepository.updateTrade(tradeId, { status: 'CANCELLED' });
+    const updated = await this.tradeRepository.getTradeById(tradeId);
+    if (updated) this.tradeGateway.emitTradeUpdate(updated);
+    return updated ?? trade;
   }
 
   /**

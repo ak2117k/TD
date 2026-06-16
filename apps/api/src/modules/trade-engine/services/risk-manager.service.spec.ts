@@ -282,4 +282,49 @@ describe('RiskManagerService — trade-rejection logging', () => {
     expect(line).toMatch(/reason="Outside trading hours/);
     warn.mockRestore();
   });
+
+  it('ALLOWS a resting paper LIMIT order outside trading hours (it rests until next session)', async () => {
+    const mod = await buildModule({
+      settings: {
+        maxDailyLoss: 5000,
+        maxConcurrentPositions: 10,
+        maxCapitalPerTrade: 200000,
+        paperTrading: true,
+        tradingHoursOnly: true,
+      },
+    });
+    const svc = mod.get(RiskManagerService);
+    const realDate = Date;
+    const fixed = new realDate('2026-05-18T03:00:00+05:30'); // 03:00 IST — closed
+    jest
+      .spyOn(global, 'Date')
+      .mockImplementation(((...args: any[]) =>
+        args.length ? new (realDate as any)(...args) : fixed) as any);
+
+    // Resting paper LIMIT order — exempt from the hours gate.
+    const limitOk = await svc.validateTrade({
+      ...baseRequest,
+      orderType: 'LIMIT' as any,
+      isPaper: true as any,
+    } as any);
+    // A MARKET order at the same closed time is still rejected.
+    const marketBlocked = await svc.validateTrade({
+      ...baseRequest,
+      orderType: 'MARKET' as any,
+      isPaper: true as any,
+    } as any);
+    // A LIVE limit order (isPaper:false) still respects the hours gate.
+    const liveLimitBlocked = await svc.validateTrade({
+      ...baseRequest,
+      orderType: 'LIMIT' as any,
+      isPaper: false as any,
+    } as any);
+
+    (global.Date as any).mockRestore();
+    expect(limitOk.allowed).toBe(true);
+    expect(marketBlocked.allowed).toBe(false);
+    expect(marketBlocked.reason).toMatch(/Outside trading hours/);
+    expect(liveLimitBlocked.allowed).toBe(false);
+    expect(liveLimitBlocked.reason).toMatch(/Outside trading hours/);
+  });
 });

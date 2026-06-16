@@ -147,6 +147,12 @@ model Trade {
   quantity        Int
   entryPrice      Float?
   exitPrice       Float?
+  // Resting-order prices for LIMIT / STOPLOSS orders that sit PENDING until the
+  // market reaches them. Persisted so a pending order survives an API restart
+  // (the paper engine rebuilds its pending map from these on boot) and so the
+  // UI can show what price the order is waiting for. Null for MARKET orders.
+  limitPrice      Float?
+  triggerPrice    Float?
   stoploss        Float?
   target          Float?
   pnl             Float?

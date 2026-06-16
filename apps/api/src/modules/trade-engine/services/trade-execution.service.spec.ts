@@ -430,6 +430,47 @@ describe('TradeExecutionService.executeTrade — paper-trade entry price', () =>
     const created = (repo.createTrade as jest.Mock).mock.calls[0][0];
     expect(created.source).toBe('WATCH');
   });
+
+  it('persists limitPrice + PENDING status for a resting paper LIMIT order', async () => {
+    // A LIMIT order below market does not fill — the simulator returns PENDING.
+    paperService.simulateOrder.mockResolvedValueOnce({
+      orderId: 'paper_limit_1',
+      status: 'PENDING',
+      message: 'Paper order pending — waiting for price trigger',
+    });
+
+    await service.executeTrade({
+      symbol: 'SBIN-EQ',
+      token: '3045',
+      exchange: 'NSE',
+      side: 'BUY' as any,
+      orderType: 'LIMIT' as any,
+      quantity: 5,
+      price: 400,
+      positionType: 'DELIVERY' as any,
+    } as any);
+
+    const created = (repo.createTrade as jest.Mock).mock.calls[0][0];
+    expect(created.status).toBe('PENDING');
+    expect(created.limitPrice).toBe(400); // durable — survives restart + shown in UI
+    expect(created.entryPrice).toBeUndefined(); // not filled yet
+  });
+
+  it('does NOT persist a limitPrice for a MARKET order (only resting orders carry one)', async () => {
+    await service.executeTrade({
+      symbol: 'NIFTY24MAY22500CE',
+      token: '99926000',
+      exchange: 'NFO',
+      side: 'BUY' as any,
+      orderType: 'MARKET' as any,
+      quantity: 50,
+      positionType: 'INTRADAY' as any,
+    } as any);
+
+    const created = (repo.createTrade as jest.Mock).mock.calls[0][0];
+    expect(created.limitPrice).toBeNull();
+    expect(created.triggerPrice).toBeNull();
+  });
 });
 
 /**

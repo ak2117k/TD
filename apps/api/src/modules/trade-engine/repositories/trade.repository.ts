@@ -35,6 +35,8 @@ export class TradeRepository {
     positionType: string;
     quantity: number;
     entryPrice?: number;
+    limitPrice?: number | null;
+    triggerPrice?: number | null;
     stoploss?: number;
     target?: number;
     status: string;
@@ -93,6 +95,40 @@ export class TradeRepository {
       where: { id },
       data,
     });
+  }
+
+  /**
+   * Resting (PENDING) orders — LIMIT/STOPLOSS orders waiting for the market to
+   * reach their price. Optional `source` scopes to one origin track (e.g.
+   * 'MANUAL'). Ordered newest-first for the UI's pending-orders list.
+   */
+  async getPendingTrades(source?: string): Promise<Trade[]> {
+    return this.prisma.trade.findMany({
+      where: {
+        status: 'PENDING',
+        ...(source ? { source } : {}),
+      },
+      include: { instrument: true, signal: true },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  /**
+   * All PENDING paper orders, oldest-first. Used by PaperTradeService.onModuleInit
+   * to rebuild the in-memory pending map after a restart so resting orders are
+   * not silently dropped.
+   */
+  async findPendingPaperTrades(): Promise<Trade[]> {
+    return this.prisma.trade.findMany({
+      where: { status: 'PENDING', isPaperTrade: true },
+      include: { instrument: true },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
+
+  /** Look up a trade by its (broker/paper) order id — used to settle a deferred fill. */
+  async findByOrderId(orderId: string): Promise<Trade | null> {
+    return this.prisma.trade.findFirst({ where: { orderId } });
   }
 
   async getOpenTrades(source?: string): Promise<Trade[]> {
