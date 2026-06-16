@@ -24,6 +24,7 @@ import { UngatedWatchPage } from '@/pages/ungated-watch/UngatedWatchPage';
 import { AdaptiveStopPage } from '@/pages/adaptive-stop/AdaptiveStopPage';
 import IntradayPage from '@/pages/intraday/IntradayPage';
 import SwingPage from '@/pages/swing/SwingPage';
+import BreakoutSwingPage from '@/pages/breakout-swing/BreakoutSwingPage';
 import ReinvestPage from '@/pages/reinvest/ReinvestPage';
 
 export default function App() {
@@ -52,6 +53,7 @@ export default function App() {
         <Route path="adaptive-stop" element={<AdaptiveStopPage />} />
         <Route path="intraday" element={<IntradayPage />} />
         <Route path="swing" element={<SwingPage />} />
+        <Route path="breakout-swing" element={<BreakoutSwingPage />} />
         <Route path="reinvest" element={<ReinvestPage />} />
         <Route path="auto-trade" element={<AutoTradePage />} />
         <Route path="manual-trade" element={<ManualTradePage />} />

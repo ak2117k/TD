@@ -14,6 +14,7 @@ import { ChartinkController } from './controllers/chartink.controller';
 import { UngatedTrackModule } from '../ungated-track/ungated-track.module';
 import { AdaptiveStopTrackModule } from '../adaptive-stop-track/adaptive-stop-track.module';
 import { AnandDualTrackModule } from '../anand-dual-track/anand-dual-track.module';
+import { BreakoutSwingTrackModule } from '../breakout-swing-track/breakout-swing-track.module';
 
 // @Global so ChartinkRepository and ChartinkScoringService are injectable
 // without consumers importing this module — avoids the circular dep that would
@@ -31,6 +32,7 @@ import { AnandDualTrackModule } from '../anand-dual-track/anand-dual-track.modul
     UngatedTrackModule,
     AdaptiveStopTrackModule,
     AnandDualTrackModule,
+    BreakoutSwingTrackModule,
     BullModule.registerQueue({ name: 'chartink-process' }),
   ],
   controllers: [ChartinkWebhookController, ChartinkController],

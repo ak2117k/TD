@@ -16,6 +16,7 @@ import {
 } from '../../../ungated-track/services/ungated-paper-account.service';
 import { AdaptiveStopWatchService } from '../../../adaptive-stop-track/services/adaptive-stop-watch.service';
 import { AnandDualTrackService } from '../../../anand-dual-track/services/anand-dual-track.service';
+import { BreakoutSwingService } from '../../../breakout-swing-track/services/breakout-swing.service';
 import { LevelBookService } from '../../../signal-generator/services/level-book.service';
 
 /** A 5-min-MACD score-check entry, for exercising the MACD entry gate. */
@@ -49,6 +50,7 @@ describe('ChartinkProcessService', () => {
   let adaptiveStopWatch: { createFromAlert: jest.Mock };
   let ungatedRejections: { record: jest.Mock };
   let anandDualTrack: { createEntries: jest.Mock };
+  let breakoutSwing: { createFromAlert: jest.Mock };
   let levelBook: { lazyLoad: jest.Mock };
 
   // Default happy-path candles — 50 bars trending UP, enough for classifyTrend
@@ -87,6 +89,7 @@ describe('ChartinkProcessService', () => {
     adaptiveStopWatch = { createFromAlert: jest.fn().mockResolvedValue({ id: 'as1' }) };
     ungatedRejections = { record: jest.fn().mockResolvedValue(undefined) };
     anandDualTrack = { createEntries: jest.fn().mockResolvedValue(undefined) };
+    breakoutSwing = { createFromAlert: jest.fn().mockResolvedValue({ id: 'bs1' }) };
     // Default: lazyLoad returns null so setupContext stays null in tests that
     // don't care about S/R room. Individual tests can override this.
     levelBook = { lazyLoad: jest.fn().mockResolvedValue(null) };
@@ -105,6 +108,7 @@ describe('ChartinkProcessService', () => {
         { provide: AdaptiveStopWatchService, useValue: adaptiveStopWatch },
         { provide: UngatedRejectionRepository, useValue: ungatedRejections },
         { provide: AnandDualTrackService, useValue: anandDualTrack },
+        { provide: BreakoutSwingService, useValue: breakoutSwing },
         { provide: LevelBookService, useValue: levelBook },
       ],
     }).compile();
@@ -344,6 +348,29 @@ describe('ChartinkProcessService', () => {
       scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [macd5mCheck(true), supertrendCheck(true)] });
       await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 }, 'scan', 'OTHER');
       expect(anandDualTrack.createEntries).not.toHaveBeenCalled();
+    });
+
+    it('ANAND_SWING: also fires breakoutSwing.createFromAlert on the same signal', async () => {
+      scoring.score.mockResolvedValue({ score: 30, lotCount: 0, checks: [] });
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 }, 'scan', 'ANAND_SWING');
+      expect(breakoutSwing.createFromAlert).toHaveBeenCalledWith(expect.objectContaining({
+        alertId: 'alert-1', symbol: 'RELIANCE', token: '2885', hitPrice: 2885, scoreBreakdown: null,
+      }));
+    });
+
+    it('ANAND_SWING: breakoutSwing reject is swallowed and does not block anand dual-track', async () => {
+      scoring.score.mockResolvedValue({ score: 30, lotCount: 0, checks: [] });
+      breakoutSwing.createFromAlert.mockRejectedValue(new Error('breakout-swing: RELIANCE rejected — not near resistance'));
+      await expect(
+        service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 }, 'scan', 'ANAND_SWING'),
+      ).resolves.toBeUndefined();
+      expect(anandDualTrack.createEntries).toHaveBeenCalled();
+    });
+
+    it('non-ANAND_SWING category does NOT fire breakoutSwing', async () => {
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [macd5mCheck(true), supertrendCheck(true)] });
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 }, 'scan', 'OTHER');
+      expect(breakoutSwing.createFromAlert).not.toHaveBeenCalled();
     });
 
     it('persists kind=scored-low and does NOT call watch.createFromAlert when score < 47', async () => {

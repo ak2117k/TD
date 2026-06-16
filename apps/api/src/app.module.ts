@@ -24,6 +24,7 @@ import { StrategyReviewModule } from './modules/strategy-review/strategy-review.
 import { UngatedTrackModule } from './modules/ungated-track/ungated-track.module';
 import { AdaptiveStopTrackModule } from './modules/adaptive-stop-track/adaptive-stop-track.module';
 import { AnandDualTrackModule } from './modules/anand-dual-track/anand-dual-track.module';
+import { BreakoutSwingTrackModule } from './modules/breakout-swing-track/breakout-swing-track.module';
 
 @Module({
   imports: [
@@ -108,6 +109,9 @@ import { AnandDualTrackModule } from './modules/anand-dual-track/anand-dual-trac
 
     // Anand Dual-Track — intraday (5%) and swing (10%) analysis logs
     AnandDualTrackModule,
+
+    // Breakout-Swing Track — breakout variant of the Anand swing track
+    BreakoutSwingTrackModule,
   ],
   providers: [],
 })

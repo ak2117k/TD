@@ -978,6 +978,54 @@ model SwingEntry {
   @@map("swing_entries")
 }
 
+// Breakout Swing track — a breakout variant of the Anand swing (clone of
+// SwingEntry + the resting-limit/queue + management fields). Lifecycle:
+// QUEUED (resting limit-buy armed) -> TRADED (breakout filled) ->
+// {TARGET_HIT | STOPPED | BIG_MOVER_EOD | EXPIRED | DISMISSED}.
+// See docs spec 2026-06-16-breakout-swing-track.
+model BreakoutSwingEntry {
+  id             String    @id @default(cuid())
+  symbol         String
+  token          String?
+  alertId        String
+  scoreBreakdown Json?
+
+  // --- breakout entry setup (resting limit-buy) ---
+  signalPrice    Float                          // price at the alert
+  resistance     Float?                         // nearest detected resistance
+  limitPrice     Float                          // resting limit = signalPrice × (1 + LIMIT_PCT)
+  prevDayClose   Float?                         // gate: current price > prev day close
+  status         String    @default("QUEUED")
+  queuedAt       DateTime  @default(now())
+
+  // --- fill (null while QUEUED) ---
+  entryPrice     Float?
+  enteredAt      DateTime?
+  quantity       Int?
+  targetPct      Float     @default(10.0)
+  stopPct        Float     @default(10.0)
+
+  // --- management ---
+  trailing          Boolean  @default(false)
+  trailingHighWater Float?
+  stopPrice         Float?                       // current effective stop (trailed after +7%)
+  currentPrice      Float?
+  lastTickAt        DateTime?
+
+  // --- exit ---
+  exitPrice      Float?
+  exitedAt       DateTime?
+  exitReason     String?
+
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([status])
+  @@index([token])
+  @@index([alertId])
+  @@map("breakout_swing_entries")
+}
+
 /// Day-wise OHLC of a swing trade's underlying, recorded for the holding period
 /// PLUS up to 60 post-exit trading days. One row per (trade, trading day).
 model SwingDailyOhlc {

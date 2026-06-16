@@ -15,6 +15,7 @@ import {
 } from '../../ungated-track/services/ungated-paper-account.service';
 import { AdaptiveStopWatchService } from '../../adaptive-stop-track/services/adaptive-stop-watch.service';
 import { AnandDualTrackService } from '../../anand-dual-track/services/anand-dual-track.service';
+import { BreakoutSwingService } from '../../breakout-swing-track/services/breakout-swing.service';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
 
 interface Hit {
@@ -63,6 +64,7 @@ export class ChartinkProcessService {
     private readonly ungatedRejections: UngatedRejectionRepository,
     private readonly adaptiveStopWatch: AdaptiveStopWatchService,
     private readonly anandDualTrack: AnandDualTrackService,
+    private readonly breakoutSwing: BreakoutSwingService,
     @Optional() private readonly levelBook?: LevelBookService,
   ) {}
 
@@ -193,6 +195,25 @@ export class ChartinkProcessService {
       } catch (err) {
         this.logger.warn(
           `[anand-dual-track] createEntries failed for ${hit.symbol}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+
+      // Breakout-Swing track — a breakout variant of the swing track. Runs off
+      // the SAME ANAND_SWING signals but applies its own near-resistance +
+      // above-prev-close gates and a resting limit-buy. Independent try/catch:
+      // a reject (the common case) or any failure must never affect the other
+      // tracks above.
+      try {
+        await this.breakoutSwing.createFromAlert({
+          alertId,
+          symbol: hit.symbol,
+          token: instrument.token,
+          hitPrice: hit.hitPrice,
+          scoreBreakdown: null,
+        });
+      } catch (err) {
+        this.logger.log(
+          `[breakout-swing] createFromAlert skipped for ${hit.symbol}: ${err instanceof Error ? err.message : err}`,
         );
       }
     }
