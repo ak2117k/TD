@@ -1,8 +1,10 @@
 import {
-  evaluateDecisionGate, detectSwingPivots, roundGrid, rsi, type GateCandle,
+  evaluateDecisionGate, detectSwingPivots, roundGrid, rsi, macdHistogram, type GateCandle,
 } from './adaptive-stop-decision-gate';
 
-const PARAMS = { nearSupportPct: 0.6, rsiHot: 70, vwapExtPct: 1.5 };
+// Existing support/extension tests run with the 15m-MACD rule OFF so they
+// isolate those rules; dedicated tests below cover requireMacdBullish.
+const PARAMS = { nearSupportPct: 0.6, rsiHot: 70, vwapExtPct: 1.5, requireMacdBullish: false };
 
 // Build a same-IST-day 15m series from {h,l,c} rows starting 09:15 IST
 // (03:45Z). `nowMs` is set just after the last candle closes so every bar
@@ -39,6 +41,48 @@ describe('decision-gate primitives', () => {
   it('rsi returns null below period+1 and ~100 on a monotonic rise', () => {
     expect(rsi([1, 2, 3])).toBeNull();
     expect(rsi(Array.from({ length: 20 }, (_, i) => 100 + i))).toBeCloseTo(100, 0);
+  });
+  it('macdHistogram: null below 26 bars, >0 on a rising series, <0 on a falling series', () => {
+    expect(macdHistogram([1, 2, 3])).toBeNull();
+    expect(macdHistogram(Array.from({ length: 40 }, (_, i) => 100 + i))!).toBeGreaterThan(0);
+    expect(macdHistogram(Array.from({ length: 40 }, (_, i) => 200 - i))!).toBeLessThan(0);
+  });
+});
+
+describe('evaluateDecisionGate — 15m MACD trend rule', () => {
+  // 40 rising 15m bars (today) → MACD bullish, with a swing low near the entry.
+  function risingWithDip(dipAt: number) {
+    const base = new Date('2026-06-15T03:45:00.000Z').getTime();
+    const rows = Array.from({ length: 40 }, (_, i) => {
+      const c = 100 + i * 0.5; // steady uptrend → bullish MACD
+      const dip = i === dipAt ? 1.2 : 0; // a 3-bar fractal low
+      return { timestamp: new Date(base + i * 15 * 60_000), high: c + 0.3, low: c - 0.3 - dip, close: c, volume: 1000 };
+    });
+    return { candles: rows as GateCandle[], nowMs: base + 40 * 15 * 60_000 + 60_000 };
+  }
+
+  it('with requireMacdBullish=false the MACD does not gate', () => {
+    const { candles, nowMs } = risingWithDip(36);
+    const entry = candles[37].low + 0.1; // just above the recent swing low
+    const r = evaluateDecisionGate(entry, candles, nowMs, { ...PARAMS, requireMacdBullish: false });
+    expect(r.macdBullish).toBe(true); // rising series
+    // pass/fail here is driven by support/extension, not MACD
+    expect(r.skipped).toBe(false);
+  });
+
+  it('a 15m-bearish entry is REJECTED when requireMacdBullish=true', () => {
+    // Falling 15m series → MACD bearish.
+    const base = new Date('2026-06-15T03:45:00.000Z').getTime();
+    const rows = Array.from({ length: 40 }, (_, i) => {
+      const c = 200 - i * 0.5;
+      return { timestamp: new Date(base + i * 15 * 60_000), high: c + 0.3, low: c - 0.3, close: c, volume: 1000 };
+    }) as GateCandle[];
+    const nowMs = base + 40 * 15 * 60_000 + 60_000;
+    const entry = rows[39].close; // at the bottom
+    const r = evaluateDecisionGate(entry, rows, nowMs, { ...PARAMS, requireMacdBullish: true });
+    expect(r.macdBullish).toBe(false);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toMatch(/15m MACD bearish/);
   });
 });
 

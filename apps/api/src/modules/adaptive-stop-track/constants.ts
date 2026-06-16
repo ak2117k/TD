@@ -30,3 +30,8 @@ export const GATE_NEAR_SUPPORT_PCT = 0.6;  // entry within this % above a suppor
 export const GATE_RSI_HOT = 70;            // RSI(15m) >= this = extended
 export const GATE_VWAP_EXT_PCT = 1.5;      // entry > this % above session VWAP = extended
 export const GATE_SR_LOOKBACK_DAYS = 5;    // 15m candle window for swing-pivot support
+// Higher-timeframe trend filter: also require the 15m MACD histogram bullish at
+// entry. In-sample the slow (15m) MACD was the only momentum signal that worked
+// (48% win / +₹7,900 bullish vs 35% / −₹3,402 bearish); the fast 1m/5m MACD is
+// noise. Experimental — the adaptive track is the sandbox; toggle to A/B.
+export const GATE_REQUIRE_15M_MACD = true;

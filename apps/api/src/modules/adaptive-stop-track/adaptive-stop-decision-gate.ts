@@ -28,6 +28,13 @@ export interface GateParams {
   rsiHot: number;
   /** Entry more than this % above session VWAP = extended (chasing). */
   vwapExtPct: number;
+  /**
+   * When true, also require the 15m MACD histogram to be bullish (>0) at entry —
+   * a higher-timeframe TREND filter. In-sample this was the only momentum signal
+   * that discriminated (15m bullish 48% win / +₹7,900 vs bearish 35% / −₹3,402);
+   * the fast 1m/5m MACD is noise. Experimental on the adaptive sandbox.
+   */
+  requireMacdBullish: boolean;
 }
 
 export interface DecisionGateResult {
@@ -36,13 +43,33 @@ export interface DecisionGateResult {
   skipped: boolean;
   nearSupport: boolean;
   notExtended: boolean;
+  macdBullish: boolean;
   reason: string;
   detail: {
     nearestSupport: number | null;
     distSupportPct: number | null;
     rsi: number | null;
     vwapExtPct: number | null;
+    macdHist: number | null;
   };
+}
+
+/** EMA series for a closes array. */
+function emaSeries(values: number[], period: number): number[] {
+  const k = 2 / (period + 1);
+  let e = values[0];
+  const out = [e];
+  for (let i = 1; i < values.length; i++) { e = values[i] * k + e * (1 - k); out.push(e); }
+  return out;
+}
+
+/** Latest MACD(12,26,9) histogram for a closes series, or null if too few bars. */
+export function macdHistogram(closes: number[]): number | null {
+  if (closes.length < 26) return null;
+  const e12 = emaSeries(closes, 12), e26 = emaSeries(closes, 26);
+  const macd = closes.map((_, i) => e12[i] - e26[i]);
+  const signal = emaSeries(macd, 9);
+  return macd[macd.length - 1] - signal[signal.length - 1];
 }
 
 const ms = (c: GateCandle): number => new Date(c.timestamp).getTime();
@@ -119,16 +146,15 @@ export function evaluateDecisionGate(
   nowMs: number,
   p: GateParams,
 ): DecisionGateResult {
-  const empty = { nearestSupport: null, distSupportPct: null, rsi: null, vwapExtPct: null };
-  if (!(entry > 0) || !Array.isArray(candles15m)) {
-    return { pass: true, skipped: true, nearSupport: false, notExtended: false, reason: 'no-candles (gate skipped)', detail: empty };
-  }
+  const empty = { nearestSupport: null, distSupportPct: null, rsi: null, vwapExtPct: null, macdHist: null };
+  const skip = (reason: string): DecisionGateResult => ({
+    pass: true, skipped: true, nearSupport: false, notExtended: false, macdBullish: false, reason, detail: empty,
+  });
+  if (!(entry > 0) || !Array.isArray(candles15m)) return skip('no-candles (gate skipped)');
   const before = candles15m.filter((c) => ms(c) + 15 * 60_000 <= nowMs);
   const dayKey = istDateKey(nowMs);
   const sameDay = before.filter((c) => istDateKey(ms(c)) === dayKey);
-  if (before.length < 10 || sameDay.length < 3) {
-    return { pass: true, skipped: true, nearSupport: false, notExtended: false, reason: 'insufficient-candles (gate skipped)', detail: empty };
-  }
+  if (before.length < 10 || sameDay.length < 3) return skip('insufficient-candles (gate skipped)');
 
   // --- Rule: AT SUPPORT (multi-day swing-low pivots + round numbers below) ---
   const pivots = detectSwingPivots(before);
@@ -148,16 +174,24 @@ export function evaluateDecisionGate(
   const vwapExtPct = ((entry - vwap) / vwap) * 100;
   const notExtended = (r == null || r < p.rsiHot) && vwapExtPct < p.vwapExtPct;
 
-  const pass = nearSupport && notExtended;
+  // --- Rule: 15m TREND (higher-timeframe MACD histogram bullish) ---
+  // Computed on the full multi-day 15m series so MACD(26) is valid even early
+  // in the session. Only enforced when requireMacdBullish is on.
+  const macdHist = macdHistogram(before.map((c) => c.close));
+  const macdBullish = macdHist != null && macdHist > 0;
+  const macdOk = !p.requireMacdBullish || macdBullish;
+
+  const pass = nearSupport && notExtended && macdOk;
   const reason = pass
-    ? 'ok (at support, not extended)'
+    ? `ok (at support, not extended${p.requireMacdBullish ? ', 15m MACD bullish' : ''})`
     : [
         !nearSupport ? `not-at-support (${distSupportPct == null ? 'none below' : distSupportPct.toFixed(2) + '% away'})` : null,
         !notExtended ? `extended (rsi=${r == null ? 'n/a' : r.toFixed(0)}, vwap+${vwapExtPct.toFixed(2)}%)` : null,
+        p.requireMacdBullish && !macdBullish ? `15m MACD bearish (hist=${macdHist == null ? 'n/a' : macdHist.toFixed(3)})` : null,
       ].filter(Boolean).join('; ');
 
   return {
-    pass, skipped: false, nearSupport, notExtended, reason,
-    detail: { nearestSupport, distSupportPct, rsi: r, vwapExtPct },
+    pass, skipped: false, nearSupport, notExtended, macdBullish, reason,
+    detail: { nearestSupport, distSupportPct, rsi: r, vwapExtPct, macdHist },
   };
 }

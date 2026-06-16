@@ -13,6 +13,7 @@ import { evaluateDecisionGate, type GateCandle } from '../adaptive-stop-decision
 import {
   GRACE_MS, PROFIT_TARGET_PCT, RISK_PER_TRADE,
   DECISION_GATE_ENABLED, GATE_NEAR_SUPPORT_PCT, GATE_RSI_HOT, GATE_VWAP_EXT_PCT, GATE_SR_LOOKBACK_DAYS,
+  GATE_REQUIRE_15M_MACD,
 } from '../constants';
 import { atr } from '../../signal-generator/strategies/indicators';
 // Note: NO MarketFeedService dependency — the adaptive-stop track uses
@@ -136,6 +137,7 @@ export class AdaptiveStopWatchService {
         nearSupportPct: GATE_NEAR_SUPPORT_PCT,
         rsiHot: GATE_RSI_HOT,
         vwapExtPct: GATE_VWAP_EXT_PCT,
+        requireMacdBullish: GATE_REQUIRE_15M_MACD,
       });
     } catch (err) {
       this.logger.warn(
