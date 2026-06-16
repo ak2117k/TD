@@ -35,7 +35,7 @@ export class ChartinkRepository {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  async upsertScanner(input: UpsertScannerInput): Promise<{ id: string }> {
+  async upsertScanner(input: UpsertScannerInput): Promise<{ id: string; category: string }> {
     const row = await this.prisma.chartinkScanner.upsert({
       where: { scanUrl: input.scanUrl },
       create: {
@@ -52,7 +52,9 @@ export class ChartinkRepository {
         lastFiredAt: input.firedAt,
         fireCount: { increment: 1 },
       },
-      select: { id: true },
+      // `category` lets the ingest path prioritise ANAND_SWING jobs so the
+      // intraday/swing track isn't starved behind the scoring backlog.
+      select: { id: true, category: true },
     });
     return row;
   }

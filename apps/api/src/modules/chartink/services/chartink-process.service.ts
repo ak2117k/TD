@@ -172,6 +172,31 @@ export class ChartinkProcessService {
       return;
     }
 
+    // === 1b. ANAND DUAL TRACK (intraday 5% + swing 10%) ===
+    // Fires IMMEDIATELY after symbol resolution — BEFORE the direction gate and
+    // scoring (both of which do slow, rate-paced Angel fetches). This track takes
+    // EVERY ANAND_SWING signal with NO score filter and NO direction gate (the
+    // two tracks differ only by target/SL), so it must never be starved by the
+    // scoring backlog. Dedup guards (active position / already-hit-target-today)
+    // live inside createEntries. Independent try/catch: must not block the scored
+    // tracks below. (Was previously at the end of processOne, after scoring —
+    // which starved it whenever the queue backed up.)
+    if (scannerCategory === 'ANAND_SWING') {
+      try {
+        await this.anandDualTrack.createEntries({
+          alertId,
+          symbol: hit.symbol,
+          token: instrument.token,
+          hitPrice: hit.hitPrice,
+          scoreBreakdown: null,
+        });
+      } catch (err) {
+        this.logger.warn(
+          `[anand-dual-track] createEntries failed for ${hit.symbol}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
     // === 2. DIRECTION GATE (sector trend, with stock-trend fallback) ===
     // We prefer to derive side from the stock's sector index trend. If the
     // sector lookup or its data is unavailable for ANY reason, we fall back
@@ -413,21 +438,8 @@ export class ChartinkProcessService {
       }
     }
 
-    // === 6. ANAND DUAL TRACK — runs for ANAND_SWING scanners after scoring.
-    // Independent try/catch: failures here MUST NOT affect gated or ungated paths.
-    if (scannerCategory === 'ANAND_SWING') {
-      try {
-        await this.anandDualTrack.createEntries({
-          alertId,
-          symbol: hit.symbol,
-          token: instrument.token,
-          hitPrice: hit.hitPrice,
-          scoreBreakdown: scoringResult.checks,
-        });
-      } catch (err) {
-        this.logger.warn(`[anand-dual-track] createEntries failed for ${hit.symbol}: ${err instanceof Error ? err.message : err}`);
-      }
-    }
+    // (The Anand dual-track formerly ran here, after scoring; it now runs at
+    // step 1b above so it's never starved by the scoring backlog.)
   }
 
   private mapUngatedError(err: unknown): UngatedRejectionReason | null {

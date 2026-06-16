@@ -324,6 +324,28 @@ describe('ChartinkProcessService', () => {
       }));
     });
 
+    it('ANAND_SWING: creates intraday+swing entries with NO score filter (even on a low score)', async () => {
+      scoring.score.mockResolvedValue({ score: 30, lotCount: 0, checks: [] }); // would reject the gated track
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 }, 'ANAND SWING 1ST JUNE 26', 'ANAND_SWING');
+      expect(anandDualTrack.createEntries).toHaveBeenCalledWith(expect.objectContaining({
+        alertId: 'alert-1', symbol: 'RELIANCE', token: '2885', hitPrice: 2885,
+      }));
+    });
+
+    it('ANAND_SWING: dual-track fires even when scoring THROWS (proves it runs before scoring)', async () => {
+      scoring.score.mockRejectedValue(new Error('scoring down'));
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 }, 'scan', 'ANAND_SWING');
+      expect(anandDualTrack.createEntries).toHaveBeenCalledWith(expect.objectContaining({
+        symbol: 'RELIANCE', token: '2885',
+      }));
+    });
+
+    it('non-ANAND_SWING category does NOT create dual-track entries', async () => {
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [macd5mCheck(true), supertrendCheck(true)] });
+      await service.processOne('alert-1', { symbol: 'RELIANCE', hitPrice: 2885 }, 'scan', 'OTHER');
+      expect(anandDualTrack.createEntries).not.toHaveBeenCalled();
+    });
+
     it('persists kind=scored-low and does NOT call watch.createFromAlert when score < 47', async () => {
       scoring.score.mockResolvedValue({ score: 30, lotCount: 0, checks: [] });
 

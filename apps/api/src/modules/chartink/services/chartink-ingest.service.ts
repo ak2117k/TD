@@ -71,10 +71,19 @@ export class ChartinkIngestService {
       rawPayload: payload as unknown as Prisma.InputJsonValue,
     });
 
-    await this.queue.add('process', { alertId: alert.id, hits });
+    // Prioritise ANAND_SWING alerts in the process queue (Bull: lower number =
+    // higher priority) so the intraday/swing dual-track — which has no score
+    // filter and creates entries at the very top of processOne — jumps ahead of
+    // the high-volume OTHER-scanner backlog instead of waiting behind it.
+    const isAnandSwing = scanner.category === 'ANAND_SWING';
+    await this.queue.add(
+      'process',
+      { alertId: alert.id, hits },
+      isAnandSwing ? { priority: 1 } : {},
+    );
 
     this.logger.log(
-      `Ingested Chartink alert ${alert.id} (${payload.scan_name}) — ${hits.length} hits`,
+      `Ingested Chartink alert ${alert.id} (${payload.scan_name}) — ${hits.length} hits${isAnandSwing ? ' [ANAND_SWING — prioritised]' : ''}`,
     );
 
     this.recentPayloads.set(hash, {
