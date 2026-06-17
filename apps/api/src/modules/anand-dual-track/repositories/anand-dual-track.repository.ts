@@ -243,6 +243,26 @@ export class AnandDualTrackRepository {
   }
 
   /**
+   * True if the symbol had a LOSING exit today (IST) on the given track — a
+   * closed entry whose exitPrice is below its entryPrice. Used to block same-day
+   * re-entry after a loss. Prisma can't compare two columns in a `where`, so we
+   * fetch today's closed exits for the symbol and test exitPrice < entryPrice.
+   */
+  async hasLossTodayBySymbol(
+    track: 'intraday' | 'swing',
+    symbol: string,
+  ): Promise<boolean> {
+    const model = track === 'intraday' ? this.prisma.intradayEntry : this.prisma.swingEntry;
+    const rows = await (model as any).findMany({
+      where: { symbol, exitedAt: { gte: this.istMidnightTodayUtc() }, exitPrice: { not: null } },
+      select: { entryPrice: true, exitPrice: true },
+    });
+    return rows.some(
+      (r: { entryPrice: number; exitPrice: number | null }) => r.exitPrice != null && r.exitPrice < r.entryPrice,
+    );
+  }
+
+  /**
    * Record one "lead" occurrence for a symbol+track. Called on EVERY scanner
    * fire — even when no new entry is created.
    *

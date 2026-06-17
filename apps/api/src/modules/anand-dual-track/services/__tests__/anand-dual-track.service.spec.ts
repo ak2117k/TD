@@ -10,6 +10,7 @@ describe('AnandDualTrackService', () => {
     findActiveTradedBySymbol: jest.Mock;
     bumpLeadStat: jest.Mock;
     hasTargetHitTodayBySymbol: jest.Mock;
+    hasLossTodayBySymbol: jest.Mock;
   };
 
   beforeEach(async () => {
@@ -19,6 +20,7 @@ describe('AnandDualTrackService', () => {
       findActiveTradedBySymbol: jest.fn().mockResolvedValue(null),
       bumpLeadStat: jest.fn().mockResolvedValue(undefined),
       hasTargetHitTodayBySymbol: jest.fn().mockResolvedValue(false),
+      hasLossTodayBySymbol: jest.fn().mockResolvedValue(false),
     };
 
     const mod = await Test.createTestingModule({
@@ -85,6 +87,7 @@ function makeRepo(overrides: Partial<any> = {}) {
     bumpLeadStat: jest.fn(async () => {}),
     findActiveTradedBySymbol: jest.fn(async () => null),
     hasTargetHitTodayBySymbol: jest.fn(async () => false),
+    hasLossTodayBySymbol: jest.fn(async () => false),
     createIntradayEntry: jest.fn(async () => ({ id: 'i1' })),
     createSwingEntry: jest.fn(async () => ({ id: 's1' })),
     ...overrides,
@@ -114,5 +117,14 @@ describe('AnandDualTrackService.createEntries (lead + same-day guard)', () => {
     await new AnandDualTrackService(repo as any).createEntries(leadGuardInput);
     expect(repo.createIntradayEntry).toHaveBeenCalled();
     expect(repo.createSwingEntry).toHaveBeenCalled();
+  });
+
+  it('skips a track when that symbol already made a LOSS today (no same-day re-entry after a loss)', async () => {
+    const repo = makeRepo({ hasLossTodayBySymbol: jest.fn(async () => true) });
+    await new AnandDualTrackService(repo as any).createEntries(leadGuardInput);
+    expect(repo.createIntradayEntry).not.toHaveBeenCalled();
+    expect(repo.createSwingEntry).not.toHaveBeenCalled();
+    expect(repo.hasLossTodayBySymbol).toHaveBeenCalledWith('intraday', 'TCS');
+    expect(repo.hasLossTodayBySymbol).toHaveBeenCalledWith('swing', 'TCS');
   });
 });

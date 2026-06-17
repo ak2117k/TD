@@ -29,19 +29,28 @@ export class AnandDualTrackService {
       this.logger.warn(`[anand] bumpLeadStat failed for ${input.symbol}: ${err instanceof Error ? err.message : err}`),
     );
 
-    // Per-track guards: skip if an active TRADED entry exists OR (Feature 2)
-    // the symbol already hit its target today on that track.
-    const [activeIntraday, activeSwing, intradayHitToday, swingHitToday] = await Promise.all([
+    // Per-track guards: skip if an active TRADED entry exists, OR the symbol
+    // already hit its target today, OR (new) it made a LOSING exit today on that
+    // track — don't re-enter a symbol the same day after a loss.
+    const [
+      activeIntraday, activeSwing,
+      intradayHitToday, swingHitToday,
+      intradayLossToday, swingLossToday,
+    ] = await Promise.all([
       this.repo.findActiveTradedBySymbol('intraday', input.symbol),
       this.repo.findActiveTradedBySymbol('swing', input.symbol),
       this.repo.hasTargetHitTodayBySymbol('intraday', input.symbol),
       this.repo.hasTargetHitTodayBySymbol('swing', input.symbol),
+      this.repo.hasLossTodayBySymbol('intraday', input.symbol),
+      this.repo.hasLossTodayBySymbol('swing', input.symbol),
     ]);
 
     if (activeIntraday) {
       this.logger.log(`[anand] intraday: ${input.symbol} already has active TRADED entry — skipping`);
     } else if (intradayHitToday) {
       this.logger.log(`[anand] intraday: ${input.symbol} already hit target today — SKIP_TARGET_HIT_TODAY`);
+    } else if (intradayLossToday) {
+      this.logger.log(`[anand] intraday: ${input.symbol} already made a loss today — SKIP_LOSS_TODAY`);
     } else {
       try {
         await this.repo.createIntradayEntry(shared);
@@ -54,6 +63,8 @@ export class AnandDualTrackService {
       this.logger.log(`[anand] swing: ${input.symbol} already has active TRADED entry — skipping`);
     } else if (swingHitToday) {
       this.logger.log(`[anand] swing: ${input.symbol} already hit target today — SKIP_TARGET_HIT_TODAY`);
+    } else if (swingLossToday) {
+      this.logger.log(`[anand] swing: ${input.symbol} already made a loss today — SKIP_LOSS_TODAY`);
     } else {
       try {
         await this.repo.createSwingEntry(shared);
