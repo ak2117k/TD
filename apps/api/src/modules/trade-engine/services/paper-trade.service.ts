@@ -584,14 +584,29 @@ export class PaperTradeService implements OnModuleInit {
   //  Private helpers
   // ------------------------------------------------------------------
 
-  private fillMarketOrder(
+  private async fillMarketOrder(
     orderId: string,
     request: OrderRequest,
-  ): OrderResponse {
-    const ltp =
-      this.ltpCache.get(request.token) ??
-      request.price ??
-      0;
+  ): Promise<OrderResponse> {
+    let ltp = this.ltpCache.get(request.token) ?? request.price ?? 0;
+
+    // Fallback for symbols NOT on the ~50-token live WS feed: the tick cache is
+    // empty, so a MARKET paper order would fill at ₹0 and get rejected. Fetch a
+    // fresh broker quote (the same price the order ticket shows via /quote) so
+    // the order fills at the real last price. Seeds the cache for later ticks.
+    if (!(ltp > 0) && this.brokerAdapter) {
+      try {
+        const q = await this.brokerAdapter.getLiveQuote(request.token, request.exchange);
+        if (q?.ltp && q.ltp > 0) {
+          ltp = q.ltp;
+          this.ltpCache.set(request.token, ltp);
+        }
+      } catch (err) {
+        this.logger.warn(
+          `[paper] market-fill quote fallback failed for ${request.symbol}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
 
     return this.fillAtPrice(orderId, request, ltp);
   }

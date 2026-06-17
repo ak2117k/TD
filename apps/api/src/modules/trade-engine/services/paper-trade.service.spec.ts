@@ -124,6 +124,50 @@ describe('PaperTradeService.simulateOrder — fillPrice exposure', () => {
   });
 });
 
+describe('PaperTradeService.simulateOrder — MARKET broker-quote fallback', () => {
+  let service: PaperTradeService;
+  let broker: { getLiveQuote: jest.Mock };
+
+  beforeEach(async () => {
+    broker = { getLiveQuote: jest.fn() };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        PaperTradeService,
+        { provide: TradeRepository, useValue: mockTradeRepository },
+        { provide: MarketFeedService, useValue: mockMarketFeed },
+        { provide: BROKER_ADAPTER_TOKEN, useValue: broker },
+      ],
+    }).compile();
+    service = module.get(PaperTradeService);
+  });
+
+  it('a MARKET order on a symbol NOT on the feed fills off a fresh broker quote (no ₹0 fill)', async () => {
+    // No simulateTick → ltpCache empty; MARKET order carries no request.price.
+    // The broker quote fallback supplies the fill price (the bug: it filled ₹0).
+    broker.getLiveQuote.mockResolvedValue({ ltp: 250 });
+
+    const response = await service.simulateOrder({
+      symbol: 'SBIN-EQ', token: '3045', exchange: 'NSE', side: 'BUY',
+      orderType: 'MARKET', quantity: 10, positionType: 'INTRADAY',
+    });
+
+    expect(broker.getLiveQuote).toHaveBeenCalledWith('3045', 'NSE');
+    expect(response.status).toBe('FILLED');
+    expect(response.fillPrice).toBeGreaterThanOrEqual(250); // BUY slippage skews up
+    expect(response.fillPrice).toBeLessThanOrEqual(250 * 1.001);
+  });
+
+  it('still fills at ₹0 (caller rejects) when the broker quote is also unavailable', async () => {
+    broker.getLiveQuote.mockResolvedValue({ ltp: 0 });
+    const response = await service.simulateOrder({
+      symbol: 'ZZFAKE-EQ', token: '000', exchange: 'NSE', side: 'BUY',
+      orderType: 'MARKET', quantity: 1, positionType: 'INTRADAY',
+    });
+    // fillPrice 0 → TradeExecutionService rejects with the no-₹0-fill 400 (its job).
+    expect(response.fillPrice).toBe(0);
+  });
+});
+
 /**
  * Position netting — partial-exit and trailing-stop SELL fills should reduce
  * the existing BUY position rather than spawning a new opposite-side slot.
