@@ -428,7 +428,15 @@ export class MarketDataController {
     const constantEntry = resolveTokenFromConstants(token);
     const resolvedExchange =
       exchange ?? instrument?.exchange ?? constantEntry?.exchange ?? 'NSE';
-    const resolvedSymbol = instrument?.symbol ?? constantEntry?.symbol ?? '';
+    // Prefer the exchange-aware resolution so a colliding token (509 = NSE
+    // MAZDOCK-EQ vs MCX SSUGARMKOLCOM) labels with the right instrument for the
+    // requested exchange, not whichever the token-only `getByToken` returned.
+    const exactInstrument = this.instrumentService.getByExchangeTokenSync(
+      resolvedExchange,
+      token,
+    );
+    const resolvedSymbol =
+      exactInstrument?.symbol ?? instrument?.symbol ?? constantEntry?.symbol ?? '';
 
     if (this.levelBookService) {
       try {

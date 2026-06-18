@@ -31,6 +31,11 @@ describe('MarketFeedService — cross-segment token collision', () => {
     const instrumentService = {
       getByToken: jest.fn().mockResolvedValue(null),
       getCommodityInstruments: jest.fn().mockReturnValue([]),
+      // Exchange-aware resolution: token 509 is NSE MAZDOCK-EQ (and MCX
+      // SSUGARMKOLCOM). The quote must label by (exchange, token).
+      getByExchangeTokenSync: jest.fn((exchange: string, token: string) =>
+        exchange === 'NSE' && token === '509' ? ({ symbol: 'MAZDOCK-EQ' } as any) : null,
+      ),
     } as any;
     const gateway = {
       emitTick: jest.fn(),
@@ -115,6 +120,16 @@ describe('MarketFeedService — cross-segment token collision', () => {
     const feed = buildFeed();
     feedTick(feed, tick('2885', 2500, 'NSE'));
     expect(feed.getQuote('2885')!.ltp).toBe(2500);
+  });
+
+  it('labels the quote symbol by (exchange, token), not the colliding token-only symbol', () => {
+    // A tick for token 509 arrives mislabeled with the MCX collision symbol.
+    // The quote must be relabeled to the real NSE instrument (MAZDOCK-EQ).
+    const feed = buildFeed();
+    const t = tick('509', 2542, 'NSE');
+    (t as any).symbol = 'SSUGARMKOLCOM';
+    feedTick(feed, t);
+    expect(feed.getQuote('509')!.symbol).toBe('MAZDOCK-EQ');
   });
 
   it('getQuote falls back to the sole cached segment for a non-ambiguous token', () => {

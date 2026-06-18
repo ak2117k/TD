@@ -1272,8 +1272,16 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
     const book = this.levelBookService?.getLevels(tick.token) ?? null;
     const vwap = book && book.vwap > 0 ? book.vwap : undefined;
 
+    // Resolve the symbol by (exchange, token) so a cross-segment token collision
+    // (e.g. 509 = NSE MAZDOCK-EQ vs MCX SSUGARMKOLCOM) labels the quote with the
+    // RIGHT instrument for its exchange, not whichever loaded last in the
+    // token-only cache. Falls back to the tick's own symbol if unresolved.
+    const resolvedSymbol =
+      this.instrumentService.getByExchangeTokenSync(tickExchange, tick.token)?.symbol ??
+      tick.symbol;
+
     const quote: Quote = {
-      symbol: tick.symbol,
+      symbol: resolvedSymbol,
       token: tick.token,
       exchange: tickExchange,
       ltp: tick.ltp,

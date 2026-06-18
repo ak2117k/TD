@@ -28,6 +28,19 @@ export class InstrumentService implements OnModuleInit {
   /** In-memory cache keyed by token for O(1) lookups. */
   private instrumentsByToken = new Map<string, InstrumentRecord>();
 
+  /** Secondary index keyed by `${exchange}:${token}`. A numeric token is reused
+   *  across segments (e.g. token 509 = NSE MAZDOCK-EQ AND MCX SSUGARMKOLCOM), so
+   *  a token-alone lookup returns whichever instrument loaded last — which
+   *  mislabels quotes (MAZDOCK showing as SSUGARMKOLCOM). This index resolves to
+   *  the correct instrument per exchange. */
+  private instrumentsByExchangeToken = new Map<string, InstrumentRecord>();
+
+  /** Resolve by (exchange, token) — disambiguates cross-segment token
+   *  collisions. Sync, cache-only; returns null if not loaded. */
+  getByExchangeTokenSync(exchange: string, token: string): InstrumentRecord | null {
+    return this.instrumentsByExchangeToken.get(`${exchange}:${token}`) ?? null;
+  }
+
   /** Track when the master was last loaded. */
   private lastRefreshedAt: Date | null = null;
 
@@ -253,10 +266,12 @@ export class InstrumentService implements OnModuleInit {
     try {
       const instruments = await this.repository.getAllActiveInstruments();
       this.instrumentsByToken.clear();
+      this.instrumentsByExchangeToken.clear();
       let seeded = 0;
       for (const inst of instruments) {
         const record = inst as InstrumentRecord;
         this.instrumentsByToken.set(record.token, record);
+        this.instrumentsByExchangeToken.set(`${record.exchange}:${record.token}`, record);
         // Push into the candle-aggregator so live ticks for this token
         // are aggregated into candles and persisted. Without this, MCX
         // commodity ticks (and any instrument outside the first 50 rows)
