@@ -58,7 +58,17 @@ const TOTAL_SLOT_MAX = ANGEL_ONE_WEBSOCKET_MAX_TOKENS; // 50
 export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(MarketFeedService.name);
 
-  /** In-memory latest quote cache — fast access for REST and gateway. */
+  /**
+   * In-memory latest quote cache — fast access for REST and gateway.
+   *
+   * CROSS-SEGMENT COLLISION FIX: Angel One reuses the same numeric token
+   * across segments (e.g. 7866 = NSE GVPIL equity AND a CDS USDINR currency
+   * contract). Keying by token ALONE let one segment's tick clobber the
+   * other's quote → phantom prices served to every getQuote() caller. The
+   * cache is therefore keyed by a COMPOSITE `${exchange}:${token}` (see
+   * `quoteKey`). The public `getQuote(token)` remains token-only for
+   * backward compatibility and resolves equity-venue semantics.
+   */
   private readonly quoteCache = new Map<string, Quote>();
 
   /** Tokens currently subscribed as primary watchlist. */
@@ -404,10 +414,60 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Get the latest cached quote for a token.
+   * Build the composite cache key for a quote: `${exchange}:${token}`.
+   * Exchange is canonicalised so the key is stable regardless of caller
+   * spelling (NSE vs NSE_CM, etc.).
+   */
+  private quoteKey(exchange: string | undefined | null, token: string): string {
+    return `${this.normalizeExchange(exchange)}:${token}`;
+  }
+
+  /**
+   * Canonicalise an exchange string for use in the composite cache key.
+   * The cash-equity / index segment of each venue collapses to the bare
+   * venue name, matching how callers pass `exchange` ('NSE', 'BSE', 'MCX').
+   */
+  private normalizeExchange(exchange: string | undefined | null): string {
+    const e = String(exchange ?? 'NSE').toUpperCase();
+    switch (e) {
+      case 'NSE_CM':
+        return 'NSE';
+      case 'BSE_CM':
+        return 'BSE';
+      case 'MCX_FO':
+        return 'MCX';
+      case 'NSE_FO':
+        return 'NFO';
+      default:
+        return e;
+    }
+  }
+
+  /**
+   * Segments a token-only `getQuote(token)` is allowed to resolve to, in
+   * preference order. Equity venues (NSE, BSE) come first — token-only
+   * lookups historically carried equity/index semantics. MCX (commodities)
+   * is an acceptable last resort for a token that ONLY streams there.
+   *
+   * Currency (CDS) and derivatives (NFO/NCDEX) are deliberately EXCLUDED:
+   * those are exactly the segments that collide with equity tokens (e.g.
+   * the 7866 NSE-vs-CDS case), so a token-only request must never be
+   * satisfied by a currency/derivatives quote. Such a quote can only be
+   * fetched by an explicit-exchange path.
+   */
+  private static readonly TOKEN_ONLY_SEGMENTS = ['NSE', 'BSE', 'MCX'] as const;
+
+  /**
+   * Get the latest cached quote for a token (token-only — equity-venue
+   * semantics). Tries NSE, then BSE, then MCX. Never returns a quote
+   * recorded under a colliding currency/derivatives segment.
    */
   getQuote(token: string): Quote | null {
-    return this.quoteCache.get(token) ?? null;
+    for (const seg of MarketFeedService.TOKEN_ONLY_SEGMENTS) {
+      const q = this.quoteCache.get(`${seg}:${token}`);
+      if (q) return q;
+    }
+    return null;
   }
 
   /**
@@ -523,9 +583,11 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
       ltp: number;
     }> = [];
 
-    for (const [token, quote] of this.quoteCache.entries()) {
-      // Only include sector index tokens (starting with "99926")
-      if (!token.startsWith('99926')) continue;
+    for (const quote of this.quoteCache.values()) {
+      // Only include sector index tokens (starting with "99926"). Read the
+      // token off the quote (the cache key is now the composite
+      // `${exchange}:${token}`, not the bare token).
+      if (!quote.token.startsWith('99926')) continue;
 
       // Exclude main indices
       if (MarketFeedService.MAIN_INDEX_SYMBOLS.has(quote.symbol)) continue;
@@ -621,7 +683,7 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
       // 2. Build the quote (now annotated with vwap when the book has it)
       //    and update the in-memory cache.
       const quote = this.tickToQuote(tick);
-      this.quoteCache.set(tick.token, quote);
+      this.quoteCache.set(this.quoteKey(quote.exchange, tick.token), quote);
 
       // 3. Dispatch to watch monitor tick handler (Stage 2 watch lifecycle)
       this.dispatchWatchTick(tick.token, tick.ltp, tick.timestamp);
@@ -671,7 +733,7 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
           tick.timestamp = new Date(tick.timestamp);
           // Update local cache from ticks published by other processes
           const quote = this.tickToQuote(tick);
-          this.quoteCache.set(tick.token, quote);
+          this.quoteCache.set(this.quoteKey(quote.exchange, tick.token), quote);
         } catch {
           // Ignore malformed messages
         }
@@ -1103,7 +1165,7 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
         this.normalizeTickSymbol(tick); // Use canonical symbol names
         const quote = this.tickToQuote(tick);
         quote.exchange = entry.exchange as Exchange;
-        this.quoteCache.set(entry.token, quote);
+        this.quoteCache.set(this.quoteKey(entry.exchange, entry.token), quote);
         return entry.symbol;
       }),
     );
@@ -1162,9 +1224,11 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    // Fallback: use cached instrument data if the symbol is missing or empty
+    // Fallback: use cached instrument data if the symbol is missing or empty.
+    // getQuote() resolves the composite-keyed cache token-only (equity-venue
+    // semantics) — adequate for symbol-name backfill.
     if (!tick.symbol || tick.symbol.trim() === '') {
-      const cached = this.quoteCache.get(tick.token);
+      const cached = this.getQuote(tick.token);
       if (cached?.symbol) {
         tick.symbol = cached.symbol;
       }
@@ -1192,7 +1256,11 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
   }
 
   private tickToQuote(tick: TickData): Quote {
-    const previousQuote = this.quoteCache.get(tick.token);
+    const tickExchange =
+      (tick as any).exchange ?? this.getExchangeForToken(tick.token);
+    const previousQuote = this.quoteCache.get(
+      this.quoteKey(tickExchange, tick.token),
+    );
     const prevClose = previousQuote?.close ?? tick.close;
     const change = tick.ltp - prevClose;
     const changePercent = prevClose !== 0 ? (change / prevClose) * 100 : 0;
@@ -1207,7 +1275,7 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
     const quote: Quote = {
       symbol: tick.symbol,
       token: tick.token,
-      exchange: (tick as any).exchange ?? this.getExchangeForToken(tick.token),
+      exchange: tickExchange,
       ltp: tick.ltp,
       open: tick.open,
       high: tick.high,

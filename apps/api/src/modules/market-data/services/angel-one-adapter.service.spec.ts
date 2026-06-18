@@ -1,6 +1,7 @@
 import { AngelOneAdapterService, AngelThrottleError } from './angel-one-adapter.service';
 import { AngelOneAuthService } from './angel-one-auth.service';
 import { AngelOneWebSocketService } from './angel-one-websocket.service';
+import { TickData } from '../../../common/interfaces/broker-adapter.interface';
 
 /**
  * Unit tests for AngelOneAdapterService.getMarketDepth — the only piece
@@ -623,5 +624,142 @@ describe('AngelOneAdapterService — historical chunk throttle resilience', () =
         expect(gap).toBe(350);
       }
     });
+  });
+});
+
+/**
+ * Cross-segment token collision (real-money bug).
+ *
+ * Angel One reuses the same numeric instrument token across segments —
+ * e.g. token 7866 = NSE GVPIL (equity) AND CDS USDINR… (currency). The WS
+ * tick cache and getLiveQuote/getLtpsBatch used to be keyed by TOKEN ALONE,
+ * so a CDS tick could be served as the NSE price → phantom prices and fake
+ * P&L. Every cache/lookup must now be keyed AND validated by
+ * (exchange + token) so a tick from one segment can NEVER be returned for a
+ * token request in another segment.
+ */
+describe('AngelOneAdapterService — cross-segment token collision', () => {
+  /**
+   * Build an adapter whose WS `on('tick')` listener we can drive, and whose
+   * SmartAPI marketData is controllable. Returns the adapter plus an
+   * `emitTick` helper that fires a tick at the adapter's registered handler.
+   */
+  function buildAdapter(marketDataMock?: jest.Mock) {
+    let tickHandler: ((tick: TickData) => void) | null = null;
+    const fakeAuth = {
+      getSmartApi: () => ({ marketData: marketDataMock ?? jest.fn() }),
+    } as unknown as AngelOneAuthService;
+    const fakeWs = {
+      on: jest.fn((event: string, cb: (t: TickData) => void) => {
+        if (event === 'tick') tickHandler = cb;
+      }),
+      // subscribe is async and irrelevant to cache keying; resolve quietly.
+      subscribe: jest.fn().mockResolvedValue(undefined),
+      removeListener: jest.fn(),
+    } as unknown as AngelOneWebSocketService;
+    const adapter = new AngelOneAdapterService(fakeAuth, fakeWs);
+    return {
+      adapter,
+      emitTick: (tick: TickData) => {
+        if (!tickHandler) throw new Error('adapter did not register a tick handler');
+        tickHandler(tick);
+      },
+    };
+  }
+
+  function tick(token: string, ltp: number, exchange?: string): TickData {
+    const t: any = {
+      token,
+      symbol: '',
+      ltp,
+      open: ltp,
+      high: ltp,
+      low: ltp,
+      close: ltp,
+      volume: 0,
+      timestamp: new Date(),
+    };
+    // The WS feed annotates ticks with their segment; the adapter must honour it.
+    if (exchange) t.exchange = exchange;
+    return t as TickData;
+  }
+
+  it('(a) keeps two segments of the same token separate — never cross-contaminates', async () => {
+    // REST returns nothing so getLiveQuote falls through to the WS cache.
+    const marketData = jest.fn().mockResolvedValue({ status: false, data: { fetched: [] }, message: 'no data' });
+    const { adapter, emitTick } = buildAdapter(marketData);
+
+    // Token 7866 streams on BOTH segments at once.
+    emitTick(tick('7866', 1054.0, 'CDS')); // USDINR-ish currency price
+    emitTick(tick('7866', 12.5, 'NSE')); // GVPIL equity price
+
+    const nse = await adapter.getLiveQuote('7866', 'NSE');
+    const cds = await adapter.getLiveQuote('7866', 'CDS');
+
+    expect(nse.ltp).toBe(12.5); // NSE request → NSE price, NOT the 1054 CDS tick
+    expect(cds.ltp).toBe(1054.0);
+  });
+
+  it('(b) a token-only request never returns a foreign-segment tick', async () => {
+    const marketData = jest.fn().mockResolvedValue({ status: false, data: { fetched: [] }, message: 'no data' });
+    const { adapter, emitTick } = buildAdapter(marketData);
+
+    // Only the CDS segment has ticked. An NSE-equity request for the same
+    // token must NOT be served the CDS price — it should miss (throw), not
+    // hand back the phantom 1054.
+    emitTick(tick('7866', 1054.0, 'CDS'));
+
+    await expect(adapter.getLiveQuote('7866', 'NSE')).rejects.toThrow();
+  });
+
+  it('logs a warning when the same token is seen under more than one segment', async () => {
+    const { adapter, emitTick } = buildAdapter();
+    const warn = jest.spyOn((adapter as any).logger, 'warn').mockImplementation(() => {});
+
+    emitTick(tick('7866', 1054.0, 'CDS'));
+    emitTick(tick('7866', 12.5, 'NSE'));
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('7866'));
+  });
+
+  it('(c) getLtpsBatch ignores a response row from the wrong exchange', async () => {
+    // We ask for NSE token 7866, but Angel returns BOTH an NSE row and a
+    // foreign CDS row carrying the same token with a phantom price. Only the
+    // NSE row may be admitted.
+    const marketData = jest.fn().mockResolvedValue({
+      data: {
+        fetched: [
+          { symbolToken: '7866', exchange: 'NSE', ltp: 12.5 },
+          { symbolToken: '7866', exchange: 'CDS', ltp: 1054.0 },
+        ],
+      },
+    });
+    const { adapter } = buildAdapter(marketData);
+
+    const out = await adapter.getLtpsBatch('NSE', ['7866']);
+    expect(out.get('7866')).toBe(12.5); // the NSE row, never the 1054 CDS row
+  });
+
+  it('getLtpsBatch still admits rows when the response omits an exchange field (back-compat)', async () => {
+    // LTP-mode responses may not echo the exchange. Since we queried a single
+    // exchange, an un-tagged row is assumed to belong to it.
+    const marketData = jest.fn().mockResolvedValue({
+      data: { fetched: [{ symbolToken: '2885', ltp: 2500 }] },
+    });
+    const { adapter } = buildAdapter(marketData);
+
+    const out = await adapter.getLtpsBatch('NSE', ['2885']);
+    expect(out.get('2885')).toBe(2500);
+  });
+
+  it('getLiveQuote prefers the fresh REST snapshot over the WS cache (no regression)', async () => {
+    const marketData = jest.fn().mockResolvedValue({
+      data: { fetched: [{ symbolToken: '2885', tradingSymbol: 'RELIANCE', ltp: 2500, open: 2490, high: 2510, low: 2480, close: 2495 }] },
+    });
+    const { adapter, emitTick } = buildAdapter(marketData);
+    emitTick(tick('2885', 9999, 'NSE')); // stale WS tick that must be ignored
+
+    const q = await adapter.getLiveQuote('2885', 'NSE');
+    expect(q.ltp).toBe(2500); // REST wins
   });
 });

@@ -198,6 +198,97 @@ export class AngelOneAdapterService implements BrokerAdapter {
   private readonly wsTickCache = new Map<string, TickData>();
 
   /**
+   * Cross-segment collision guard (token-collision fix).
+   *
+   * Angel One REUSES the same numeric instrument token across segments —
+   * e.g. token 7866 is NSE GVPIL (equity) AND a CDS USDINR currency
+   * contract. Keying the tick cache by token ALONE let a CDS tick be served
+   * as the NSE price → phantom prices and fake P&L (a real-money bug).
+   *
+   * Every WS tick is therefore stored under a COMPOSITE key
+   * `${exchange}:${token}` (see `cacheKey`). The exchange for an incoming
+   * tick is resolved from `tokenExchangeRegistry` — populated at
+   * subscription time, where the adapter ALREADY knows each token's segment
+   * (subscribeToFeed splits NSE/BSE/MCX; subscribeAdHoc gets it explicitly).
+   * If a tick itself carries an `exchange` field (some producers annotate
+   * it), that takes precedence. Unknown tokens default to NSE (equity), the
+   * historical token-only semantics.
+   */
+  private readonly tokenExchangeRegistry = new Map<string, string>();
+
+  /**
+   * Tokens already observed under >1 distinct segment — tracked so the
+   * ambiguity warning is logged once per offending token instead of on
+   * every tick (the WS firehose would otherwise flood the log).
+   */
+  private readonly ambiguousTokensLogged = new Set<string>();
+
+  /** Composite cache key: a segment-qualified token. */
+  private cacheKey(exchange: string, token: string): string {
+    return `${this.normalizeExchange(exchange)}:${token}`;
+  }
+
+  /**
+   * Canonicalise an exchange string so the cache key is stable regardless of
+   * the spelling a caller uses (NSE vs NSE_CM, BSE vs BSE_CM, etc.). The
+   * cash-equity / index segment of each venue collapses to the bare venue
+   * name, matching how callers pass `exchange` ('NSE', 'BSE', 'MCX', 'NFO').
+   */
+  private normalizeExchange(exchange: string | undefined | null): string {
+    const e = String(exchange ?? 'NSE').toUpperCase();
+    switch (e) {
+      case 'NSE_CM':
+        return 'NSE';
+      case 'BSE_CM':
+        return 'BSE';
+      case 'MCX_FO':
+        return 'MCX';
+      case 'NSE_FO':
+        return 'NFO';
+      default:
+        return e;
+    }
+  }
+
+  /**
+   * Resolve the segment a freshly-arrived WS tick belongs to. Order of
+   * precedence: an explicit `exchange` on the tick → the subscription
+   * registry → NSE (equity) as the historical default.
+   */
+  private resolveTickExchange(tick: TickData): string {
+    const onTick = (tick as { exchange?: string }).exchange;
+    if (onTick) return this.normalizeExchange(onTick);
+    const registered = this.tokenExchangeRegistry.get(String(tick.token));
+    if (registered) return this.normalizeExchange(registered);
+    return 'NSE';
+  }
+
+  /**
+   * Record that `token` is subscribed under `exchange`, and warn (once) if
+   * the same token is now mapped to a DIFFERENT segment than before — the
+   * collision fingerprint. Visibility for future collisions.
+   */
+  private registerTokenExchange(token: string, exchange: string): void {
+    const norm = this.normalizeExchange(exchange);
+    const prior = this.tokenExchangeRegistry.get(token);
+    if (prior && prior !== norm) {
+      this.warnAmbiguousToken(token, prior, norm);
+    }
+    this.tokenExchangeRegistry.set(token, norm);
+  }
+
+  /** Log a single warning the first time a token is seen across two segments. */
+  private warnAmbiguousToken(token: string, segA: string, segB: string): void {
+    if (this.ambiguousTokensLogged.has(token)) return;
+    this.ambiguousTokensLogged.add(token);
+    this.logger.warn(
+      `Ambiguous instrument token ${token} seen under multiple segments ` +
+        `(${segA} and ${segB}). Prices are now cached per-segment; verify ` +
+        `each consumer requests the correct exchange.`,
+    );
+  }
+
+  /**
    * 5-level market depth, cached for 1.5s per `${exchange}:${token}` key.
    * Frontend MarketDepthCard polls at 2s intervals so this prevents tight
    * double-calls into Angel One's marketData(FULL) endpoint without ever
@@ -244,9 +335,21 @@ export class AngelOneAdapterService implements BrokerAdapter {
     // EventEmitter shared with MarketFeedService; adding our own listener
     // here is non-destructive (setMaxListeners is 100).
     this.wsService.on('tick', (tick: TickData) => {
-      if (tick?.token) {
-        this.wsTickCache.set(String(tick.token), tick);
+      if (!tick?.token) return;
+      const token = String(tick.token);
+      const exchange = this.resolveTickExchange(tick);
+
+      // Collision detection: if this token has already been cached under a
+      // DIFFERENT segment, it's an ambiguous (reused) token — warn once so
+      // the collision is visible, then keep both prices separate.
+      for (const seg of ['NSE', 'BSE', 'MCX', 'NFO', 'CDS', 'NCDEX']) {
+        if (seg !== exchange && this.wsTickCache.has(`${seg}:${token}`)) {
+          this.warnAmbiguousToken(token, seg, exchange);
+          break;
+        }
       }
+
+      this.wsTickCache.set(this.cacheKey(exchange, token), tick);
     });
   }
 
@@ -484,10 +587,23 @@ export class AngelOneAdapterService implements BrokerAdapter {
         exchangeTokens: { [exchange]: uniq },
       });
       const fetched: any[] = response?.data?.fetched ?? [];
+      const wantExchange = this.normalizeExchange(exchange);
       for (const d of fetched) {
         const tok = String(d.symbolToken ?? d.symboltoken ?? '');
         const ltp = Number(d.ltp ?? 0);
-        if (tok && ltp > 0) out.set(tok, ltp);
+        if (!tok || ltp <= 0) continue;
+        // Cross-segment collision guard: Angel can echo a row for the same
+        // numeric token from a DIFFERENT exchange (e.g. CDS USDINR vs NSE
+        // GVPIL, both token 7866). Only admit a row that belongs to the
+        // exchange we queried. When the response omits an exchange field
+        // (common in LTP mode), the row is assumed to belong to the single
+        // exchange we asked for.
+        const rowExchange = d.exchange ?? d.exchangeType ?? d.exch_seg ?? null;
+        if (rowExchange != null && this.normalizeExchange(String(rowExchange)) !== wantExchange) {
+          this.warnAmbiguousToken(tok, this.normalizeExchange(String(rowExchange)), wantExchange);
+          continue;
+        }
+        out.set(tok, ltp);
       }
     } catch (err) {
       this.logger.warn(
@@ -533,14 +649,16 @@ export class AngelOneAdapterService implements BrokerAdapter {
           `(status=${restStatus} message="${restMessage}") — trying WS cache`,
       );
 
-      const cached = this.wsTickCache.get(String(token));
+      // Segment-qualified WS-cache lookup: a tick recorded under a DIFFERENT
+      // segment (the cross-segment collision) must never be served here.
+      const cached = this.wsTickCache.get(this.cacheKey(exchange, token));
       if (cached) return cached;
 
       // No REST data and no WS tick yet — surface the original REST error.
       throw new Error(restMessage ?? 'Market data fetch failed');
     } catch (error) {
       // Any error (network, 403, parse, etc.): try the WS cache before giving up.
-      const cached = this.wsTickCache.get(String(token));
+      const cached = this.wsTickCache.get(this.cacheKey(exchange, token));
       if (cached) {
         return cached;
       }
@@ -1033,6 +1151,13 @@ export class AngelOneAdapterService implements BrokerAdapter {
       else nseTokenList.push(t);
     }
 
+    // Record each token's segment so incoming WS ticks (which arrive without
+    // an exchange field) are cached under the correct composite key and a
+    // reused token across segments is flagged.
+    for (const t of nseTokenList) this.registerTokenExchange(t, 'NSE');
+    for (const t of bseTokenList) this.registerTokenExchange(t, 'BSE');
+    for (const t of mcxTokenList) this.registerTokenExchange(t, 'MCX');
+
     // Subscribe NSE tokens
     if (nseTokenList.length > 0) {
       this.wsService
@@ -1087,6 +1212,8 @@ export class AngelOneAdapterService implements BrokerAdapter {
       this.logger.warn(`subscribeAdHoc: unknown exchange "${exchange}" — skipping`);
       return;
     }
+    // Record the explicit segment so this token's WS ticks cache correctly.
+    this.registerTokenExchange(token, exchange);
     try {
       await this.wsService.subscribe([token], WsFeedMode.SNAP_QUOTE, exType);
     } catch (error) {
