@@ -1,8 +1,17 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, TradeEventType } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { Trade, DailyPerformance } from '@prisma/client';
+import { Trade, TradeEvent, DailyPerformance } from '@prisma/client';
 import { TradeFilterDto, DailyPerformanceData } from '../dto/trade.dto';
+
+export interface CreateTradeEventInput {
+  tradeId: string;
+  eventType: TradeEventType;
+  price?: number | null;
+  quantity?: number | null;
+  pnl?: number | null;
+  notes?: string | null;
+}
 
 @Injectable()
 export class TradeRepository {
@@ -253,6 +262,32 @@ export class TradeRepository {
         maxDrawdown: data.maxDrawdown,
         capitalDeployed: data.capitalDeployed,
       },
+    });
+  }
+
+  /**
+   * Append one row to the per-trade event log. Mirrors the watch-track
+   * `createEvent` pattern. Callers MUST treat this as best-effort — an
+   * event-log write must never block or fail a trade.
+   */
+  async createTradeEvent(input: CreateTradeEventInput): Promise<TradeEvent> {
+    return this.prisma.tradeEvent.create({
+      data: {
+        tradeId: input.tradeId,
+        eventType: input.eventType,
+        price: input.price ?? null,
+        quantity: input.quantity ?? null,
+        pnl: input.pnl ?? null,
+        notes: input.notes ?? null,
+      },
+    });
+  }
+
+  /** Per-trade event log, newest-first. */
+  async getTradeEvents(tradeId: string): Promise<TradeEvent[]> {
+    return this.prisma.tradeEvent.findMany({
+      where: { tradeId },
+      orderBy: { createdAt: 'desc' },
     });
   }
 

@@ -138,6 +138,16 @@ export class TradeEngineController {
   }
 
   /**
+   * GET /api/trades/:id/events — Per-trade event log, newest-first.
+   * Each row is one lifecycle event (CREATED / FILLED / SL_SET / TARGET_SET /
+   * PARTIAL_EXIT / CLOSED / CANCELLED / …).
+   */
+  @Get(':id/events')
+  async getTradeEvents(@Param('id') id: string) {
+    return this.tradeRepository.getTradeEvents(id);
+  }
+
+  /**
    * POST /api/trades/:id/close — Close a specific trade.
    *
    * Body accepts the structured M5 form `{exitReasonTag, exitNotes}` and

@@ -19,8 +19,10 @@ import { ExitReasonTag } from '../dto/trade.dto';
  */
 function buildMockRepo() {
   const trades: Record<string, any> = {};
+  const events: any[] = [];
   return {
     _trades: trades,
+    _events: events,
     createTrade: jest.fn(async (data: any) => {
       const id = `trade_${Object.keys(trades).length + 1}`;
       const t = { id, ...data, status: data.status ?? 'OPEN', notes: data.notes ?? null };
@@ -35,6 +37,14 @@ function buildMockRepo() {
     findInstrumentId: jest.fn(async () => 'inst_1'),
     getOpenTrades: jest.fn(async () =>
       Object.values(trades).filter((t: any) => t.status === 'OPEN'),
+    ),
+    createTradeEvent: jest.fn(async (input: any) => {
+      const e = { id: `evt_${events.length + 1}`, createdAt: new Date(), ...input };
+      events.push(e);
+      return e;
+    }),
+    getTradeEvents: jest.fn(async (tradeId: string) =>
+      events.filter((e) => e.tradeId === tradeId).reverse(),
     ),
   };
 }
@@ -910,5 +920,273 @@ describe('TradeExecutionService.executeTrade — LIVE_TRADING_ENABLED backstop',
     expect(brokerAdapter.placeOrder).toHaveBeenCalledWith(
       expect.objectContaining({ symbol: 'SBIN-EQ', side: 'BUY', quantity: 1 }),
     );
+  });
+
+  it('THROWS the broker rejection message instead of reporting false success (no phantom PENDING)', async () => {
+    // Broker rejects (e.g. unfunded account → RMS margin reject): placeOrder
+    // returns { orderId:'', status:'REJECTED', message }. The service must
+    // surface that message — not persist a PENDING row and return success.
+    process.env.LIVE_TRADING_ENABLED = 'true';
+    service = await buildService();
+    brokerAdapter.placeOrder.mockResolvedValueOnce({
+      orderId: '',
+      status: 'REJECTED',
+      message: 'RMS: insufficient funds. Available 0, required 600',
+    });
+    await expect(service.executeTrade(liveOrder)).rejects.toThrow(
+      /RMS: insufficient funds\. Available 0, required 600/,
+    );
+  });
+
+  it('THROWS on a FAILED placement (empty orderId) with the broker message', async () => {
+    process.env.LIVE_TRADING_ENABLED = 'true';
+    service = await buildService();
+    brokerAdapter.placeOrder.mockResolvedValueOnce({
+      orderId: '',
+      status: 'FAILED',
+      message: 'network timeout to broker',
+    });
+    await expect(service.executeTrade(liveOrder)).rejects.toThrow(/network timeout to broker/);
+  });
+});
+
+/**
+ * Per-trade event log — proves executeTrade / closeTrade write the right
+ * TradeEvent rows at each lifecycle point. The repository is mocked
+ * (buildMockRepo records events into _events).
+ */
+describe('TradeExecutionService — per-trade event log', () => {
+  let module: TestingModule;
+  let service: TradeExecutionService;
+  let repo: ReturnType<typeof buildMockRepo>;
+  let paperService: { simulateOrder: jest.Mock; simulateTick: jest.Mock; applyEntryCharge: jest.Mock; applyExitAccounting: jest.Mock };
+
+  async function build() {
+    repo = buildMockRepo();
+    paperService = {
+      simulateOrder: jest.fn(async () => ({
+        orderId: 'paper_order_evt',
+        status: 'FILLED',
+        message: 'filled',
+        fillPrice: 127.43,
+      })),
+      simulateTick: jest.fn(),
+      applyEntryCharge: jest.fn(),
+      applyExitAccounting: jest.fn(),
+    };
+    module = await Test.createTestingModule({
+      providers: [
+        TradeExecutionService,
+        { provide: BROKER_ADAPTER_TOKEN, useValue: null },
+        { provide: PaperTradeService, useValue: paperService },
+        {
+          provide: RiskManagerService,
+          useValue: {
+            validateTrade: jest.fn(async () => ({ allowed: true })),
+            getDailyRiskStatus: jest.fn(async () => ({})),
+            activateKillSwitch: jest.fn(),
+          },
+        },
+        { provide: OrderTrackerService, useValue: { trackOrder: jest.fn() } },
+        {
+          provide: PositionManagerService,
+          useValue: {
+            addPosition: jest.fn(),
+            removePosition: jest.fn(),
+            reducePosition: jest.fn(),
+            updatePositionPnL: jest.fn(),
+          },
+        },
+        { provide: TradeRepository, useValue: repo },
+        {
+          provide: TradeGateway,
+          useValue: {
+            emitTradeUpdate: jest.fn(),
+            emitKillSwitchActivated: jest.fn(),
+            emitRiskStatus: jest.fn(),
+          },
+        },
+        {
+          provide: SettingsService,
+          useValue: {
+            getSettings: jest.fn(async () => ({ paperTrading: true })),
+            activateKillSwitch: jest.fn(),
+          },
+        },
+        {
+          provide: MarketFeedService,
+          useValue: { getQuote: jest.fn(() => null), getBreadth: jest.fn() },
+        },
+        {
+          provide: MarketContextService,
+          useValue: { snapshot: jest.fn(async () => null) },
+        },
+      ],
+    }).compile();
+    service = module.get(TradeExecutionService);
+  }
+
+  beforeEach(build);
+
+  it('executeTrade writes CREATED + FILLED for a filled MARKET paper order', async () => {
+    const trade = await service.executeTrade({
+      symbol: 'NIFTY24MAY22500CE',
+      token: '99926000',
+      exchange: 'NFO',
+      side: 'BUY' as any,
+      orderType: 'MARKET' as any,
+      quantity: 50,
+      positionType: 'INTRADAY' as any,
+    } as any);
+
+    const evts = repo._events.filter((e) => e.tradeId === trade.id);
+    const types = evts.map((e) => e.eventType);
+    expect(types).toContain('CREATED');
+    expect(types).toContain('FILLED');
+
+    const created = evts.find((e) => e.eventType === 'CREATED');
+    expect(created.price).toBe(127.43);
+    expect(created.quantity).toBe(50);
+    expect(created.notes).toBe('paper MARKET BUY');
+
+    const filled = evts.find((e) => e.eventType === 'FILLED');
+    expect(filled.price).toBe(127.43);
+    expect(filled.quantity).toBe(50);
+  });
+
+  it('executeTrade writes SL_SET and TARGET_SET when stoploss/target are provided', async () => {
+    const trade = await service.executeTrade({
+      symbol: 'NIFTY24MAY22500CE',
+      token: '99926000',
+      exchange: 'NFO',
+      side: 'BUY' as any,
+      orderType: 'MARKET' as any,
+      quantity: 50,
+      positionType: 'INTRADAY' as any,
+      stoploss: 120,
+      target: 140,
+    } as any);
+
+    const evts = repo._events.filter((e) => e.tradeId === trade.id);
+    const sl = evts.find((e) => e.eventType === 'SL_SET');
+    const tgt = evts.find((e) => e.eventType === 'TARGET_SET');
+    expect(sl?.price).toBe(120);
+    expect(tgt?.price).toBe(140);
+  });
+
+  it('executeTrade does NOT write FILLED for a resting PENDING order (only CREATED)', async () => {
+    paperService.simulateOrder.mockResolvedValueOnce({
+      orderId: 'paper_pending_evt',
+      status: 'PENDING',
+      message: 'pending',
+    });
+
+    const trade = await service.executeTrade({
+      symbol: 'SBIN-EQ',
+      token: '3045',
+      exchange: 'NSE',
+      side: 'BUY' as any,
+      orderType: 'LIMIT' as any,
+      quantity: 5,
+      price: 400,
+      positionType: 'DELIVERY' as any,
+    } as any);
+
+    const types = repo._events
+      .filter((e) => e.tradeId === trade.id)
+      .map((e) => e.eventType);
+    expect(types).toContain('CREATED');
+    expect(types).not.toContain('FILLED');
+  });
+
+  it('closeTrade maps a HIT_TARGET exit to a TARGET_HIT event with exit price, pnl and quantity', async () => {
+    repo._trades['trade_seed'] = {
+      id: 'trade_seed',
+      status: 'OPEN',
+      side: 'BUY',
+      quantity: 50,
+      entryPrice: 100,
+      isPaperTrade: true,
+      positionType: 'INTRADAY',
+      notes: null,
+      fees: 0,
+      instrument: { symbol: 'NIFTY24MAY22500CE', token: '99926000', exchange: 'NFO' },
+    };
+    paperService.simulateOrder.mockResolvedValueOnce({
+      orderId: 'paper_close_evt',
+      status: 'FILLED',
+      message: 'closed',
+      fillPrice: 130.5,
+    });
+
+    await service.closeTrade('trade_seed', {
+      exitReasonTag: ExitReasonTag.HIT_TARGET,
+      exitNotes: 'target',
+    });
+
+    // A HIT_TARGET exit logs the specific TARGET_HIT event type (not a generic
+    // CLOSED) so the audit log distinguishes a target hit from a stop-out.
+    const closed = repo._events.find(
+      (e) => e.tradeId === 'trade_seed' && e.eventType === 'TARGET_HIT',
+    );
+    expect(closed).toBeDefined();
+    expect(closed.price).toBe(130.5);
+    expect(closed.quantity).toBe(50);
+    // pnl = (130.5 - 100) * 50 = 1525
+    expect(closed.pnl).toBeCloseTo(1525, 2);
+    expect(closed.notes).toBe('HIT_TARGET');
+  });
+
+  it('closeTrade writes PARTIAL_EXIT (not CLOSED) for a partial close', async () => {
+    repo._trades['trade_seed'] = {
+      id: 'trade_seed',
+      status: 'OPEN',
+      side: 'BUY',
+      quantity: 50,
+      entryPrice: 100,
+      isPaperTrade: true,
+      positionType: 'INTRADAY',
+      notes: null,
+      fees: 0,
+      instrument: { symbol: 'NIFTY24MAY22500CE', token: '99926000', exchange: 'NFO' },
+    };
+    paperService.simulateOrder.mockResolvedValueOnce({
+      orderId: 'paper_partial_evt',
+      status: 'FILLED',
+      message: 'partial',
+      fillPrice: 130.5,
+    });
+
+    await service.closeTrade('trade_seed', { quantity: 20 });
+
+    const types = repo._events
+      .filter((e) => e.tradeId === 'trade_seed')
+      .map((e) => e.eventType);
+    expect(types).toContain('PARTIAL_EXIT');
+    expect(types).not.toContain('CLOSED');
+    const partial = repo._events.find((e) => e.eventType === 'PARTIAL_EXIT');
+    expect(partial.quantity).toBe(20);
+  });
+
+  it('an event-log write failure does NOT fail the trade (best-effort)', async () => {
+    repo.createTradeEvent.mockRejectedValue(new Error('db down'));
+    const warnSpy = jest
+      .spyOn((service as any).logger, 'warn')
+      .mockImplementation(() => {});
+
+    const trade = await service.executeTrade({
+      symbol: 'NIFTY24MAY22500CE',
+      token: '99926000',
+      exchange: 'NFO',
+      side: 'BUY' as any,
+      orderType: 'MARKET' as any,
+      quantity: 50,
+      positionType: 'INTRADAY' as any,
+    } as any);
+
+    // Trade still created + returned despite the event-log failures.
+    expect(trade.id).toBeDefined();
+    expect(trade.status).toBe('OPEN');
+    expect(warnSpy).toHaveBeenCalled();
   });
 });

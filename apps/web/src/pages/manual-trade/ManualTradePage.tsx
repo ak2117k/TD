@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Send, Power, X, Inbox } from 'lucide-react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Send, Power, X, Inbox, ChevronRight } from 'lucide-react';
 import OrderTicket from '@/components/trading/OrderTicket';
 import {
   useTradeStore,
@@ -8,8 +8,11 @@ import {
 } from '@/stores/trade-store';
 import { wsService } from '@/services/websocket';
 import api from '@/services/api';
+import { getTradeEvents } from '@/services/tradeEvents.service';
 import { cn } from '@/utils/cn';
 import { TradeStatus, type Position, type Trade, type Quote } from '@/types';
+import type { TradeEvent } from '@/types/tradeEvent.types';
+import { TradeEventLog } from './TradeEventLog';
 
 // ---- formatting helpers (mirrors PositionsPage conventions) ----
 function formatINR(amount: number, opts?: { withSign?: boolean }): string {
@@ -274,7 +277,127 @@ function statusTone(status: TradeStatus | string): string {
   }
 }
 
+// One order-book row + its lazily-loaded lifecycle event log. The events are
+// fetched only when the row is first expanded, then cached for the row's
+// lifetime so re-expanding is instant.
+function OrderRow({
+  trade,
+  expanded,
+  onToggle,
+}: {
+  trade: Trade;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const [events, setEvents] = useState<TradeEvent[] | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  // Lazy fetch on first expand. A 404 (backend not ready) or any failure
+  // resolves to an empty log rather than crashing the row.
+  useEffect(() => {
+    if (!expanded || events !== null || loading) return;
+    let cancelled = false;
+    setLoading(true);
+    getTradeEvents(trade.id)
+      .then((data) => {
+        if (!cancelled) setEvents(data);
+      })
+      .catch(() => {
+        if (!cancelled) setEvents([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [expanded, events, loading, trade.id]);
+
+  return (
+    <Fragment>
+      <tr
+        onClick={onToggle}
+        className={cn(
+          'cursor-pointer border-b border-[var(--color-border-subtle)]/60 last:border-0 hover:bg-white/5',
+          expanded && 'bg-white/5',
+        )}
+      >
+        <td className="px-4 py-2.5 text-sm font-medium text-[var(--color-text-primary)]">
+          <button
+            type="button"
+            aria-expanded={expanded}
+            aria-label={expanded ? 'Hide event log' : 'Show event log'}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggle();
+            }}
+            className="mr-2 inline-flex align-middle text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
+          >
+            <ChevronRight
+              size={14}
+              className={cn('transition-transform', expanded && 'rotate-90')}
+            />
+          </button>
+          {trade.symbol}
+        </td>
+        <td className="px-4 py-2.5">
+          <span
+            className={cn(
+              'rounded px-1.5 py-0.5 text-[10px] font-semibold',
+              trade.side === 'BUY'
+                ? 'bg-emerald-500/15 text-emerald-400'
+                : 'bg-red-500/15 text-red-400',
+            )}
+          >
+            {trade.side}
+          </span>
+        </td>
+        <td className="px-4 py-2.5 text-right text-sm text-[var(--color-text-secondary)]">
+          {trade.quantity}
+        </td>
+        <td className="px-4 py-2.5 text-right text-sm text-[var(--color-text-secondary)]">
+          {formatPrice(trade.entryPrice ?? 0)}
+        </td>
+        <td className="px-4 py-2.5">
+          <span
+            className={cn(
+              'rounded px-1.5 py-0.5 text-[10px] font-semibold',
+              statusTone(trade.status),
+            )}
+          >
+            {trade.status}
+          </span>
+        </td>
+        <td className="px-4 py-2.5 text-right text-xs text-[var(--color-text-muted)]">
+          {formatTime(trade.createdAt)}
+        </td>
+      </tr>
+      {expanded && (
+        <tr className="border-b border-[var(--color-border-subtle)]/60 last:border-0">
+          <td
+            colSpan={6}
+            className="bg-[var(--color-bg-tertiary)]/40 px-4 py-3"
+          >
+            <div className="mb-2 text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+              Event log
+            </div>
+            {events === null ? (
+              <div className="text-xs text-[var(--color-text-muted)]">
+                Loading events…
+              </div>
+            ) : (
+              <TradeEventLog events={events} />
+            )}
+          </td>
+        </tr>
+      )}
+    </Fragment>
+  );
+}
+
 function OrderBookTable({ trades }: { trades: Trade[] }) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
   if (trades.length === 0) {
     return (
       <div className="flex flex-col items-center gap-2 py-10 text-[var(--color-text-muted)]">
@@ -298,45 +421,14 @@ function OrderBookTable({ trades }: { trades: Trade[] }) {
         </thead>
         <tbody>
           {trades.map((t) => (
-            <tr
+            <OrderRow
               key={t.id}
-              className="border-b border-[var(--color-border-subtle)]/60 last:border-0 hover:bg-white/5"
-            >
-              <td className="px-4 py-2.5 text-sm font-medium text-[var(--color-text-primary)]">
-                {t.symbol}
-              </td>
-              <td className="px-4 py-2.5">
-                <span
-                  className={cn(
-                    'rounded px-1.5 py-0.5 text-[10px] font-semibold',
-                    t.side === 'BUY'
-                      ? 'bg-emerald-500/15 text-emerald-400'
-                      : 'bg-red-500/15 text-red-400',
-                  )}
-                >
-                  {t.side}
-                </span>
-              </td>
-              <td className="px-4 py-2.5 text-right text-sm text-[var(--color-text-secondary)]">
-                {t.quantity}
-              </td>
-              <td className="px-4 py-2.5 text-right text-sm text-[var(--color-text-secondary)]">
-                {formatPrice(t.entryPrice ?? 0)}
-              </td>
-              <td className="px-4 py-2.5">
-                <span
-                  className={cn(
-                    'rounded px-1.5 py-0.5 text-[10px] font-semibold',
-                    statusTone(t.status),
-                  )}
-                >
-                  {t.status}
-                </span>
-              </td>
-              <td className="px-4 py-2.5 text-right text-xs text-[var(--color-text-muted)]">
-                {formatTime(t.createdAt)}
-              </td>
-            </tr>
+              trade={t}
+              expanded={t.id === expandedId}
+              onToggle={() =>
+                setExpandedId((cur) => (cur === t.id ? null : t.id))
+              }
+            />
           ))}
         </tbody>
       </table>

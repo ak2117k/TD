@@ -128,7 +128,15 @@ export const useTradeStore = create<TradeState>((set) => ({
       }));
       toast.success(`Trade executed: ${dto.side} ${dto.symbol}`);
     } catch (err) {
-      toast.error('Trade execution failed');
+      // Surface the server's real reason instead of a generic message. The API
+      // throws structured 4xx with the cause in the body (NestJS HttpException
+      // → { message }): e.g. "Live trading is disabled…" (403 gate),
+      // "Trade rejected: <risk reason>" (403 risk), or a broker error. Showing
+      // it means a Forbidden no longer looks opaque to the trader.
+      const anyErr = err as { response?: { data?: { message?: string | string[] } } };
+      const raw = anyErr?.response?.data?.message;
+      const reason = Array.isArray(raw) ? raw.join('; ') : raw;
+      toast.error(reason ? `Order rejected: ${reason}` : 'Trade execution failed');
       throw err;
     } finally {
       set({ isLoading: false });

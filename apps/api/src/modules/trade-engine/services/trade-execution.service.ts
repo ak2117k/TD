@@ -29,7 +29,7 @@ import {
   TradeFilterDto,
   ExitReasonTag,
 } from '../dto/trade.dto';
-import { Trade, Prisma } from '@prisma/client';
+import { Trade, Prisma, TradeEventType } from '@prisma/client';
 import { computeOrderCharges } from './trade-charges';
 
 /**
@@ -201,6 +201,21 @@ export class TradeExecutionService {
       this.logger.log(
         `[Live] Order ${orderId}: ${response.status} — ${response.message}`,
       );
+
+      // placeOrder signals a broker rejection/failure by RETURN VALUE
+      // (status REJECTED/FAILED, empty orderId) — it does NOT throw. Surface
+      // that actual broker message instead of persisting a phantom PENDING row
+      // and reporting "executed successfully". This is the single point where a
+      // real-money order can fail at the broker (e.g. an unfunded account's RMS
+      // margin reject), so the user must see exactly why it failed.
+      if (!orderId || response.status === 'REJECTED' || response.status === 'FAILED') {
+        this.logger.warn(
+          `[Live REJECTED] ${request.side} ${request.symbol} x${request.quantity} — ${response.message}`,
+        );
+        throw new BadRequestException(
+          `Order rejected by broker: ${response.message ?? 'no reason returned'}`,
+        );
+      }
     }
 
     // ---- STEP 4b: Capture market context snapshot ----
@@ -257,6 +272,42 @@ export class TradeExecutionService {
           } as unknown as Prisma.InputJsonValue)
         : null,
     });
+
+    // ---- STEP 5b: Append to the per-trade event log (best-effort) ----
+    // CREATED is always logged. If the order filled immediately (a MARKET
+    // fill → status OPEN with a real entryPrice), a FILLED event follows.
+    // Any caller-supplied stoploss/target is logged as SL_SET / TARGET_SET.
+    const createdPrice =
+      entryPrice ?? request.price ?? request.triggerPrice ?? null;
+    await this.emitTradeEvent({
+      tradeId: trade.id,
+      eventType: TradeEventType.CREATED,
+      price: createdPrice,
+      quantity: request.quantity,
+      notes: `${isPaperTrade ? 'paper' : 'LIVE'} ${request.orderType} ${request.side}`,
+    });
+    if (request.stoploss != null) {
+      await this.emitTradeEvent({
+        tradeId: trade.id,
+        eventType: TradeEventType.SL_SET,
+        price: request.stoploss,
+      });
+    }
+    if (request.target != null) {
+      await this.emitTradeEvent({
+        tradeId: trade.id,
+        eventType: TradeEventType.TARGET_SET,
+        price: request.target,
+      });
+    }
+    if (initialStatus === 'OPEN' && entryPrice) {
+      await this.emitTradeEvent({
+        tradeId: trade.id,
+        eventType: TradeEventType.FILLED,
+        price: entryPrice,
+        quantity: request.quantity,
+      });
+    }
 
     // ---- STEP 6: Start order tracking ----
     if (!isPaperTrade && orderId) {
@@ -518,6 +569,30 @@ export class TradeExecutionService {
           },
     );
 
+    // ---- Append to the per-trade event log (best-effort) ----
+    // A partial close logs PARTIAL_EXIT for the leg. A full close logs the
+    // SPECIFIC exit type so the audit log distinguishes a stop-out from a
+    // target hit from a plain square-off (the whole point of the log) — we
+    // map the exit reason/tag onto SL_HIT / TARGET_HIT, else generic CLOSED.
+    // price = the slice exit price, pnl = cumulative realized P&L,
+    // quantity = the units closed on this leg.
+    const exitTag = (opts.exitReasonTag as string) ?? '';
+    const reasonStr = `${exitTag} ${exitNote ?? ''}`.toLowerCase();
+    const fullCloseType =
+      exitTag === 'HIT_TARGET' || /target/.test(reasonStr)
+        ? TradeEventType.TARGET_HIT
+        : exitTag === 'STOPPED_OUT' || exitTag === 'MOVED_STOP' || /\bsl\b|stop|loss-cut/.test(reasonStr)
+          ? TradeEventType.SL_HIT
+          : TradeEventType.CLOSED;
+    await this.emitTradeEvent({
+      tradeId,
+      eventType: isFullClose ? fullCloseType : TradeEventType.PARTIAL_EXIT,
+      price: exitPrice,
+      quantity: closeQty,
+      pnl,
+      notes: exitTag || exitNote || null,
+    });
+
     // Mirror the close into the in-memory position tracker: a full close
     // removes the position, a partial close shrinks it. Both book only THIS
     // slice's realized P&L (slicePnl) — a prior partial already booked its
@@ -692,6 +767,13 @@ export class TradeExecutionService {
       }
     }
     await this.tradeRepository.updateTrade(tradeId, { status: 'CANCELLED' });
+    await this.emitTradeEvent({
+      tradeId,
+      eventType: TradeEventType.CANCELLED,
+      price: trade.limitPrice ?? trade.triggerPrice ?? null,
+      quantity: trade.quantity,
+      notes: 'user cancelled pending order',
+    });
     const updated = await this.tradeRepository.getTradeById(tradeId);
     if (updated) this.tradeGateway.emitTradeUpdate(updated);
     return updated ?? trade;
@@ -728,6 +810,31 @@ export class TradeExecutionService {
   // ------------------------------------------------------------------
   //  Private helpers
   // ------------------------------------------------------------------
+
+  /**
+   * Append one row to the per-trade event log. BEST-EFFORT: an event-log
+   * write must NEVER block or fail a trade, so every failure is swallowed
+   * with a warning. Mirrors the tolerant market-context snapshot in
+   * executeTrade.
+   */
+  private async emitTradeEvent(input: {
+    tradeId: string;
+    eventType: TradeEventType;
+    price?: number | null;
+    quantity?: number | null;
+    pnl?: number | null;
+    notes?: string | null;
+  }): Promise<void> {
+    try {
+      await this.tradeRepository.createTradeEvent(input);
+    } catch (err) {
+      this.logger.warn(
+        `Trade-event log write failed (${input.eventType} for ${input.tradeId}): ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+    }
+  }
 
   private async getLastPrice(
     token: string,

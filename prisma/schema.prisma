@@ -184,6 +184,10 @@ model Trade {
   exitReasonTag     String?
   exitNotes         String?
 
+  // Lifecycle event log (CREATED → FILLED → … → CLOSED). Mirrors WatchEvent so
+  // the manual-trade terminal can show a per-trade audit trail.
+  events            TradeEvent[]
+
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -660,6 +664,39 @@ model WatchEvent {
   @@index([watchEntryId, createdAt])
   @@index([eventType])
   @@map("watch_events")
+}
+
+// Per-trade lifecycle audit log for the main Trade table (manual/auto/watch
+// trades). Mirrors WatchEvent. Shown in the manual-trade terminal so a trader
+// can see exactly what happened to an order: when it was created, filled,
+// partially booked, stop/target hit, and closed.
+model TradeEvent {
+  id        String         @id @default(cuid())
+  tradeId   String
+  trade     Trade          @relation(fields: [tradeId], references: [id], onDelete: Cascade)
+  eventType TradeEventType
+  price     Float?
+  quantity  Int?
+  pnl       Float?
+  notes     String?
+  createdAt DateTime       @default(now())
+
+  @@index([tradeId, createdAt])
+  @@index([eventType])
+  @@map("trade_events")
+}
+
+enum TradeEventType {
+  CREATED       // order accepted/persisted (PENDING or OPEN)
+  FILLED        // entry fill (MARKET fill, or resting LIMIT/STOP reached)
+  SL_SET        // stop-loss attached/updated
+  TARGET_SET    // target attached/updated
+  PARTIAL_EXIT  // partial quantity booked
+  SL_HIT        // stop-loss triggered
+  TARGET_HIT    // target reached
+  MODIFIED      // qty/price/SL/target modified
+  CANCELLED     // pending order cancelled before fill
+  CLOSED        // final exit (full square-off)
 }
 
 // ============================================================================
