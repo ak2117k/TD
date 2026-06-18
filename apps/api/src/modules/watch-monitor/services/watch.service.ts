@@ -123,6 +123,11 @@ export interface CreateFromAlertInput {
 export class WatchService {
   private readonly logger = new Logger(WatchService.name);
 
+  /** A WS-cached tick is "fresh" enough to fill against if it arrived within
+   *  this window. Matches ExitPriceService.FRESH_WINDOW_MS (2 min) so the
+   *  fill-side and exit-side fresh-price policies agree. */
+  private static readonly WS_FRESH_WINDOW_MS = 120_000;
+
   constructor(
     private readonly repo: WatchRepository,
     private readonly target: TargetCalculatorService,
@@ -565,11 +570,21 @@ export class WatchService {
   }
 
   /**
-   * Fetch a fresh live LTP from the broker for an equity entry. Returns null
-   * when no broker is wired or the quote call fails — the caller then refuses
-   * to execute rather than trading at the stale stored alert price.
+   * Fetch a fresh live LTP for an equity entry. Returns null when no source
+   * yields a usable price — the caller then refuses to execute rather than
+   * trading at the stale stored alert price.
+   *
+   * FIX 4: prefer the WS-cached LTP first. The persistent feed already streams
+   * a tick for the held token in most cases, so a fresh cached quote spares us
+   * a blocking REST round-trip on the alert→order critical path. We only fall
+   * through to the REST `getLiveQuote` when no FRESH cached tick exists.
    */
   private async fetchLivePrice(entry: WatchEntry): Promise<number | null> {
+    // 1) Fresh WS-cached tick (no network round-trip).
+    const cachedLtp = this.freshCachedLtp(entry.token);
+    if (cachedLtp != null) return cachedLtp;
+
+    // 2) Fall back to a blocking REST quote.
     if (!this.brokerAdapter) return null;
     try {
       const tick = await this.brokerAdapter.getLiveQuote(
@@ -584,6 +599,27 @@ export class WatchService {
       );
       return null;
     }
+  }
+
+  /**
+   * Return the feed's cached LTP for a token IFF a tick arrived within
+   * {@link WatchService.WS_FRESH_WINDOW_MS}. Returns null when the feed has no
+   * `getQuote` accessor, holds no tick, the tick is stale, or the LTP is
+   * non-positive — every such case defers to the REST fallback above. Mirrors
+   * the 2-minute fresh window the ExitPriceService uses for the same purpose.
+   */
+  private freshCachedLtp(token: string): number | null {
+    const getQuote = (this.feed as { getQuote?: (t: string) => { ltp?: number; timestamp?: Date | string } | null })?.getQuote;
+    if (typeof getQuote !== 'function') return null;
+    const quote = getQuote.call(this.feed, token);
+    if (!quote) return null;
+    const ltp = quote.ltp;
+    if (typeof ltp !== 'number' || ltp <= 0) return null;
+    const ts = quote.timestamp instanceof Date ? quote.timestamp : (quote.timestamp ? new Date(quote.timestamp) : null);
+    if (!ts || Number.isNaN(ts.getTime())) return null;
+    const age = Date.now() - ts.getTime();
+    if (age < 0 || age > WatchService.WS_FRESH_WINDOW_MS) return null;
+    return ltp;
   }
 
   /**

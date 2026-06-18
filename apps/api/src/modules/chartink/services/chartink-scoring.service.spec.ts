@@ -112,6 +112,18 @@ describe('ChartinkScoringService', () => {
       expect(rsCheck?.detail?.reason).toBe('no sector mapping');
     });
 
+    it('does NOT sleep unconditionally — relies on the adapter pacer (FIX 1)', async () => {
+      // FIX 1: the ~14 hardcoded sleep(350) between checks are removed; the
+      // adapter's global serializeHistoricalCall already enforces 3 req/sec.
+      // Spy on the real sleep helper (NOT the no-op stub the suite installs)
+      // and assert score() never calls it.
+      const sleepSpy = jest.fn(() => Promise.resolve());
+      (service as unknown as { sleep: (ms: number) => Promise<void> }).sleep = sleepSpy;
+      mockAdapter.getHistoricalData.mockResolvedValue(rising(400, 100, 0.5));
+      await service.score(baseInput);
+      expect(sleepSpy).not.toHaveBeenCalled();
+    });
+
     it('broker throws for first check → that check fails but others continue', async () => {
       // First call throws (sector check), rest succeed
       mockAdapter.getHistoricalData

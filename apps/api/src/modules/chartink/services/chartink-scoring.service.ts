@@ -30,6 +30,19 @@ export interface ScoringCandleSource {
    */
   getCandles(token: string, exchange: string, timeframe: string, asOf: Date):
     Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>;
+  /**
+   * Optional series-membership predicate for a PARTIAL source — one that
+   * holds only SOME of the series the checks consume (e.g. the live
+   * direction-gate dedupe in FIX 2, which pre-fetches just stock-15m +
+   * sector-15m). When present and it returns false for a series, scoring
+   * falls THROUGH to the rate-paced broker fetch for that series instead of
+   * treating the empty result as "no data".
+   *
+   * When ABSENT (the original backtest `prefetch` source), the source is
+   * treated as complete/authoritative: every series reads from it, an empty
+   * result means genuinely no data — behaviour is byte-identical to before.
+   */
+  has?(token: string, exchange: string, timeframe: string): boolean;
 }
 
 export interface ScoringInput {
@@ -108,37 +121,28 @@ export class ChartinkScoringService {
     // Safe because Bull's chartink-process worker runs serially (concurrency=1).
     this.candleCache.clear();
 
-    // Run checks sequentially to respect the 350ms broker rate-limit pacer.
+    // Run checks sequentially. We do NOT inter-leave fixed sleeps here: the
+    // adapter's global `serializeHistoricalCall` already paces every
+    // historical fetch to 3 req/sec, so the per-run candleCache + that global
+    // pacer are the only throttle we need. The old ~14 hardcoded sleep(350)
+    // added ~4.9s of dead time on EVERY score (even on 100% cache hits, where
+    // there are NO broker calls to pace) — removed to cut alert→order latency.
     // Observability factors first (kept in their historical UI column slots),
     // then the scored factors.
     checks.push(await this.checkSectorAligned(input));
-    await this.sleep(350);
     checks.push(await this.checkRelativeStrength(input));
-    await this.sleep(350);
     checks.push(await this.checkIndexAligned(input));
-    await this.sleep(350);
     checks.push(await this.checkMacdDaily(input));
-    await this.sleep(350);
     checks.push(await this.checkMacdOneMin(input));
-    await this.sleep(350);
     checks.push(await this.checkMacdFiveMin(input));
-    await this.sleep(350);
     checks.push(await this.checkEma9OverEma20(input));
-    await this.sleep(350);
     checks.push(await this.checkSupertrend(input));
-    await this.sleep(350);
     checks.push(await this.checkSrRoom(input));
-    await this.sleep(350);
     checks.push(await this.checkVolume(input));
-    await this.sleep(350);
     checks.push(await this.checkVwapRelationship(input));
-    await this.sleep(350);
     checks.push(await this.checkAdxTrendStrength(input));
-    await this.sleep(350);
     checks.push(await this.checkRsi5mInZone(input));
-    await this.sleep(350);
     checks.push(await this.checkAtrTargetFeasibility(input));
-    await this.sleep(350);
     checks.push(await this.checkMultiDayBreakout(input));
 
     const score = checks.reduce((sum, c) => sum + c.points, 0);
@@ -778,7 +782,11 @@ export class ChartinkScoringService {
     // closed-only forming-bar drop, then slice(-lookback) — is applied so the
     // result is byte-identical to a live fetch of the same candles. The
     // per-run candleCache is bypassed: the source already IS the cache.
-    if (candleSource) {
+    // A PARTIAL source (has() present) only covers some series — for any
+    // series it doesn't hold, fall through to the broker path below.
+    const sourceCoversSeries =
+      candleSource && (candleSource.has ? candleSource.has(token, exchange, tf) : true);
+    if (candleSource && sourceCoversSeries) {
       // getCandles ends the series at `asOf` (or "now" when asOf is absent),
       // mirroring fetchCandlesUncached's `to = asOf ?? new Date()`.
       const asOfEffective = asOf ?? new Date();

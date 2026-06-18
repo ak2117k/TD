@@ -1200,3 +1200,82 @@ describe('WatchService.executeEntry — live-quote pricing (Bug A)', () => {
     );
   });
 });
+
+describe('WatchService.executeEntry — prefer fresh WS-cached LTP at fill (FIX 4)', () => {
+  let svc: WatchService;
+  let repo: any;
+  let trade: any;
+  let brokerAdapter: any;
+  let feed: any;
+  let now: Date;
+
+  const watchingEntry = {
+    id: 'w1', token: '11536', symbol: 'TCS-EQ', side: 'BUY', exchange: 'NSE',
+    status: 'WATCHING', initialPrice: 4000, initialScore: 72, initialBreakdown: { lotCount: 1 },
+    optionsToken: null, optionsLotSize: null, profitTarget: 4150,
+  };
+
+  beforeEach(async () => {
+    now = new Date('2026-05-19T04:30:00Z'); // 10:00 IST
+    jest.useFakeTimers({ now });
+    jest.spyOn(marketHours, 'isWithinEntryWindow').mockReturnValue(true);
+    repo = {
+      findById: jest.fn().mockResolvedValue(watchingEntry),
+      update: jest.fn().mockResolvedValue({}),
+    };
+    trade = { executeTrade: jest.fn().mockResolvedValue({ id: 'pt1', entryPrice: 3850 }) };
+    // REST quote returns a DIFFERENT price so we can tell which source was used.
+    brokerAdapter = { getLiveQuote: jest.fn().mockResolvedValue({ ltp: 3700 }) };
+    feed = { subscribeForWatch: jest.fn(), getQuote: jest.fn() };
+    const mod = await Test.createTestingModule({
+      providers: [
+        WatchService,
+        { provide: WatchRepository, useValue: repo },
+        { provide: TargetCalculatorService, useValue: { compute: jest.fn().mockReturnValue({ target: 3900, source: 'fallback-2pct' }) } },
+        { provide: StrikeSelectorService, useValue: { pick: jest.fn() } },
+        { provide: MarketFeedService, useValue: feed },
+        { provide: LevelBookService, useValue: { getLevels: jest.fn() } },
+        { provide: WatchGateway, useValue: { emitTick: jest.fn() } },
+        { provide: TradeExecutionService, useValue: trade },
+        { provide: BROKER_ADAPTER_TOKEN, useValue: brokerAdapter },
+      ],
+    }).compile();
+    svc = mod.get(WatchService);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+
+  it('uses a FRESH WS-cached LTP and skips the blocking REST quote', async () => {
+    // A WS tick from 5s ago is fresh — fill off it, never hit the broker REST.
+    feed.getQuote.mockReturnValue({ token: '11536', ltp: 3850, timestamp: new Date(now.getTime() - 5_000) });
+
+    await svc.executeEntry('w1', { mode: 'paper' });
+
+    expect(feed.getQuote).toHaveBeenCalledWith('11536');
+    expect(brokerAdapter.getLiveQuote).not.toHaveBeenCalled();
+    expect(trade.executeTrade).toHaveBeenCalledWith(expect.objectContaining({ price: 3850 }));
+  });
+
+  it('falls back to the REST quote when the WS-cached tick is stale', async () => {
+    // A WS tick from 5 minutes ago is stale (> 2-min fresh window) — ignore it
+    // and fall through to the REST round-trip.
+    feed.getQuote.mockReturnValue({ token: '11536', ltp: 9999, timestamp: new Date(now.getTime() - 5 * 60_000) });
+
+    await svc.executeEntry('w1', { mode: 'paper' });
+
+    expect(brokerAdapter.getLiveQuote).toHaveBeenCalled();
+    expect(trade.executeTrade).toHaveBeenCalledWith(expect.objectContaining({ price: 3700 }));
+  });
+
+  it('falls back to the REST quote when there is no WS-cached tick', async () => {
+    feed.getQuote.mockReturnValue(null);
+
+    await svc.executeEntry('w1', { mode: 'paper' });
+
+    expect(brokerAdapter.getLiveQuote).toHaveBeenCalled();
+    expect(trade.executeTrade).toHaveBeenCalledWith(expect.objectContaining({ price: 3700 }));
+  });
+});

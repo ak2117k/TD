@@ -1,7 +1,7 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ChartinkRepository, CreateAlertSetupInput } from '../repositories/chartink.repository';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
-import { ChartinkScoringService, classifyTrend } from './chartink-scoring.service';
+import { ChartinkScoringService, classifyTrend, ScoringCandleSource } from './chartink-scoring.service';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { NseSectorIndexService } from '../../market-data/services/nse-sector-index.service';
 import { WatchService, WatchCapExceededError, TradeCooldownError } from '../../watch-monitor/services/watch.service';
@@ -232,6 +232,12 @@ export class ChartinkProcessService {
     let directionSource: 'sector' | 'stock' = 'sector';
     let sectorReason: string | null = null;
 
+    // FIX 2: capture the FULL 15m series the direction gate fetches so the
+    // scoring step (checkSectorAligned / checkRelativeStrength / the stock-15m
+    // checks) can read them from memory instead of re-fetching the SAME two
+    // series from the rate-paced broker.
+    const gateCandles = new Map<string, Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>>();
+
     const sectorToken = await this.nseSector.getSectorIndexForSymbol(symbolBare);
     if (!sectorToken) {
       sectorReason = `no sector mapping for ${symbolBare}`;
@@ -241,9 +247,13 @@ export class ChartinkProcessService {
         sectorReason = `sector index token ${sectorToken} not in DB`;
       } else {
         try {
+          // Store the sector series under 'NSE' — the exchange the scoring
+          // sector checks always query the sector index with — so the key
+          // matches regardless of the instrument's recorded exchange.
           const sectorCloses = await this.fetchRecentCloses(
             sectorToken,
-            sectorInstrument.exchange ?? 'NSE',
+            'NSE',
+            gateCandles,
           );
           if (sectorCloses.length < 26) {
             sectorReason = `sector ${sectorToken} insufficient candles (${sectorCloses.length})`;
@@ -264,7 +274,7 @@ export class ChartinkProcessService {
     if (!side) {
       directionSource = 'stock';
       try {
-        const stockCloses = await this.fetchRecentCloses(instrument.token, 'NSE');
+        const stockCloses = await this.fetchRecentCloses(instrument.token, 'NSE', gateCandles);
         if (stockCloses.length >= 26) {
           const stockTrend = classifyTrend(stockCloses);
           if (stockTrend === 'UP') side = 'BUY';
@@ -337,6 +347,10 @@ export class ChartinkProcessService {
         side,
         entryPrice: hit.hitPrice,
         setupContext,
+        // FIX 2: serve the stock-15m / sector-15m series the direction gate
+        // already fetched from memory; everything else falls through to the
+        // broker. Pure data-access dedupe — scores are unchanged.
+        candleSource: this.buildGateCandleSource(gateCandles),
       });
     } catch (err) {
       await this.rejectSetup(
@@ -398,22 +412,22 @@ export class ChartinkProcessService {
       }
 
       // Adaptive-Stop shadow track — same admitted entry, new vol-stop/risk-first sizing.
-      // Independent try/catch: must never affect the gated or ungated paths.
-      try {
-        await this.adaptiveStopWatch.createFromAlert({
-          alertId,
-          setupId: persistedSetup.id,
-          symbol: hit.symbol,
-          token: instrument.token,
-          exchange: 'NSE',
-          side,
-          initialPrice: hit.hitPrice,
-          initialScore: scoringResult.score,
-          initialBreakdown: { checks: scoringResult.checks, lotCount: scoringResult.lotCount } as any,
-        });
-      } catch (err) {
-        this.logger.warn(`[adaptive-stop] ${hit.symbol}: ${err instanceof Error ? err.message : err}`);
-      }
+      // FIX 3: fire-and-forget. This track does its own live-price fetch + DB
+      // writes; awaiting it extended the critical section and head-of-line-
+      // blocked the next alert. It runs in the background with its own error
+      // handling so it can never affect the gated/ungated paths or the worker
+      // that frees up the moment the gated execute completes.
+      void this.runAdaptiveStopShadow({
+        alertId,
+        setupId: persistedSetup.id,
+        symbol: hit.symbol,
+        token: instrument.token,
+        exchange: 'NSE',
+        side,
+        initialPrice: hit.hitPrice,
+        initialScore: scoringResult.score,
+        initialBreakdown: { checks: scoringResult.checks, lotCount: scoringResult.lotCount } as any,
+      });
     } else {
       await this.rejectSetup(
         {
@@ -433,34 +447,64 @@ export class ChartinkProcessService {
     }
 
     // === 5. UNGATED shadow track — runs unconditionally for every scored alert.
-    // Independent try/catch: failures here MUST NOT affect the gated path.
-    // See specs/2026-05-20-ungated-shadow-track-design.md §5.1.
+    // FIX 3: fire-and-forget. Like the adaptive track it does its own live-
+    // price fetch + DB writes; awaiting it head-of-line-blocked the next
+    // alert. It runs in the background with its full error handling (including
+    // the rejection-record write) preserved inside runUngatedShadow, so
+    // failures here still NEVER affect the gated path.
+    void this.runUngatedShadow({
+      alertId,
+      setupId: null,
+      symbol: hit.symbol,
+      token: instrument.token,
+      exchange: 'NSE',
+      side,
+      initialPrice: hit.hitPrice,
+      initialScore: scoringResult.score,
+      initialBreakdown: { checks: scoringResult.checks, lotCount: scoringResult.lotCount } as any,
+    }, hit.hitPrice);
+
+    // (The Anand dual-track formerly ran here, after scoring; it now runs at
+    // step 1b above so it's never starved by the scoring backlog.)
+  }
+
+  /**
+   * Adaptive-Stop shadow track entry, run fire-and-forget (FIX 3). Isolated
+   * error handling: a failure is logged and swallowed so it can never affect
+   * the gated/ungated paths or block the worker.
+   */
+  private async runAdaptiveStopShadow(
+    input: Parameters<AdaptiveStopWatchService['createFromAlert']>[0],
+  ): Promise<void> {
     try {
-      await this.ungatedWatch.createFromAlert({
-        alertId,
-        setupId: null,
-        symbol: hit.symbol,
-        token: instrument.token,
-        exchange: 'NSE',
-        side,
-        initialPrice: hit.hitPrice,
-        initialScore: scoringResult.score,
-        initialBreakdown: { checks: scoringResult.checks, lotCount: scoringResult.lotCount } as any,
-      });
+      await this.adaptiveStopWatch.createFromAlert(input);
+    } catch (err) {
+      this.logger.warn(`[adaptive-stop] ${input.symbol}: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  /**
+   * Ungated shadow track entry, run fire-and-forget (FIX 3). Preserves the
+   * original error handling: known rejection reasons are recorded to the
+   * ungated-rejection repository, everything else is logged.
+   */
+  private async runUngatedShadow(
+    input: Parameters<UngatedWatchService['createFromAlert']>[0],
+    hitPrice: number,
+  ): Promise<void> {
+    try {
+      await this.ungatedWatch.createFromAlert(input);
     } catch (err) {
       const reason = this.mapUngatedError(err);
       if (reason) {
         await this.ungatedRejections.record({
-          alertId, symbol: hit.symbol, reason,
-          score: scoringResult.score, hitPrice: hit.hitPrice,
+          alertId: input.alertId, symbol: input.symbol, reason,
+          score: input.initialScore, hitPrice,
         });
       } else {
-        this.logger.warn(`[ungated] ${hit.symbol}: ${err instanceof Error ? err.message : err}`);
+        this.logger.warn(`[ungated] ${input.symbol}: ${err instanceof Error ? err.message : err}`);
       }
     }
-
-    // (The Anand dual-track formerly ran here, after scoring; it now runs at
-    // step 1b above so it's never starved by the scoring backlog.)
   }
 
   private mapUngatedError(err: unknown): UngatedRejectionReason | null {
@@ -480,8 +524,18 @@ export class ChartinkProcessService {
    * Fetch the last 50 closes of 15m candles for any token (sector index OR stock).
    * Mirrors ChartinkScoringService.fetch15mCandles — uses getHistoricalData
    * which auto-chunks and rate-paces the Angel One historical API.
+   *
+   * Side effect (FIX 2): the FULL 15m series fetched here is captured into
+   * `gateCandles` (keyed `token:exchange:15m`) so {@link buildGateCandleSource}
+   * can hand it to `scoring.score()` and avoid re-fetching the SAME stock-15m
+   * and sector-15m series the scoring checks (checkRelativeStrength /
+   * checkSectorAligned / etc.) would otherwise pull a second time.
    */
-  private async fetchRecentCloses(token: string, exchange: string): Promise<number[]> {
+  private async fetchRecentCloses(
+    token: string,
+    exchange: string,
+    gateCandles?: Map<string, Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>>,
+  ): Promise<number[]> {
     const to = new Date();
     // 7 days back gives enough bars even accounting for weekends + holidays
     const from = new Date(to.getTime() - 7 * 24 * 60 * 60 * 1000);
@@ -494,8 +548,45 @@ export class ChartinkProcessService {
       volume: number;
     }>;
     if (!candles || candles.length === 0) return [];
+    if (gateCandles) {
+      // Store the FULL series (forming bar included, chronological) — the
+      // scoring candleSource applies its own forming-bar drop + lookback
+      // slice, so the result is byte-identical to a fresh broker fetch.
+      gateCandles.set(`${token}:${exchange}:15m`, candles.map((c) => ({
+        timestamp: c.timestamp instanceof Date ? c.timestamp : new Date(c.timestamp),
+        open: Number(c.open),
+        high: Number(c.high),
+        low: Number(c.low),
+        close: Number(c.close),
+        volume: Number(c.volume) || 0,
+      })));
+    }
     // Take last 50 closes (getHistoricalData returns chronological order)
     return candles.slice(-50).map((c) => Number(c.close));
+  }
+
+  /**
+   * Build a PARTIAL {@link ScoringCandleSource} from the 15m series the
+   * direction gate already fetched (FIX 2). Only the series present in
+   * `gateCandles` are served from memory; every other series scoring needs
+   * (1m/5m/1d, NIFTY-15m, and — when not covered here — sector-15m) falls
+   * through to the rate-paced broker fetch via the `has()` predicate. This is
+   * a pure data-access dedupe: scores/checks are identical to a live fetch of
+   * the same candles.
+   */
+  private buildGateCandleSource(
+    gateCandles: Map<string, Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>>,
+  ): ScoringCandleSource | undefined {
+    if (gateCandles.size === 0) return undefined;
+    return {
+      has: (token, exchange, tf) => gateCandles.has(`${token}:${exchange}:${tf}`),
+      getCandles: (token, exchange, tf, asOf) => {
+        const series = gateCandles.get(`${token}:${exchange}:${tf}`);
+        if (!series) return [];
+        const cutoff = asOf.getTime();
+        return series.filter((c) => c.timestamp.getTime() <= cutoff);
+      },
+    };
   }
 
   private sleep(ms: number): Promise<void> {

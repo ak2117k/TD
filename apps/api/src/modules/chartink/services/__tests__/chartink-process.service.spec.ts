@@ -439,14 +439,18 @@ describe('ChartinkProcessService', () => {
 
       await service.processOne('alert-99', { symbol: 'TCS', hitPrice: 3500 });
 
-      expect(scoring.score).toHaveBeenCalledWith({
+      expect(scoring.score).toHaveBeenCalledWith(expect.objectContaining({
         token: '2885',
         symbol: 'TCS',
         exchange: 'NSE',
         side: 'BUY',
         entryPrice: 3500,
         setupContext: null,
-      });
+        // FIX 2: scoring now also receives a candleSource pre-seeded with the
+        // 15m series the direction gate already fetched, so it doesn't re-pull
+        // the same series from the rate-paced broker.
+        candleSource: expect.objectContaining({ getCandles: expect.any(Function), has: expect.any(Function) }),
+      }));
     });
 
     it('passes levelBookSnapshot setupContext to scoring when level book is available', async () => {
@@ -882,6 +886,91 @@ describe('ChartinkProcessService', () => {
       expect(repo.createAlertSetup).toHaveBeenCalledTimes(1);
       expect(adaptiveStopWatch.createFromAlert).toHaveBeenCalledTimes(1);
       expect(ungatedWatch.createFromAlert).toHaveBeenCalled();
+    });
+  });
+
+  // ─── FIX 2: direction-gate / scoring 15m candle dedupe ──────────────────────
+  // The direction gate already fetches the sector-index 15m (and, on fallback,
+  // the stock 15m). Those series are handed to scoring via candleSource so the
+  // scoring checks read them from memory instead of re-fetching the SAME series
+  // from the rate-paced broker.
+  describe('ChartinkProcessService — gate/scoring candle dedupe (FIX 2)', () => {
+    beforeEach(() => {
+      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', exchange: 'NSE' });
+      mdRepo.getInstrumentByToken.mockResolvedValue({ id: 'sec-1', token: '99926019', exchange: 'NSE' });
+      nseSector.getSectorIndexForSymbol.mockResolvedValue('99926019');
+      // Full OHLCV 15m series so the candleSource can serve real bars.
+      angelOne.getHistoricalData.mockResolvedValue(
+        Array.from({ length: 60 }, (_, i) => ({
+          timestamp: new Date(Date.UTC(2026, 4, 19, 4, i * 15)),
+          open: 100 + i, high: 100 + i + 0.5, low: 100 + i - 0.5, close: 100 + i + 0.25, volume: 1000 + i,
+        })),
+      );
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [] });
+    });
+
+    it('fetches the sector-15m series exactly ONCE and hands it to scoring', async () => {
+      await service.processOne('alert-dedupe-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      // The gate's sector trend resolves UP → side BUY → stock fallback NOT
+      // taken. The sector index 15m is fetched exactly once by the gate.
+      const sectorFetches = angelOne.getHistoricalData.mock.calls.filter(
+        (c: any[]) => c[0] === '99926019' && c[2] === '15m',
+      );
+      expect(sectorFetches).toHaveLength(1);
+
+      // scoring received a candleSource that already serves that sector series,
+      // so it will not re-fetch it from the broker.
+      const arg = scoring.score.mock.calls[0][0];
+      expect(arg.candleSource).toBeDefined();
+      expect(arg.candleSource.has('99926019', 'NSE', '15m')).toBe(true);
+      const served = arg.candleSource.getCandles('99926019', 'NSE', '15m', new Date());
+      expect(served.length).toBeGreaterThan(0);
+      // Series the gate did NOT pre-fetch fall through to the broker in scoring.
+      expect(arg.candleSource.has('2885', 'NSE', '5m')).toBe(false);
+    });
+  });
+
+  // ─── FIX 3: shadow tracks fire-and-forget (don't block the worker) ──────────
+  describe('ChartinkProcessService — shadow tracks fire-and-forget (FIX 3)', () => {
+    beforeEach(() => {
+      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', exchange: 'NSE' });
+      mdRepo.getInstrumentByToken.mockResolvedValue({ id: 'sec-1', token: '99926019', exchange: 'NSE' });
+      angelOne.getHistoricalData.mockResolvedValue(UP_CANDLES);
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [] });
+    });
+
+    it('processOne returns WITHOUT awaiting the adaptive + ungated shadow tracks', async () => {
+      // Both shadow tracks return a promise that stays pending and flips a flag
+      // only WHEN/IF it finally resolves. If processOne awaited either, it
+      // could not resolve before we resolve them — yet it does, proving the
+      // tracks are fire-and-forget. (Outer beforeEach installs fake timers; we
+      // never rely on timers here, only on promise ordering.)
+      let resolveAdaptive!: () => void;
+      let resolveUngated!: () => void;
+      let adaptiveSettled = false;
+      let ungatedSettled = false;
+      adaptiveStopWatch.createFromAlert.mockReturnValue(
+        new Promise<void>((r) => { resolveAdaptive = r; }).then(() => { adaptiveSettled = true; }),
+      );
+      ungatedWatch.createFromAlert.mockReturnValue(
+        new Promise<void>((r) => { resolveUngated = r; }).then(() => { ungatedSettled = true; }),
+      );
+
+      // processOne resolves even though both shadow tracks are still pending.
+      await service.processOne('alert-ff-1', { symbol: 'RELIANCE', hitPrice: 2885 });
+
+      // Both were kicked off (fire-and-forget, not skipped)...
+      expect(adaptiveStopWatch.createFromAlert).toHaveBeenCalledTimes(1);
+      expect(ungatedWatch.createFromAlert).toHaveBeenCalledTimes(1);
+      // ...but neither had to settle for processOne to return.
+      expect(adaptiveSettled).toBe(false);
+      expect(ungatedSettled).toBe(false);
+
+      // Drain them so the detached promises don't leak into other tests.
+      resolveAdaptive();
+      resolveUngated();
+      await Promise.resolve();
     });
   });
 });
