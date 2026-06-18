@@ -47,16 +47,18 @@ describe('BreakoutSwingPollerService.decideTradedTick (pure)', () => {
     expect(BreakoutSwingPollerService.decideTradedTick(trailing, 107, false)).toEqual({ action: 'STOPPED' });
   });
 
-  it('BIG_MOVER_EOD only inside the EOD window when the STOCK is up > 7% on the day', () => {
-    // stock day move from prevClose 95 → 103 = +8.4% (> 7%), trade gain +3% (< target).
-    const e = { ...base, prevDayClose: 95 };
-    expect(BreakoutSwingPollerService.decideTradedTick(e, 103, true)).toEqual({ action: 'BIG_MOVER_EOD' });
-    // Same price outside the window → no forced exit.
-    expect(BreakoutSwingPollerService.decideTradedTick(e, 103, false)).toEqual({ action: 'HOLD' });
+  it('BIG_MOVER_EOD locks a trade up > 7% FROM ENTRY inside the EOD window', () => {
+    // +8% from entry (100 → 108), inside the window → lock the gain.
+    expect(BreakoutSwingPollerService.decideTradedTick(base, 108, true)).toEqual({ action: 'BIG_MOVER_EOD' });
+    // Same gain OUTSIDE the window → not a forced exit (trailing manages it).
+    expect(BreakoutSwingPollerService.decideTradedTick(base, 108, false).action).not.toBe('BIG_MOVER_EOD');
   });
 
-  it('no BIG_MOVER_EOD when the stock day-move is ≤ 7% even in the window', () => {
-    const e = { ...base, prevDayClose: 100 }; // 103 is +3% on the day
+  it('no BIG_MOVER_EOD when the trade is up ≤ 7% from entry — even if the STOCK is way up on the day', () => {
+    // Stock +28% on the day (prevClose 80 → 103) but the TRADE is only +3% from
+    // entry: HELD, not force-exited. The old prev-close basis would have
+    // force-exited this at a tiny gain — exactly the bug this fix removes.
+    const e = { ...base, prevDayClose: 80 };
     expect(BreakoutSwingPollerService.decideTradedTick(e, 103, true)).toEqual({ action: 'HOLD' });
   });
 });
@@ -75,7 +77,7 @@ describe('BreakoutSwingPollerService — poller integration', () => {
       recordTick: jest.fn().mockResolvedValue(undefined),
       updateStatus: jest.fn().mockResolvedValue(undefined),
     };
-    adapter = { getLtpsBatch: jest.fn() };
+    adapter = { getLtpsBatch: jest.fn(), getLiveQuote: jest.fn() };
     const mod = await Test.createTestingModule({
       providers: [
         BreakoutSwingPollerService,
@@ -114,6 +116,23 @@ describe('BreakoutSwingPollerService — poller integration', () => {
     await svc.pollMarketHours();
 
     expect(repo.fill).not.toHaveBeenCalled();
+    // Still resting, but the live price must be persisted so the UI shows
+    // Price + Dist-to-Fill instead of "—".
+    expect(repo.recordTick).toHaveBeenCalledWith('q1', expect.objectContaining({ currentPrice: 100.5 }));
+  });
+
+  it('persists a QUEUED price via single-quote fallback when the batch drops the token', async () => {
+    repo.listQueued.mockResolvedValue([
+      { id: 'q1', symbol: 'KIRLPNU', token: '15180', limitPrice: 1817.87 },
+    ]);
+    adapter.getLtpsBatch.mockResolvedValue(new Map()); // batch silently drops it
+    adapter.getLiveQuote.mockResolvedValue({ ltp: 1794.3 });
+
+    await svc.pollMarketHours();
+
+    expect(adapter.getLiveQuote).toHaveBeenCalledWith('15180', 'NSE');
+    expect(repo.recordTick).toHaveBeenCalledWith('q1', expect.objectContaining({ currentPrice: 1794.3 }));
+    expect(repo.fill).not.toHaveBeenCalled(); // 1794.3 < 1817.87
   });
 
   it('arms the trailing stop on a TRADED entry once it is up +7%', async () => {
@@ -142,12 +161,12 @@ describe('BreakoutSwingPollerService — poller integration', () => {
     repo.listTraded.mockResolvedValue([
       { id: 't1', symbol: 'TCS', token: '11536', entryPrice: 100, prevDayClose: 95, stopPrice: 90, trailing: false, trailingHighWater: null },
     ]);
-    adapter.getLtpsBatch.mockResolvedValue(new Map([['11536', 103]])); // +8.4% on the day, +3% trade
+    adapter.getLtpsBatch.mockResolvedValue(new Map([['11536', 108]])); // +8% FROM ENTRY → locked in the window
 
     await svc.pollMarketHours();
 
     expect(repo.updateStatus).toHaveBeenCalledWith('t1', expect.objectContaining({
-      status: 'BIG_MOVER_EOD', exitPrice: 103,
+      status: 'BIG_MOVER_EOD', exitPrice: 108,
     }));
     jest.useRealTimers();
   });

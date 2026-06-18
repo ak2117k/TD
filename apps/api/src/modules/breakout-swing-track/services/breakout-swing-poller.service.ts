@@ -3,7 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import { BreakoutSwingRepository } from '../repositories/breakout-swing.repository';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import {
-  NOTIONAL, TARGET_PCT, INIT_STOP_PCT, TRAIL_TRIGGER_PCT, TRAIL_GIVEBACK_PCT, BIG_MOVER_DAY_PCT,
+  NOTIONAL, TARGET_PCT, INIT_STOP_PCT, TRAIL_TRIGGER_PCT, TRAIL_GIVEBACK_PCT, BIG_MOVER_GAIN_PCT,
 } from '../constants';
 
 interface TradedEntry {
@@ -56,11 +56,14 @@ export class BreakoutSwingPollerService {
     //    (not ltp >= entryPx × 1.10) so the +10% boundary isn't lost to float.
     if (gainPctFromEntry >= TARGET_PCT) return { action: 'TARGET_HIT' };
 
-    // 2. Big-day-mover: if the STOCK (not the trade) is up > BIG_MOVER_DAY_PCT on
-    //    the day vs prev close, force-exit in the EOD window.
-    if (bigMoverWindow && entry.prevDayClose != null && entry.prevDayClose > 0) {
-      const dayMovePct = ((ltp - entry.prevDayClose) / entry.prevDayClose) * 100;
-      if (dayMovePct > BIG_MOVER_DAY_PCT) return { action: 'BIG_MOVER_EOD' };
+    // 2. Big-mover lock: if the TRADE is up > BIG_MOVER_GAIN_PCT FROM ENTRY by the
+    //    EOD window, lock the gain (don't hold a runner overnight). Measured from
+    //    ENTRY, not prev-day close — breakout entries are already extended on the
+    //    day, so a prev-close basis force-exited every trade at a tiny intraday
+    //    gain and the +10% target could never be reached. (Trades up < this % at
+    //    the window are held as swings into the next session.)
+    if (bigMoverWindow && gainPctFromEntry > BIG_MOVER_GAIN_PCT) {
+      return { action: 'BIG_MOVER_EOD' };
     }
 
     // 3. Trailing: once up TRAIL_TRIGGER_PCT, arm/ratchet the trailing stop. This
@@ -108,11 +111,20 @@ export class BreakoutSwingPollerService {
     const now = new Date();
 
     for (const entry of withToken) {
-      const ltp = ltpMap.get(entry.token as string);
+      let ltp = ltpMap.get(entry.token as string);
+      // getLtpsBatch silently drops quiet-feed tokens; fall back to a single
+      // quote so a resting order still shows a live price + dist-to-fill.
       if (ltp === undefined) {
+        const q = await this.adapter.getLiveQuote(entry.token as string, 'NSE').catch(() => null);
+        if (q?.ltp && q.ltp > 0) ltp = q.ltp;
+      }
+      if (ltp === undefined || !(ltp > 0)) {
         this.logger.warn(`[breakout-swing] ${entry.symbol} QUEUED — no fresh price, fill not evaluated`);
         continue;
       }
+      // Persist the live price every poll — even while still resting — so the UI
+      // Price and Dist-to-Fill columns populate (previously null → "—").
+      await this.repo.recordTick(entry.id, { currentPrice: ltp, lastTickAt: now });
       if (ltp >= entry.limitPrice) {
         const quantity = ltp > 0 ? Math.floor(NOTIONAL / ltp) : 0;
         const stopPrice = ltp * (1 - INIT_STOP_PCT / 100);
