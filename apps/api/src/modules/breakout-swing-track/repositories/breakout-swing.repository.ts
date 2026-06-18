@@ -77,12 +77,14 @@ export class BreakoutSwingRepository {
   }
 
   /**
-   * Active rows (QUEUED or TRADED) for a symbol entered/queued since `since`.
-   * Drives the once-per-day dedup gate at entry time.
+   * Any active row (QUEUED or TRADED) for a symbol, regardless of when it was
+   * queued. Drives the entry-time dedup gate. All-time (not date-windowed)
+   * because QUEUED resting limits are GTC — they persist until filled, so a
+   * resting order from a prior day must still block a duplicate.
    */
-  async findActiveBySymbolSince(symbol: string, since: Date): Promise<{ id: string } | null> {
+  async findActiveBySymbol(symbol: string): Promise<{ id: string } | null> {
     return this.prisma.breakoutSwingEntry.findFirst({
-      where: { symbol, status: { in: ['QUEUED', 'TRADED'] }, queuedAt: { gte: since } },
+      where: { symbol, status: { in: ['QUEUED', 'TRADED'] } },
       select: { id: true },
     });
   }

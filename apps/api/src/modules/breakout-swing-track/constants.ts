@@ -11,5 +11,6 @@ export const TRAIL_TRIGGER_PCT = 7;     // arm the trailing stop once the trade 
 export const TRAIL_GIVEBACK_PCT = 2;    // trailed stop = highWater × (1 − TRAIL_GIVEBACK_PCT/100)
 export const BIG_MOVER_GAIN_PCT = 7;    // if the TRADE is up > this % FROM ENTRY by BIG_MOVER_EXIT_HHMM → lock it. Measured from ENTRY, not prev-day close: breakout entries are already extended on the day, so a prev-close basis force-exited every trade at a tiny gain and made the 10% target unreachable.
 export const BIG_MOVER_EXIT_HHMM = '15:15';
-export const EOD_HHMM = '15:25';        // QUEUED entries unfilled by this IST time → EXPIRED
+// (QUEUED resting limits are GTC — they no longer expire at EOD; they rest until
+// filled or cancelled. The former EOD_HHMM/expireQueuedAtEod was removed.)
 export const NOTIONAL = 200_000;        // ₹2,00,000 notional per position (mirrors swing)

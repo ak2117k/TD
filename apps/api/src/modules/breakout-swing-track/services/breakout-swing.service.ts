@@ -94,9 +94,12 @@ export class BreakoutSwingService {
     if (!input.token) throw new BreakoutSwingRejectError(symbol, 'no instrument token');
     const token = input.token;
 
-    // Dedup: skip if the symbol already has an active QUEUED/TRADED entry today.
-    const active = await this.repo.findActiveBySymbolSince(symbol, this.istMidnightTodayUtc());
-    if (active) throw new BreakoutSwingRejectError(symbol, 'already has an active entry today');
+    // Dedup: skip if the symbol already has an active QUEUED/TRADED entry. This
+    // is all-time (not "today") because QUEUED resting limits are GTC — they
+    // persist until filled — so a still-resting order from a prior day must
+    // block a duplicate when the scan re-fires the same symbol.
+    const active = await this.repo.findActiveBySymbol(symbol);
+    if (active) throw new BreakoutSwingRejectError(symbol, 'already has an active QUEUED/TRADED entry');
 
     // 1. Live quote — reject when unavailable (entering at a stale Chartink price
     //    is worse than skipping).

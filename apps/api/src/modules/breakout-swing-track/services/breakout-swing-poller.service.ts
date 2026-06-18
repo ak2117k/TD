@@ -182,15 +182,9 @@ export class BreakoutSwingPollerService {
     );
   }
 
-  /** EOD: expire any QUEUED entry not filled by 15:25 IST Mon–Fri. */
-  @Cron('0 25 15 * * 1-5', { timeZone: 'Asia/Kolkata' })
-  async expireQueuedAtEod(): Promise<void> {
-    const queued = await this.repo.listQueued();
-    if (queued.length === 0) return;
-    const now = new Date();
-    for (const entry of queued) {
-      await this.repo.updateStatus(entry.id, { status: 'EXPIRED', exitedAt: now, exitReason: 'unfilled-eod' });
-    }
-    this.logger.log(`[breakout-swing] expired ${queued.length} unfilled QUEUED entries at EOD`);
-  }
+  // NOTE: QUEUED resting limits are GTC — they intentionally do NOT expire at
+  // EOD. An unfilled order rests across sessions until its limit is reached
+  // (fills → TRADED) or the user cancels it (QUEUED → DISMISSED via the
+  // controller). The prior 15:25 `expireQueuedAtEod` cron was removed so a
+  // breakout that triggers a day or two later is still caught.
 }

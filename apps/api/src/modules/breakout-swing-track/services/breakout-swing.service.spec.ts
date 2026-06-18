@@ -34,7 +34,7 @@ describe('BreakoutSwingService.createFromAlert — entry gates', () => {
 
   beforeEach(async () => {
     repo = {
-      findActiveBySymbolSince: jest.fn().mockResolvedValue(null),
+      findActiveBySymbol: jest.fn().mockResolvedValue(null),
       createQueuedEntry: jest.fn().mockResolvedValue({ id: 'bs1' }),
     };
     adapter = {
@@ -104,8 +104,11 @@ describe('BreakoutSwingService.createFromAlert — entry gates', () => {
     expect(repo.createQueuedEntry).not.toHaveBeenCalled();
   });
 
-  it('REJECT: dedup — symbol already has an active entry today', async () => {
-    repo.findActiveBySymbolSince.mockResolvedValue({ id: 'existing' });
+  it('REJECT: dedup — symbol already has an active QUEUED/TRADED entry (any day; GTC resting orders persist)', async () => {
+    // QUEUED orders no longer expire at EOD (they rest until filled), so the
+    // dedup is all-time, not "today only" — otherwise a symbol resting from a
+    // prior day would get a duplicate resting order when the scan re-fires.
+    repo.findActiveBySymbol.mockResolvedValue({ id: 'existing' });
     await expect(svc.createFromAlert(baseInput)).rejects.toBeInstanceOf(BreakoutSwingRejectError);
     expect(adapter.getLiveQuote).not.toHaveBeenCalled();
     expect(repo.createQueuedEntry).not.toHaveBeenCalled();
