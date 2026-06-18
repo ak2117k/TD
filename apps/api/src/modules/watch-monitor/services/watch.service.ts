@@ -36,6 +36,13 @@ const HARD_STOP_PCT = 0.004;
  *  a backstop against genuine runaway gaps while admitting the 1–3% drift. */
 const MAX_CHASE_PCT = 0.03;
 
+/** Live-quote fetch retries on the execute path. A transient Angel feed/REST
+ *  blip used to permanently miss the trade (single fetch fails → refuse → drift
+ *  to MISSED). Retry a few times with a brief backoff before refusing. ~1.2s
+ *  worst case on the background auto-execute worker, so it never blocks intake. */
+const QUOTE_FETCH_ATTEMPTS = 3;
+const QUOTE_RETRY_MS = 400;
+
 /** Fraction of position to exit at the partial-exit threshold. (Unchanged.) */
 const PARTIAL_EXIT_FRACTION = 0.5;
 
@@ -584,21 +591,34 @@ export class WatchService {
     const cachedLtp = this.freshCachedLtp(entry.token);
     if (cachedLtp != null) return cachedLtp;
 
-    // 2) Fall back to a blocking REST quote.
+    // 2) Fall back to a blocking REST quote, retried a few times. A transient
+    //    Angel feed/REST blip (or a momentarily-empty quote) shouldn't refuse
+    //    the fill and permanently miss the trade — give it a few brief retries.
     if (!this.brokerAdapter) return null;
-    try {
-      const tick = await this.brokerAdapter.getLiveQuote(
-        entry.token,
-        (entry as any).exchange ?? 'NSE',
-      );
-      const ltp = (tick as any)?.ltp;
-      return typeof ltp === 'number' && ltp > 0 ? ltp : null;
-    } catch (err) {
-      this.logger.warn(
-        `fetchLivePrice(${entry.symbol}) failed: ${err instanceof Error ? err.message : err}`,
-      );
-      return null;
+    for (let attempt = 1; attempt <= QUOTE_FETCH_ATTEMPTS; attempt++) {
+      try {
+        const tick = await this.brokerAdapter.getLiveQuote(
+          entry.token,
+          (entry as any).exchange ?? 'NSE',
+        );
+        const ltp = (tick as any)?.ltp;
+        if (typeof ltp === 'number' && ltp > 0) return ltp;
+      } catch (err) {
+        this.logger.warn(
+          `fetchLivePrice(${entry.symbol}) attempt ${attempt}/${QUOTE_FETCH_ATTEMPTS} failed: ${
+            err instanceof Error ? err.message : err
+          }`,
+        );
+      }
+      if (attempt < QUOTE_FETCH_ATTEMPTS) await this.delay(QUOTE_RETRY_MS);
     }
+    return null;
+  }
+
+  /** Small awaitable backoff. A method (not an inline setTimeout) so tests can
+   *  stub it to resolve immediately and not wait on real/fake timers. */
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /**

@@ -1108,6 +1108,7 @@ describe('WatchService.executeEntry — live-quote pricing (Bug A)', () => {
     // With no live quote, executeEntry used to fall back to the stale
     // Chartink trigger price. It must instead refuse to trade and leave the
     // entry WATCHING — never open a position at an unverified price.
+    jest.spyOn(svc as any, 'delay').mockResolvedValue(undefined); // skip retry backoff
     brokerAdapter.getLiveQuote.mockRejectedValue(new Error('quote unavailable'));
 
     const result = await svc.executeEntry('w1', { mode: 'paper' });
@@ -1117,6 +1118,24 @@ describe('WatchService.executeEntry — live-quote pricing (Bug A)', () => {
       'w1', expect.objectContaining({ status: 'TRADED' }),
     );
     expect(result).toBeNull();
+  });
+
+  it('retries the live quote and fills when a later attempt succeeds (transient feed blip)', async () => {
+    // A momentary Angel feed/REST blip used to permanently miss the trade: the
+    // single quote fetch failed → refused → MISSED. Now executeEntry retries a
+    // few times before giving up, so a transient failure that recovers within
+    // ~1s still fills.
+    jest.spyOn(svc as any, 'delay').mockResolvedValue(undefined); // no real backoff wait
+    brokerAdapter.getLiveQuote
+      .mockRejectedValueOnce(new Error('feed blip'))
+      .mockRejectedValueOnce(new Error('feed blip'))
+      .mockResolvedValueOnce({ ltp: 3800 });
+
+    const result = await svc.executeEntry('w1', { mode: 'paper' });
+
+    expect(brokerAdapter.getLiveQuote).toHaveBeenCalledTimes(3);
+    expect(trade.executeTrade).toHaveBeenCalledWith(expect.objectContaining({ price: 3800 }));
+    expect(result).not.toBeNull();
   });
 
   it('admits a price that moved within the chase tolerance (+2.5%, under the 3% gate)', async () => {
