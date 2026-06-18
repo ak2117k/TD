@@ -95,23 +95,30 @@ function getTimeframeDurationMs(timeframe: string): number {
   return map[timeframe] ?? 15 * 60_000;
 }
 
-function getHistoryRangeDays(timeframe: string): number {
-  // Total calendar-day lookback we FETCH per timeframe. Wider than what we
-  // default-show — chart starts zoomed to the most-recent ~100 bars and the
-  // user can scroll left to see older history. This way:
-  //   - default view is uncluttered (not 250 bars squished into a corner)
-  //   - history is available without re-fetching when user scrolls
+export function getHistoryRangeDays(timeframe: string): number {
+  // Calendar-day lookback for the INITIAL fetch (cold first paint).
+  //
+  // PERF: sub-hour intervals are fetched per-CALENDAR-DAY by the Angel
+  // adapter (each day = one ~350ms-paced REST chunk), so a 15-day 15m
+  // window costs ~15 serial calls (~8-12s cold). We only need enough bars
+  // to fill the default view (~100 bars, which renders the most-recent
+  // slice). The lazy `loadOlder`/`prependOlderCandles` path fetches older
+  // history on scroll, so shrinking the initial window defers — not loses —
+  // history while cutting cold-load chunk count dramatically.
+  //
+  // ~bars-per-trading-day (NSE 6.25h session): 1m≈375, 5m≈75, 15m≈25.
+  // Windows below keep ≳100 bars after weekends/holidays are excluded.
   const map: Record<string, number> = {
-    '1m': 3,    // ~1100 bars total, default-shows last ~100
-    '5m': 10,   // ~750 bars total
-    '15m': 15,  // ~375 bars total (yesterday: 15 days = 250 bars rendered)
-    '30m': 30,  // ~390 bars
+    '1m': 1,    // ~375 bars/day → 1 day fills the 100-bar view (was 3 → 3 chunks)
+    '5m': 3,    // ~150 bars over ~2 trading days (was 10 → ~10 chunks)
+    '15m': 5,   // ~100-125 bars over ~4 trading days (was 15 → ~15 chunks)
+    '30m': 30,  // hour+ intervals fetch in one wide chunk — no per-day penalty
     '1h': 60,   // ~390 bars
     '4h': 120,  // ~180 bars
     '1d': 365,
     '1w': 730,
   };
-  return map[timeframe] ?? 15;
+  return map[timeframe] ?? 3;
 }
 
 function candleToChart(c: Candle): ChartCandle {

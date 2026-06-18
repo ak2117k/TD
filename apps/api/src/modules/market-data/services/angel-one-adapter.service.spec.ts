@@ -545,4 +545,83 @@ describe('AngelOneAdapterService — historical chunk throttle resilience', () =
     expect(e).toBeInstanceOf(AngelThrottleError);
     expect(e.name).toBe('AngelThrottleError');
   });
+
+  // ─── Rate-limit safety after removing the redundant per-chunk pacer ──────
+  // FIX C: the auto-chunk loop no longer adds its own ~350ms sleep between
+  // chunks. Pacing now comes SOLELY from `serializeHistoricalCall`, which
+  // enforces a >=350ms gap between every historical call (3 req/sec cap).
+  // These tests run on a VIRTUAL clock: `sleep(ms)` advances the clock by
+  // `ms` and resolves instantly, and `Date.now()` reads that clock — so the
+  // serialiser's real gap logic is exercised and we can assert timings.
+  describe('historical-call pacing (3 req/sec safety, no double-pacing)', () => {
+    function makePacedAdapter(getCandleData: jest.Mock) {
+      const fakeAuth = {
+        getSmartApi: () => ({ getCandleData }),
+        isAuthenticated: () => true,
+      } as unknown as AngelOneAuthService;
+      const fakeWs = {
+        on: jest.fn(),
+        removeListener: jest.fn(),
+      } as unknown as AngelOneWebSocketService;
+      const adapter = new AngelOneAdapterService(fakeAuth, fakeWs);
+
+      // Virtual clock shared by sleep + Date.now.
+      let clock = 1_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => clock);
+      const sleeps: number[] = [];
+      jest.spyOn(adapter as any, 'sleep').mockImplementation((...args: unknown[]) => {
+        const ms = args[0] as number;
+        sleeps.push(ms);
+        clock += ms; // advancing the clock makes the serialiser's gap real
+        return Promise.resolve();
+      });
+      return { adapter, sleeps, getClock: () => clock };
+    }
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    // Simulated wall-clock cost of one getCandleData round-trip. Picking a
+    // value < 350ms is what makes single-source vs double pacing distinguish-
+    // able: with one pacer the inter-call gap is exactly 350ms; the old
+    // double-pacer (serialiser gap + a separate post-call chunk sleep) stacks
+    // to ~350 + (350 - CALL_LATENCY) more, inflating each gap well past 350.
+    const CALL_LATENCY_MS = 100;
+
+    it('paces every chunk call exactly 350ms apart (3 req/sec) with NO double-pacing inflation', async () => {
+      const callTimes: number[] = [];
+      const { adapter, getClock } = makePacedAdapter(
+        jest.fn().mockImplementation((params: any) => {
+          callTimes.push(Date.now());
+          // Model a non-zero round-trip: the call itself advances the clock.
+          // (getClock closes over the same clock the sleep spy mutates.)
+          void getClock;
+          return new Promise((resolve) => {
+            // Advance the virtual clock to simulate latency, then resolve.
+            (adapter as any).sleep(CALL_LATENCY_MS).then(() => {
+              const day = params.fromdate.slice(8, 10);
+              resolve(candleResponse(`2026-05-${day}T09:15:00+05:30`));
+            });
+          });
+        }),
+      );
+
+      // 7-day range, 15m interval → 7 one-day chunks → 7 calls.
+      await adapter.getHistoricalData('12345', 'NSE', '15m', FROM, TO);
+      expect(callTimes).toHaveLength(7);
+
+      // 3 req/sec floor: every consecutive call is >=350ms apart.
+      // Single-source ceiling: and NOT MORE than 350ms (+ the call's own
+      // latency) — i.e. no extra stacked pacing. The old double-pacer would
+      // push consecutive starts to ~450ms apart.
+      for (let i = 1; i < callTimes.length; i++) {
+        const gap = callTimes[i] - callTimes[i - 1];
+        expect(gap).toBeGreaterThanOrEqual(350); // rate-limit safe (3 req/sec)
+        // Single-source pacing fills each gap to EXACTLY 350ms. The old
+        // double-pacer would inflate it to 350 + CALL_LATENCY_MS (= 450).
+        expect(gap).toBe(350);
+      }
+    });
+  });
 });

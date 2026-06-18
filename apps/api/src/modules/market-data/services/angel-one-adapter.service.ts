@@ -83,10 +83,13 @@ const TIMEFRAME_MAX_RANGE_DAYS: Record<string, number> = {
   ONE_DAY: 1800,
 };
 
-/** Pacing between chunked historical calls — Angel One historical limit is 3 req/sec; 350ms keeps us under. */
-const HISTORICAL_CHUNK_PACE_MS = 350;
-
-/** Minimum gap between ANY two historical calls (across all callers). 3 req/sec hard cap → 350ms. */
+/**
+ * Minimum gap between ANY two historical calls (across all callers), enforced
+ * by `serializeHistoricalCall`. Angel One's historical limit is 3 req/sec →
+ * 350ms keeps us under it. This is the SINGLE source of historical-call
+ * pacing: the auto-chunk loop deliberately does NOT add its own per-chunk
+ * sleep, since every chunk call funnels through the same serialiser.
+ */
 const HISTORICAL_MIN_GAP_MS = 350;
 
 /**
@@ -828,10 +831,14 @@ export class AngelOneAdapterService implements BrokerAdapter {
         }
       }
       chunkIndex++;
-      // Pacer between chunks — only sleep when there's another chunk to fetch.
-      if (chunkEnd < to.getTime()) {
-        await this.sleep(HISTORICAL_CHUNK_PACE_MS);
-      }
+      // NO explicit inter-chunk pacer here. Every chunk's getCandleData call
+      // already routes through `serializeHistoricalCall`, which serialises ALL
+      // historical calls (across every caller) and enforces a hard
+      // HISTORICAL_MIN_GAP_MS (350ms) gap between consecutive calls — i.e. the
+      // 3 req/sec cap is satisfied globally. The old extra ~350ms per-chunk
+      // sleep here was redundant double-pacing that ~doubled cold chart-load
+      // time (per chunk paid the global gap PLUS this sleep ≈ 700ms) without
+      // buying any additional rate-limit safety.
       cursor = chunkEnd;
     }
 

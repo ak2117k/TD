@@ -47,6 +47,20 @@ import { Exchange } from '@td/shared/types';
 const MIN_TIMEFRAME_AGREEMENT = 2;
 
 /**
+ * How long a per-token broker daily-statics refresh stays "fresh" before
+ * `analyze()` will trigger another one. Matches LevelBookService's
+ * LAZY_FRESH_MS (5 min) so the two freshness windows stay aligned.
+ *
+ * PERF: `analyze()` is polled ~every 60s by the chart's Setup card. Before
+ * this gate every poll called `levelBookService.refreshFromBroker`, which
+ * issues a fresh Angel `getHistoricalData('1d', …)` REST call — re-hitting
+ * the broker every minute for daily statics (PDH/PDL/prevClose/atr14) that
+ * only change once per session. Gating the refresh to once per
+ * REFRESH_FROM_BROKER_FRESH_MS removes that redundant per-poll fetch.
+ */
+const REFRESH_FROM_BROKER_FRESH_MS = 5 * 60 * 1000;
+
+/**
  * Map a working timeframe to the next-higher timeframe used for the MTF
  * trend filter. Daily has no higher TF — null short-circuits the check.
  */
@@ -195,6 +209,13 @@ function snapshotFromBook(book: LevelBook): LevelsSnapshot {
 export class SignalGeneratorService {
   private readonly logger = new Logger(SignalGeneratorService.name);
 
+  /**
+   * Per-token timestamp (epoch ms) of the last `refreshFromBroker` call made
+   * from `analyze()`. Used to gate the per-poll daily-statics broker fetch
+   * behind REFRESH_FROM_BROKER_FRESH_MS (see that constant).
+   */
+  private readonly lastBrokerRefreshAt = new Map<string, number>();
+
   constructor(
     private readonly strategyRegistry: StrategyRegistryService,
     private readonly signalScoring: SignalScoringService,
@@ -235,7 +256,21 @@ export class SignalGeneratorService {
     // the existing lazyLoad path which has its own DB + broker fallback
     // logic and tolerates partial data (e.g. fresh symbols with < 14
     // daily candles).
-    await this.levelBookService.refreshFromBroker(token, exchange, symbol);
+    //
+    // PERF gate: daily statics (PDH/PDL/prevClose/atr14) only change once
+    // per session, but analyze() is polled ~every 60s. Skip the broker
+    // refresh when we already refreshed this token within
+    // REFRESH_FROM_BROKER_FRESH_MS so repeated polls don't re-hit Angel's
+    // historical API every minute. lazyLoad below still returns the cached
+    // book, keeping the Setup card live.
+    const lastRefreshAt = this.lastBrokerRefreshAt.get(token);
+    if (
+      lastRefreshAt === undefined ||
+      Date.now() - lastRefreshAt >= REFRESH_FROM_BROKER_FRESH_MS
+    ) {
+      this.lastBrokerRefreshAt.set(token, Date.now());
+      await this.levelBookService.refreshFromBroker(token, exchange, symbol);
+    }
 
     const existing = this.setupTracker.getActive(token);
     if (
