@@ -6,10 +6,19 @@ import { AngelOneAdapterService } from '../../market-data/services/angel-one-ada
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
 import { resolvePriceFields } from '../price-fields';
 import { realizedIntradayPnlPct } from '../intraday-pnl';
+import { withBudget } from '../../../common/utils/with-budget';
 
 class UpdateCategoryDto {
   @IsString() @IsNotEmpty() category!: string;
 }
+
+/** Live-price enrichment is best-effort and MUST NOT block the list response.
+ *  A cold/dead Angel feed makes getLtpsBatch hang and pushes every open token
+ *  to the serialized lazyLoad historical fallback — together that blew past the
+ *  web client's 30s timeout on the swing/intraday lists. Each phase is bounded;
+ *  tokens unresolved in time render `priceStale` and fill in via WS / next poll. */
+const LTP_BUDGET_MS = 3000;
+const SEED_BUDGET_MS = 3000;
 
 @Controller('api/anand')
 export class AnandDualTrackController {
@@ -146,7 +155,11 @@ export class AnandDualTrackController {
       ...new Set(entries.filter((e) => e.exitPrice == null).map((e) => e.token).filter(Boolean) as string[]),
     ];
     const ltpMap = openTokens.length
-      ? await this.adapter.getLtpsBatch('NSE', openTokens).catch(() => new Map<string, number>())
+      ? await withBudget(
+          this.adapter.getLtpsBatch('NSE', openTokens).catch(() => new Map<string, number>()),
+          LTP_BUDGET_MS,
+          new Map<string, number>(),
+        )
       : new Map<string, number>();
 
     // Secondary fallback: for open-position tokens the live LTP batch dropped
@@ -158,17 +171,25 @@ export class AnandDualTrackController {
     const seedMap = new Map<string, number>();
     if (this.levelBook) {
       const missing = openTokens.filter((t) => !ltpMap.has(t));
-      await Promise.all(
-        missing.map(async (token) => {
-          const symbol = entries.find((e) => e.token === token)?.symbol ?? '';
-          try {
-            const book = await this.levelBook!.lazyLoad(token, 'NSE', symbol);
-            const seed = book ? book.spot || book.vwap || book.prevClose || 0 : 0;
-            if (seed > 0) seedMap.set(token, seed);
-          } catch {
-            /* leave unresolved → resolvePriceFields marks the row stale */
-          }
-        }),
+      // Each lazyLoad does a 350ms-paced historical fetch, so N missing tokens
+      // serialize into a long chain. Bound the whole fallback: lazyLoads that
+      // resolve within the budget seed the map (as a side effect); the rest are
+      // left unresolved → resolvePriceFields marks those rows stale.
+      await withBudget(
+        Promise.all(
+          missing.map(async (token) => {
+            const symbol = entries.find((e) => e.token === token)?.symbol ?? '';
+            try {
+              const book = await this.levelBook!.lazyLoad(token, 'NSE', symbol);
+              const seed = book ? book.spot || book.vwap || book.prevClose || 0 : 0;
+              if (seed > 0) seedMap.set(token, seed);
+            } catch {
+              /* leave unresolved → resolvePriceFields marks the row stale */
+            }
+          }),
+        ),
+        SEED_BUDGET_MS,
+        [],
       );
     }
 
