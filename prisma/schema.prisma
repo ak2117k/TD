@@ -194,6 +194,13 @@ model Trade {
   @@index([vixRegimeAtEntry])
   @@index([exitReasonTag])
   @@index([source])
+  // Journal/history list: WHERE status filtered, ORDER BY createdAt
+  // (portfolio.repository.ts getTradeJournal/getRecentTrades + every
+  // CLOSED/FILLED aggregate). Composite lets the DB satisfy filter+sort.
+  @@index([status, createdAt])
+  // Manual-trade page scoping: getOpenTrades(source) filters source + status
+  // together (trade.repository.ts getOpenTrades source filter).
+  @@index([source, status])
   @@map("trades")
 }
 
@@ -627,6 +634,13 @@ model WatchEntry {
   @@index([token])
   @@index([symbol])
   @@index([createdAt])
+  // Closed-list / last-closed lookups order by closedAt DESC filtered by
+  // token + terminal status (watch.repository.ts getLastClosedPnlForToken
+  // / getLastClosedTradeForToken, orderBy closedAt:'desc').
+  @@index([token, closedAt])
+  // Strategy-review filters WatchEntry by initialAt range
+  // (strategy-review.service.ts watchWhere.initialAt gte/lte).
+  @@index([status, initialAt])
   @@map("watch_entries")
 }
 
@@ -954,6 +968,10 @@ model IntradayEntry {
 
   @@index([status, enteredAt])
   @@index([alertId])
+  // Per-alert de-dup checks query symbol + status together
+  // (anand-dual-track.repository.ts findActiveTradedBySymbol /
+  // hasTargetHitTodayBySymbol: where { symbol, status }).
+  @@index([symbol, status])
   @@map("intraday_entries")
 }
 
@@ -975,6 +993,10 @@ model SwingEntry {
 
   @@index([status, enteredAt])
   @@index([alertId])
+  // Per-alert de-dup checks query symbol + status together
+  // (anand-dual-track.repository.ts findActiveTradedBySymbol /
+  // hasTargetHitTodayBySymbol: where { symbol, status }).
+  @@index([symbol, status])
   @@map("swing_entries")
 }
 
@@ -1023,6 +1045,9 @@ model BreakoutSwingEntry {
   @@index([status])
   @@index([token])
   @@index([alertId])
+  // Per-alert de-dup queries symbol + status together
+  // (breakout-swing.repository.ts: where { symbol, status: { in [...] } }).
+  @@index([symbol, status])
   @@map("breakout_swing_entries")
 }
 

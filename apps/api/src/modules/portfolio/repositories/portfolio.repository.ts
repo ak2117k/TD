@@ -35,26 +35,23 @@ export class PortfolioRepository {
   }
 
   /**
-   * Get trades grouped by segment with aggregated P&L
+   * Get trades grouped by segment with aggregated P&L.
+   *
+   * NOTE: `segment` lives on the related Instrument, not on Trade, and Prisma
+   * `groupBy` cannot group across a relation. So this stays a `findMany`, but
+   * it is narrowed to `select` ONLY the two columns the reduce needs
+   * (`pnl` + `instrument.segment`) instead of pulling whole trade rows via
+   * `include`. That keeps the row-transfer payload tiny while still letting
+   * us bucket by segment in JS.
    */
   async getTradesBySegment() {
-    const results = await this.prisma.trade.groupBy({
-      by: ['positionType'],
-      _sum: { pnl: true },
-      _count: { id: true },
-      where: {
-        status: { in: ['CLOSED', 'FILLED'] },
-        pnl: { not: null },
-      },
-    });
-
-    // Also group by instrument segment for a more meaningful breakdown
     const trades = await this.prisma.trade.findMany({
       where: {
         status: { in: ['CLOSED', 'FILLED'] },
         pnl: { not: null },
       },
-      include: {
+      select: {
+        pnl: true,
         instrument: { select: { segment: true } },
       },
     });
@@ -83,34 +80,58 @@ export class PortfolioRepository {
    * Get trades grouped by strategy with win/loss counts
    */
   async getTradesByStrategy() {
-    const trades = await this.prisma.trade.findMany({
-      where: {
-        status: { in: ['CLOSED', 'FILLED'] },
-        pnl: { not: null },
-        strategy: { not: null },
-      },
-    });
+    const baseWhere = {
+      status: { in: ['CLOSED', 'FILLED'] },
+      pnl: { not: null },
+      strategy: { not: null },
+    } as const;
 
-    const strategyMap = new Map<string, { pnl: number; count: number; wins: number; losses: number; avgProfit: number; avgLoss: number }>();
-    for (const trade of trades) {
-      const strategy = trade.strategy || 'unknown';
-      const entry = strategyMap.get(strategy) || { pnl: 0, count: 0, wins: 0, losses: 0, avgProfit: 0, avgLoss: 0 };
-      const pnl = trade.pnl ?? 0;
-      entry.pnl += pnl;
-      entry.count += 1;
-      if (pnl > 0) entry.wins += 1;
-      else if (pnl < 0) entry.losses += 1;
-      strategyMap.set(strategy, entry);
+    // Push the aggregation into the DB: one groupBy for sum/count of all
+    // closed trades per strategy, plus two thin groupBys for the win/loss
+    // counts. Only summarized rows (one per strategy) cross the wire, instead
+    // of every trade row being streamed back and reduced in JS.
+    const [totals, winRows, lossRows] = await Promise.all([
+      this.prisma.trade.groupBy({
+        by: ['strategy'],
+        where: baseWhere,
+        _sum: { pnl: true },
+        _count: { _all: true },
+      }),
+      this.prisma.trade.groupBy({
+        by: ['strategy'],
+        where: { ...baseWhere, pnl: { gt: 0 } },
+        _count: { _all: true },
+      }),
+      this.prisma.trade.groupBy({
+        by: ['strategy'],
+        where: { ...baseWhere, pnl: { lt: 0 } },
+        _count: { _all: true },
+      }),
+    ]);
+
+    const winsByStrategy = new Map<string, number>();
+    for (const row of winRows as any[]) {
+      winsByStrategy.set(row.strategy ?? 'unknown', row._count?._all ?? 0);
+    }
+    const lossesByStrategy = new Map<string, number>();
+    for (const row of lossRows as any[]) {
+      lossesByStrategy.set(row.strategy ?? 'unknown', row._count?._all ?? 0);
     }
 
-    return Array.from(strategyMap.entries()).map(([strategy, stats]) => ({
-      strategy,
-      pnl: stats.pnl,
-      trades: stats.count,
-      wins: stats.wins,
-      losses: stats.losses,
-      winRate: stats.count > 0 ? (stats.wins / stats.count) * 100 : 0,
-    }));
+    return (totals as any[]).map((row) => {
+      const strategy = row.strategy ?? 'unknown';
+      const trades = row._count?._all ?? 0;
+      const wins = winsByStrategy.get(strategy) ?? 0;
+      const losses = lossesByStrategy.get(strategy) ?? 0;
+      return {
+        strategy,
+        pnl: row._sum?.pnl ?? 0,
+        trades,
+        wins,
+        losses,
+        winRate: trades > 0 ? (wins / trades) * 100 : 0,
+      };
+    });
   }
 
   /**
