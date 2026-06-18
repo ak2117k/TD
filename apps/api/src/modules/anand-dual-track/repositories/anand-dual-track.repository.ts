@@ -99,10 +99,11 @@ export class AnandDualTrackRepository {
   async listIntradayEntries(filter: ListEntriesFilter = {}) {
     return this.prisma.intradayEntry.findMany({
       where: {
-        // No explicit status → show ONLY currently-open positions. Without this
-        // default the list returned every terminal row (STOPPED/TARGET_HIT/…)
-        // filtered by ENTRY date, polluting the "open" list with closed trades.
-        status: filter.status ? filter.status : 'TRADED',
+        // Intraday positions close same-day (EXPIRED/STOPPED/TARGET_HIT), so
+        // there is NO persistent open ('TRADED') list across days — the page
+        // shows all of today's trades, date-scoped, regardless of status.
+        // (Unlike swing, which holds multi-day, so its open list IS TRADED-only.)
+        ...(filter.status ? { status: filter.status } : {}),
         ...(filter.from || filter.to
           ? {
               enteredAt: {
@@ -537,7 +538,7 @@ export class AnandDualTrackRepository {
     };
 
     return {
-      daily: compute(exits.filter(r => r.exitedAt! >= istMidnightDaysAgo(1))),
+      daily: compute(exits.filter(r => r.exitedAt! >= istMidnightDaysAgo(0))),
       weekly: compute(exits.filter(r => r.exitedAt! >= istMidnightDaysAgo(7))),
       monthly: compute(exits.filter(r => r.exitedAt! >= istMidnightDaysAgo(30))),
       yearly: compute(exits),

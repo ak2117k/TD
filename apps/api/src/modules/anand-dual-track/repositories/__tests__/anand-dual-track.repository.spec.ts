@@ -116,13 +116,16 @@ describe('AnandDualTrackRepository', () => {
     });
   });
 
-  describe('listIntradayEntries open-only default', () => {
-    it('defaults to status=TRADED (open only) when no status filter is passed', async () => {
+  describe('listIntradayEntries (all statuses, date-scoped)', () => {
+    // Intraday positions close same-day (EXPIRED/STOPPED/TARGET_HIT), so there is
+    // no persistent open ('TRADED') list across days. The list must show ALL of
+    // today's trades regardless of status — defaulting to TRADED-only (as swing
+    // does) hid every closed intraday trade and emptied the page.
+    it('does NOT default to a status filter when none is passed', async () => {
       prisma.intradayEntry.findMany.mockResolvedValue([]);
       await repo.listIntradayEntries({});
-      expect(prisma.intradayEntry.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { status: 'TRADED' } }),
-      );
+      const arg = prisma.intradayEntry.findMany.mock.calls[0][0];
+      expect(arg.where).toEqual({});
     });
 
     it('honors an explicit status filter (e.g. STOPPED)', async () => {
@@ -245,6 +248,21 @@ describe('AnandDualTrackRepository', () => {
     expect(result.daily.count).toBe(2);
     expect(result.daily.winCount).toBe(1);
     expect(result.daily.avgExitPct).toBeCloseTo(0); // (+5 + -5) / 2
+  });
+
+  it('daily window is TODAY only (excludes yesterday); weekly spans the last week', async () => {
+    // Bug: daily used istMidnightDaysAgo(1) (since YESTERDAY midnight), so a
+    // yesterday exit fell into "daily" and made daily == weekly when the week's
+    // only trades were yesterday+today. Daily must mean today's IST session only.
+    const now = new Date();
+    const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    prisma.intradayEntry.findMany.mockResolvedValue([
+      { exitedAt: now, entryPrice: 100, exitPrice: 105 },
+      { exitedAt: yesterday, entryPrice: 100, exitPrice: 110 },
+    ]);
+    const r = await repo.getPnlSummary('intraday');
+    expect(r.daily.count).toBe(1); // today only
+    expect(r.weekly.count).toBe(2); // today + yesterday
   });
 
   describe('findActiveTradedBySymbol', () => {
