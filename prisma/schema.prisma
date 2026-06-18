@@ -883,6 +883,11 @@ model AdaptiveStopWatchEntry {
   stopPct               Float?   // resolved stop distance as % of entry
   stopPrice             Float?   // absolute stop level
   stopBasis             String?  // 'atr' | 'floor' | 'cap'
+  // Decision Gate (CORE2) outcome recorded at entry, for observability: how
+  // often does the gate fail OPEN (skip on a 15m data gap) vs actually pass?
+  gateSkipped           Boolean? // true = gate couldn't evaluate → failed open
+  gateReason            String?  // human-readable gate decision
+  gateDetail            Json?    // { nearestSupport, distSupportPct, rsi, vwapExtPct, macdHist }
   closedAt              DateTime?
   closedReason          String?
   notes                 String?

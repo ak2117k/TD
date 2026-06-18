@@ -68,6 +68,29 @@ describe('AdaptiveStopWatchService.createFromAlert — vol-stop + risk-first siz
     svc = mod.get(AdaptiveStopWatchService);
   });
 
+  it('persists the decision-gate result (skipped + reason) on the entry', async () => {
+    // The default candles carry no timestamps → the gate skips (fails open).
+    // That skip must now be RECORDED so we can measure how often the gate is
+    // bypassed live (the cause of bad entries slipping through).
+    await svc.createFromAlert(baseInput);
+    const createCall = repo.createEntry.mock.calls[0][0];
+    expect(typeof createCall.gateSkipped).toBe('boolean');
+    expect(createCall.gateSkipped).toBe(true);
+    expect(typeof createCall.gateReason).toBe('string');
+    expect(createCall.gateReason.length).toBeGreaterThan(0);
+  });
+
+  it('retries the 15m fetch before the gate gives up (transient feed blip)', async () => {
+    jest.spyOn(svc as any, 'delay').mockResolvedValue(undefined); // no real backoff wait
+    adapter.getHistoricalData
+      .mockRejectedValueOnce(new Error('feed blip'))
+      .mockResolvedValueOnce(makeCandles(2000, 6, 30));
+    await svc.createFromAlert(baseInput);
+    const fifteenMinCalls = adapter.getHistoricalData.mock.calls.filter((c: any[]) => c[2] === '15m');
+    expect(fifteenMinCalls.length).toBe(2); // retried the 15m fetch once
+    expect(repo.createEntry).toHaveBeenCalled();
+  });
+
   it('creates the entry with stopPrice/stopPct/riskAmount/atrAtEntry/stopBasis and risk-first qty', async () => {
     // Sanity: with flat-close candles ATR(14) === range (6).
     const candles = makeCandles(2000, 6, 30);

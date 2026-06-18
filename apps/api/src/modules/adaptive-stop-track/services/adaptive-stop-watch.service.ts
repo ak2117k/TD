@@ -13,7 +13,7 @@ import { evaluateDecisionGate, type GateCandle } from '../adaptive-stop-decision
 import {
   GRACE_MS, PROFIT_TARGET_PCT, RISK_PER_TRADE,
   DECISION_GATE_ENABLED, GATE_NEAR_SUPPORT_PCT, GATE_RSI_HOT, GATE_VWAP_EXT_PCT, GATE_SR_LOOKBACK_DAYS,
-  GATE_REQUIRE_15M_MACD,
+  GATE_REQUIRE_15M_MACD, GATE_FETCH_ATTEMPTS, GATE_RETRY_MS, GATE_MIN_CANDLES,
 } from '../constants';
 import { atr } from '../../signal-generator/strategies/indicators';
 // Note: NO MarketFeedService dependency — the adaptive-stop track uses
@@ -129,22 +129,38 @@ export class AdaptiveStopWatchService {
    * corrupt the A/B vs the other tracks). See adaptive-stop-decision-gate.ts.
    */
   private async evaluateGate(token: string, exchange: string, entry: number) {
-    try {
-      const now = new Date();
-      const from = new Date(now.getTime() - GATE_SR_LOOKBACK_DAYS * 24 * 3600 * 1000);
-      const candles = await this.adapter.getHistoricalData(token, exchange, '15m', from, now);
-      return evaluateDecisionGate(entry, (candles ?? []) as GateCandle[], now.getTime(), {
-        nearSupportPct: GATE_NEAR_SUPPORT_PCT,
-        rsiHot: GATE_RSI_HOT,
-        vwapExtPct: GATE_VWAP_EXT_PCT,
-        requireMacdBullish: GATE_REQUIRE_15M_MACD,
-      });
-    } catch (err) {
-      this.logger.warn(
-        `[adaptive-stop] decision-gate fetch failed for ${token}: ${err instanceof Error ? err.message : err} — failing open`,
-      );
-      return { pass: true, skipped: true } as ReturnType<typeof evaluateDecisionGate>;
+    const now = new Date();
+    const from = new Date(now.getTime() - GATE_SR_LOOKBACK_DAYS * 24 * 3600 * 1000);
+    // Harden the 15m fetch: a transient feed/REST blip (or a momentarily-partial
+    // series) must not switch the gate off on the first try. Retry before
+    // giving up; only then does the gate fall back to its fail-open skip.
+    let candles: GateCandle[] = [];
+    for (let attempt = 1; attempt <= GATE_FETCH_ATTEMPTS; attempt++) {
+      try {
+        const c = await this.adapter.getHistoricalData(token, exchange, '15m', from, now);
+        if (c && c.length) candles = c as GateCandle[];
+        if (candles.length >= GATE_MIN_CANDLES) break; // enough to judge
+      } catch (err) {
+        this.logger.warn(
+          `[adaptive-stop] decision-gate 15m fetch attempt ${attempt}/${GATE_FETCH_ATTEMPTS} for ${token} failed: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+      if (attempt < GATE_FETCH_ATTEMPTS) await this.delay(GATE_RETRY_MS);
     }
+    // evaluateDecisionGate itself returns {skipped:true, pass:true} when the data
+    // is still insufficient — so a persistent gap still fails OPEN, but now it's
+    // recorded (the caller persists gateSkipped/reason) instead of being silent.
+    return evaluateDecisionGate(entry, candles, now.getTime(), {
+      nearSupportPct: GATE_NEAR_SUPPORT_PCT,
+      rsiHot: GATE_RSI_HOT,
+      vwapExtPct: GATE_VWAP_EXT_PCT,
+      requireMacdBullish: GATE_REQUIRE_15M_MACD,
+    });
+  }
+
+  /** Small awaitable backoff — a method so tests can stub it to resolve instantly. */
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   async createFromAlert(input: AdaptiveStopCreateFromAlertInput) {
@@ -221,15 +237,16 @@ export class AdaptiveStopWatchService {
     //     that are AT support and NOT extended, the read that forward-validated
     //     (held-out: 50% win / +₹373/trade vs ungated 31% / −₹5,075). Evaluated
     //     at the live fill price. Toggle via DECISION_GATE_ENABLED to A/B.
+    let gateResult: ReturnType<typeof evaluateDecisionGate> | null = null;
     if (DECISION_GATE_ENABLED) {
-      const gate = await this.evaluateGate(input.token, input.exchange, executedPrice);
-      if (!gate.pass) {
-        this.logger.warn(`[adaptive-stop] ${input.symbol}: decision-gate REJECT — ${gate.reason}`);
-        throw new AdaptiveStopDecisionGateError(input.symbol, gate.reason);
+      gateResult = await this.evaluateGate(input.token, input.exchange, executedPrice);
+      if (!gateResult.pass) {
+        this.logger.warn(`[adaptive-stop] ${input.symbol}: decision-gate REJECT — ${gateResult.reason}`);
+        throw new AdaptiveStopDecisionGateError(input.symbol, gateResult.reason);
       }
-      if (!gate.skipped) {
-        this.logger.log(`[adaptive-stop] ${input.symbol}: decision-gate PASS — ${gate.reason}`);
-      }
+      this.logger.log(
+        `[adaptive-stop] ${input.symbol}: decision-gate ${gateResult.skipped ? 'SKIPPED (failed open)' : 'PASS'} — ${gateResult.reason}`,
+      );
     }
 
     // 6. Admission (capital + position cap + kill switch).
@@ -269,6 +286,10 @@ export class AdaptiveStopWatchService {
       stopPct: stop.stopPct,
       stopPrice: stop.stopPrice,
       stopBasis: stop.basis,
+      // Decision Gate outcome (observability — measure how often it fails open).
+      gateSkipped: gateResult ? gateResult.skipped : undefined,
+      gateReason: gateResult ? gateResult.reason : undefined,
+      gateDetail: gateResult ? (gateResult.detail as unknown as Prisma.InputJsonValue) : undefined,
     };
     const entry = await this.repo.createEntry(createInput);
     await this.repo.createEvent({

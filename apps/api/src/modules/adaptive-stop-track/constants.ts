@@ -35,3 +35,11 @@ export const GATE_SR_LOOKBACK_DAYS = 5;    // 15m candle window for swing-pivot 
 // (48% win / +₹7,900 bullish vs 35% / −₹3,402 bearish); the fast 1m/5m MACD is
 // noise. Experimental — the adaptive track is the sandbox; toggle to A/B.
 export const GATE_REQUIRE_15M_MACD = true;
+// Harden the gate's 15m data fetch: a transient Angel feed/REST blip used to make
+// the gate fail OPEN (admit anything) on the first failure. Retry a few times
+// before giving up, so a momentary gap doesn't silently switch the gate off.
+export const GATE_FETCH_ATTEMPTS = 3;
+export const GATE_RETRY_MS = 400;
+// A usable 15m series needs at least this many bars; fewer → retry (the fetch
+// likely came back partial), then let the gate decide skip vs evaluate.
+export const GATE_MIN_CANDLES = 10;

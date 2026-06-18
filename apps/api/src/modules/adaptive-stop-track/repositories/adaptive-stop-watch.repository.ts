@@ -21,6 +21,10 @@ export interface AdaptiveStopCreateEntryInput {
   stopPct?: number;
   stopPrice?: number;
   stopBasis?: string;
+  // Decision Gate outcome (observability)
+  gateSkipped?: boolean;
+  gateReason?: string;
+  gateDetail?: Prisma.InputJsonValue;
 }
 
 export interface AdaptiveStopCreateEventInput {
@@ -75,6 +79,9 @@ export class AdaptiveStopWatchRepository {
         stopPct: input.stopPct,
         stopPrice: input.stopPrice,
         stopBasis: input.stopBasis,
+        gateSkipped: input.gateSkipped,
+        gateReason: input.gateReason,
+        gateDetail: (input.gateDetail ?? Prisma.JsonNull) as Prisma.InputJsonValue,
       },
     });
   }
