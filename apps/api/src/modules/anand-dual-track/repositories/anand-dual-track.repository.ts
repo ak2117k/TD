@@ -99,7 +99,10 @@ export class AnandDualTrackRepository {
   async listIntradayEntries(filter: ListEntriesFilter = {}) {
     return this.prisma.intradayEntry.findMany({
       where: {
-        ...(filter.status ? { status: filter.status } : {}),
+        // No explicit status → show ONLY currently-open positions. Without this
+        // default the list returned every terminal row (STOPPED/TARGET_HIT/…)
+        // filtered by ENTRY date, polluting the "open" list with closed trades.
+        status: filter.status ? filter.status : 'TRADED',
         ...(filter.from || filter.to
           ? {
               enteredAt: {
@@ -117,7 +120,10 @@ export class AnandDualTrackRepository {
   async listSwingEntries(filter: ListEntriesFilter = {}) {
     return this.prisma.swingEntry.findMany({
       where: {
-        ...(filter.status ? { status: filter.status } : {}),
+        // No explicit status → show ONLY currently-open positions. Without this
+        // default the list returned every terminal row (STOPPED/TARGET_HIT/…)
+        // filtered by ENTRY date, polluting the "open" list with closed trades.
+        status: filter.status ? filter.status : 'TRADED',
         ...(filter.from || filter.to
           ? {
               enteredAt: {

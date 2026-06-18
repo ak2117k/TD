@@ -89,6 +89,51 @@ describe('AnandDualTrackRepository', () => {
     );
   });
 
+  describe('listSwingEntries open-only default', () => {
+    it('defaults to status=TRADED (open only) when no status filter is passed', async () => {
+      prisma.swingEntry.findMany.mockResolvedValue([]);
+      await repo.listSwingEntries({});
+      expect(prisma.swingEntry.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { status: 'TRADED' } }),
+      );
+    });
+
+    it('honors an explicit status filter (e.g. TARGET_HIT)', async () => {
+      prisma.swingEntry.findMany.mockResolvedValue([]);
+      await repo.listSwingEntries({ status: 'TARGET_HIT' });
+      expect(prisma.swingEntry.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { status: 'TARGET_HIT' } }),
+      );
+    });
+
+    it('keeps the entry-date window alongside the open-only default', async () => {
+      prisma.swingEntry.findMany.mockResolvedValue([]);
+      const from = new Date('2026-06-01T00:00:00Z');
+      await repo.listSwingEntries({ from });
+      expect(prisma.swingEntry.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { status: 'TRADED', enteredAt: { gte: from } } }),
+      );
+    });
+  });
+
+  describe('listIntradayEntries open-only default', () => {
+    it('defaults to status=TRADED (open only) when no status filter is passed', async () => {
+      prisma.intradayEntry.findMany.mockResolvedValue([]);
+      await repo.listIntradayEntries({});
+      expect(prisma.intradayEntry.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { status: 'TRADED' } }),
+      );
+    });
+
+    it('honors an explicit status filter (e.g. STOPPED)', async () => {
+      prisma.intradayEntry.findMany.mockResolvedValue([]);
+      await repo.listIntradayEntries({ status: 'STOPPED' });
+      expect(prisma.intradayEntry.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { status: 'STOPPED' } }),
+      );
+    });
+  });
+
   it('listWatchingIntraday returns only TRADED rows', async () => {
     const row = { id: 'i1', symbol: 'RELIANCE', token: '123', entryPrice: 2500, status: 'TRADED', targetPct: 5, stopPct: 5 };
     prisma.intradayEntry.findMany.mockResolvedValue([row]);

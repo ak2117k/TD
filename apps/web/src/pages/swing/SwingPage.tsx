@@ -370,13 +370,21 @@ function EntriesTable({
 export default function SwingPage() {
   const [filter, setFilter] = useState<string | undefined>(undefined);
   const [from, setFrom] = useState(todayIST());
-  const [exitFrom, setExitFrom] = useState(daysAgoIST(7));
+  // Default exit window is a wide 90-day lookback so a recently-closed trade is
+  // never silently hidden (the old 7-day default cut off an 8-day-old
+  // target-hit). When a SPECIFIC terminal status is selected below, the date
+  // floor is dropped entirely (all-time for that status) so it's always findable.
+  const [exitFrom, setExitFrom] = useState(daysAgoIST(90));
   const [exitStatus, setExitStatus] = useState<string | undefined>(undefined);
   const { entries, pnl, loading, error } = useSwingEntries(filter, from);
   // Recent Exits: closed/exited swing positions filtered by EXIT date and
   // status. The Entries log above filters by ENTRY date, so a multi-day swing
   // entered earlier but cut recently shows nowhere — this section surfaces it.
-  const { exits, loading: exitsLoading, error: exitsError } = useSwingExits(exitFrom, exitStatus);
+  // Selecting a specific status shows ALL-TIME results for it (no date floor).
+  const { exits, loading: exitsLoading, error: exitsError } = useSwingExits(
+    exitStatus ? undefined : exitFrom,
+    exitStatus,
+  );
   // Capital summary: engaged vs available, recycles as positions exit.
   const { capital } = useSwingCapital();
   // Total realized P&L of the listed exits, using the same per-row notional
@@ -511,13 +519,19 @@ export default function SwingPage() {
             </span>
           )}
           <div className="ml-auto flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
-            <label>Exited from:</label>
-            <input
-              type="date"
-              value={exitFrom}
-              onChange={(e) => setExitFrom(e.target.value)}
-              className="rounded bg-[var(--color-bg-tertiary)] px-2 py-1 text-[var(--color-text-secondary)]"
-            />
+            {exitStatus ? (
+              <span className="italic">Showing all-time {exitStatus.replace('_', ' ').toLowerCase()} exits</span>
+            ) : (
+              <>
+                <label>Exited from:</label>
+                <input
+                  type="date"
+                  value={exitFrom}
+                  onChange={(e) => setExitFrom(e.target.value)}
+                  className="rounded bg-[var(--color-bg-tertiary)] px-2 py-1 text-[var(--color-text-secondary)]"
+                />
+              </>
+            )}
           </div>
         </div>
 

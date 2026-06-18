@@ -166,7 +166,16 @@ function EntryRow({ entry }: { entry: AnandEntry }) {
 export default function IntradayPage() {
   const [filter, setFilter] = useState<string | undefined>(undefined);
   const [date, setDate] = useState(todayIST());
-  const { entries, pnl, loading, error } = useIntradayEntries(filter, date);
+  // A specific terminal status (TARGET_HIT/STOPPED/EXPIRED) shows ALL-TIME
+  // results for it — the date cap is dropped so a trade that closed days ago is
+  // never silently hidden. Open ('Traded') and 'All' stay scoped to the chosen
+  // day. (Repo defaults no-status → open-only, so terminal trades only ever
+  // surface via these explicit-status filters.)
+  const isTerminalFilter = filter === 'TARGET_HIT' || filter === 'STOPPED' || filter === 'EXPIRED';
+  const { entries, pnl, loading, error } = useIntradayEntries(
+    filter,
+    isTerminalFilter ? undefined : date,
+  );
   // Open (unrealized) book: floating mark-to-market P&L of positions not yet
   // closed (exitPrice null). Kept separate from the realized period cards so
   // booked vs floating P&L are never conflated.
@@ -222,12 +231,18 @@ export default function IntradayPage() {
             {f.label}
           </button>
         ))}
-        <input
-          type="date"
-          value={date}
-          onChange={(e) => setDate(e.target.value)}
-          className="ml-auto rounded bg-[var(--color-bg-tertiary)] px-2 py-1 text-sm text-[var(--color-text-secondary)]"
-        />
+        {isTerminalFilter ? (
+          <span className="ml-auto self-center text-sm italic text-[var(--color-text-muted)]">
+            Showing all-time {filter?.replace('_', ' ').toLowerCase()} trades
+          </span>
+        ) : (
+          <input
+            type="date"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+            className="ml-auto rounded bg-[var(--color-bg-tertiary)] px-2 py-1 text-sm text-[var(--color-text-secondary)]"
+          />
+        )}
       </div>
 
       {loading && <div className="text-[var(--color-text-muted)]">Loading…</div>}
