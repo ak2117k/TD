@@ -295,7 +295,12 @@ export class MarketDataController {
     const constantEntry = resolveTokenFromConstants(token);
     const exchange =
       query.exchange ?? instrument?.exchange ?? constantEntry?.exchange ?? 'NSE';
-    const symbol = instrument?.symbol ?? constantEntry?.symbol ?? token;
+    // Resolve the symbol by (exchange, token) so a colliding token (509 = NSE
+    // MAZDOCK-EQ vs MCX SSUGARMKOLCOM) labels the chart with the right
+    // instrument, not whichever the token-only cache returned.
+    const exactInstrument = this.instrumentService.getByExchangeTokenSync(exchange, token);
+    const symbol =
+      exactInstrument?.symbol ?? instrument?.symbol ?? constantEntry?.symbol ?? token;
 
     // Coalesce concurrent identical requests onto a single broker call.
     // Cache key includes from/to so a chart panning to a different range
