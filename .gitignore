@@ -79,3 +79,6 @@ apps/api/data/
 # Local test screenshots (debugging artifacts, not source)
 /chartink-activated.png
 /drawing-test-*.png
+
+# git worktrees (isolated workspaces)
+.worktrees/
