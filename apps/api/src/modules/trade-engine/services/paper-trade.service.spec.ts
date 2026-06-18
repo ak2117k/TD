@@ -204,6 +204,16 @@ describe('PaperTradeService.simulateOrder — position netting', () => {
     side: 'SELL',
   });
 
+  it('defaults a fresh portfolio to the ₹40L paper float (raised from ₹20L for shared-track headroom)', () => {
+    // The paper cash gate (RiskManager.checkPaperCashSufficient) checks this
+    // float, and all 5 paper tracks share it. ₹20L was exhausted intraday by
+    // ~16 concurrent positions (₹17-18L deployed), declining later alerts that
+    // then sat stuck in WATCHING. Raised to ₹40L to roughly double the
+    // fundable concurrency.
+    service.resetVirtualPortfolio(); // no arg → DEFAULT_VIRTUAL_CAPITAL
+    expect(service.getVirtualBalance()).toBe(4_000_000);
+  });
+
   it('partial-exit SELL reduces the existing BUY qty instead of creating a new SELL slot', async () => {
     await service.simulateOrder(buildBuy(2000, 100));
     await service.simulateOrder(buildSell(1000, 101));
@@ -310,8 +320,8 @@ describe('PaperTradeService.onModuleInit — balance + position rehydration', ()
     const acc = await service.getAccount();
     expect(acc.openPositions).toBe(1);
     expect(acc.deployedCapital).toBe(10_000); // 10 * 1000
-    // balance = 20L - 10,000 (open BUY cost) + 500 (closed pnl)
-    expect(acc.balance).toBe(2_000_000 - 10_000 + 500);
+    // balance = 40L - 10,000 (open BUY cost) + 500 (closed pnl)
+    expect(acc.balance).toBe(4_000_000 - 10_000 + 500);
   });
 
   it('rehydrates a PARTIALLY_FILLED trade as an open position of the remaining qty', async () => {
@@ -338,8 +348,8 @@ describe('PaperTradeService.onModuleInit — balance + position rehydration', ()
     const acc = await service.getAccount();
     expect(acc.openPositions).toBe(1);
     expect(acc.deployedCapital).toBe(6_000); // 6 remaining * 1000
-    // balance = 20L - 6,000 (remaining cost) + 120 (realized partial pnl)
-    expect(acc.balance).toBe(2_000_000 - 6_000 + 120);
+    // balance = 40L - 6,000 (remaining cost) + 120 (realized partial pnl)
+    expect(acc.balance).toBe(4_000_000 - 6_000 + 120);
   });
 
   it('subtracts an OPEN trade recorded entry-charge fees from the replayed balance', async () => {
@@ -363,8 +373,8 @@ describe('PaperTradeService.onModuleInit — balance + position rehydration', ()
     const service = module.get<PaperTradeService>(PaperTradeService);
     await service.onModuleInit();
 
-    // balance = 20L - 10,000 (open BUY cost) - 37 (recorded entry charge)
-    expect(service.getVirtualBalance()).toBe(2_000_000 - 10_000 - 37);
+    // balance = 40L - 10,000 (open BUY cost) - 37 (recorded entry charge)
+    expect(service.getVirtualBalance()).toBe(4_000_000 - 10_000 - 37);
   });
 
   it('a closed trade nets pnl MINUS its recorded broker fees', async () => {
@@ -379,8 +389,8 @@ describe('PaperTradeService.onModuleInit — balance + position rehydration', ()
       },
     ]);
 
-    // balance = 20L + 500 (pnl) - 200 (fees)
-    expect(service.getVirtualBalance()).toBe(2_000_000 + 500 - 200);
+    // balance = 40L + 500 (pnl) - 200 (fees)
+    expect(service.getVirtualBalance()).toBe(4_000_000 + 500 - 200);
   });
 });
 

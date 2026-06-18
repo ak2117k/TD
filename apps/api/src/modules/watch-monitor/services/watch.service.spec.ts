@@ -123,6 +123,30 @@ describe('WatchService.createFromAlert', () => {
     warn.mockRestore();
   });
 
+  it('does not journal a bogus null-entryPrice failure when a gate declines the entry', async () => {
+    // When a gate (upside / entry-window / no-quote) declines, executeEntry
+    // records the REAL reason and returns null. createFromAlert must not then
+    // dereference (null).entryPrice — the NRE was being caught and journaled as
+    // a masking "auto-execute failed: Cannot read properties of null (reading
+    // 'entryPrice')" NOT_TRADED event, hiding the true gate reason.
+    repo.findById = jest.fn().mockResolvedValue({
+      id: 'w1', token: '11536', symbol: 'TCS-EQ', side: 'BUY',
+      status: 'WATCHING', initialPrice: 4000, initialBreakdown: { lotCount: 1 },
+      optionsToken: null, optionsLotSize: null, profitTarget: 4150,
+    });
+    repo.update = jest.fn().mockResolvedValue({});
+    jest.spyOn(svc, 'executeEntry').mockResolvedValue(null);
+
+    await svc.createFromAlert(baseInput);
+
+    const nreEvent = repo.createEvent.mock.calls.find(
+      ([arg]: [any]) =>
+        typeof arg?.notes === 'string' &&
+        arg.notes.includes("Cannot read properties of null"),
+    );
+    expect(nreEvent).toBeUndefined();
+  });
+
   it('returns existing entry on duplicate setupId (idempotent)', async () => {
     repo.findActiveBySetupId.mockResolvedValue({ id: 'existing', token: '11536' });
     const r = await svc.createFromAlert(baseInput);
@@ -1095,12 +1119,27 @@ describe('WatchService.executeEntry — live-quote pricing (Bug A)', () => {
     expect(result).toBeNull();
   });
 
-  it('journals a NOT_TRADED reason when the upside gate refuses a price that already ran away', async () => {
-    // Alert price 4000, but the live quote is 4100 (+2.5% > the 1% gate) — the
-    // stock ran past the alert before we could fill, so chasing is refused and
-    // the reason is recorded for the event log shown on click.
+  it('admits a price that moved within the chase tolerance (+2.5%, under the 3% gate)', async () => {
+    // Evidence (tmp-upside-dist): of 42 entries the OLD 1% gate blocked, 93%
+    // went on to hit target — prior intraday strength is a POSITIVE predictor
+    // for this momentum strategy, not a reason to sit out. The gate is widened
+    // to 3% so a +2.5% drift is now chased, not refused.
     repo.createEvent = jest.fn().mockResolvedValue({ id: 'e1' });
-    brokerAdapter.getLiveQuote.mockResolvedValue({ ltp: 4100 });
+    brokerAdapter.getLiveQuote.mockResolvedValue({ ltp: 4100 }); // +2.5% from 4000
+
+    const result = await svc.executeEntry('w1', { mode: 'paper' });
+
+    expect(trade.executeTrade).toHaveBeenCalledWith(
+      expect.objectContaining({ price: 4100 }),
+    );
+    expect(result).not.toBeNull();
+  });
+
+  it('still refuses to chase a price that ran away beyond the 3% tolerance (+4%)', async () => {
+    // The widened gate keeps a backstop against genuine runaway gaps: a move
+    // past 3% from the alert is still refused and journaled.
+    repo.createEvent = jest.fn().mockResolvedValue({ id: 'e1' });
+    brokerAdapter.getLiveQuote.mockResolvedValue({ ltp: 4160 }); // +4% from 4000
 
     const result = await svc.executeEntry('w1', { mode: 'paper' });
 

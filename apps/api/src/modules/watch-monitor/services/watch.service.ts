@@ -27,6 +27,15 @@ const TRAILING_STOP_PCT = 0.005;
 /** Hard price stop threshold: 0.4% of entry price (same rate as hardLossCutRupees). */
 const HARD_STOP_PCT = 0.004;
 
+/** Upside (chase) gate: refuse to fill only when the stock has already run more
+ *  than this far above the alert price by the time we execute.
+ *  Widened 0.01 → 0.03 on forward evidence (tmp-missed-analysis): the old 1%
+ *  gate blocked 42 entries of which 93% went on to hit target with avg max-
+ *  adverse ~0% — prior intraday strength is a POSITIVE predictor for this
+ *  momentum strategy, so the gate was filtering out our best winners. 3% keeps
+ *  a backstop against genuine runaway gaps while admitting the 1–3% drift. */
+const MAX_CHASE_PCT = 0.03;
+
 /** Fraction of position to exit at the partial-exit threshold. (Unchanged.) */
 const PARTIAL_EXIT_FRACTION = 0.5;
 
@@ -342,8 +351,13 @@ export class WatchService {
     // the broker call fails.
     try {
       const traded = await this.executeEntry(entry.id, { mode: 'paper' });
+      // `traded` is null when a gate (upside/entry-window/no-quote) declined the
+      // entry — it already journaled the real reason. Use optional chaining so a
+      // null return does not throw `Cannot read properties of null (reading
+      // 'entryPrice')`, which was being caught below and journaled as a second,
+      // masking "auto-execute failed" NOT_TRADED event that hid the true gate.
       this.logger.log(
-        `Auto-executed paper trade for ${entry.symbol} @ ₹${(traded as any).entryPrice ?? input.initialPrice}`,
+        `Auto-executed paper trade for ${entry.symbol} @ ₹${(traded as any)?.entryPrice ?? input.initialPrice}`,
       );
       // Re-fetch so the caller sees TRADED status (not the stale WATCHING).
       const updated = await this.repo.findById(entry.id);
@@ -452,18 +466,17 @@ export class WatchService {
       referencePrice = resolved;
     }
 
-    // Upside gate (equity only): block when the stock has already moved > 1%
-    // above the Chartink alert price before we can execute. This covers the
-    // genuine "already ran away" case while tolerating the normal 0–0.5% drift
-    // between candle close (initialPrice) and our live-quote fetch a few
-    // seconds later. The old "remaining < 2%" check fired on ANY upward tick
-    // from the alert price, blocking SYRMA-pattern entries where the stock had
-    // moved only +0.18% — far too sensitive.
+    // Upside (chase) gate (equity only): block only when the stock has already
+    // run more than MAX_CHASE_PCT above the Chartink alert price before we can
+    // execute. This still refuses genuine runaway gaps while admitting normal
+    // intraday momentum drift — forward evidence showed a tight 1% gate was
+    // filtering out the strongest movers (93% of which hit target). See the
+    // MAX_CHASE_PCT comment for the data.
     // `force: true` bypasses this gate for manual overrides.
     if (!optionsLotSize && !options.force) {
       const alertPrice = (entry.initialPrice ?? referencePrice);
       const moveFromAlert = alertPrice > 0 ? (referencePrice - alertPrice) / alertPrice : 0;
-      if (moveFromAlert > 0.01) {
+      if (moveFromAlert > MAX_CHASE_PCT) {
         this.logger.warn(
           formatTradeRejection({
             symbol: entry.symbol,

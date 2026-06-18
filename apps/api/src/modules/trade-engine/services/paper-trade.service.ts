@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleInit, Inject, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
+import { TradeEventType } from '@prisma/client';
 import {
   BrokerAdapter,
   OrderRequest,
@@ -18,7 +19,13 @@ const MIN_SLIPPAGE_PCT = 0.0001;
 const MAX_SLIPPAGE_PCT = 0.0005;
 
 /** Default starting virtual capital (INR). ₹20,00,000 (20 lakhs). */
-const DEFAULT_VIRTUAL_CAPITAL = 2_000_000;
+// Shared paper float for ALL paper tracks (watch, adaptive, breakout, ungated,
+// manual) — the RiskManager's checkPaperCashSufficient gates BUYs against it.
+// Raised ₹20L → ₹40L: ~16 concurrent positions deploying ₹17-18L exhausted the
+// old float intraday, declining later alerts that then sat stuck in WATCHING.
+// On boot the balance is rebuilt from trade history off this basis (see
+// onModuleInit), so a restart rebases the running account to the new float.
+const DEFAULT_VIRTUAL_CAPITAL = 4_000_000;
 
 /**
  * Epoch — trades created BEFORE this timestamp do not affect the paper
@@ -359,13 +366,31 @@ export class PaperTradeService implements OnModuleInit {
   private persistDeferredFill(orderId: string, fillPrice: number): void {
     this.tradeRepository
       .findByOrderId(orderId)
-      .then((trade) => {
+      .then(async (trade) => {
         if (!trade || trade.status !== 'PENDING') return undefined;
-        return this.tradeRepository.updateTrade(trade.id, {
+        const updated = await this.tradeRepository.updateTrade(trade.id, {
           status: 'OPEN',
           entryPrice: fillPrice,
           entryTime: new Date(),
         });
+        // Per-trade event log: a resting LIMIT/STOP order just filled.
+        // Best-effort — a log failure must not break the settle path.
+        try {
+          await this.tradeRepository.createTradeEvent({
+            tradeId: trade.id,
+            eventType: TradeEventType.FILLED,
+            price: fillPrice,
+            quantity: trade.quantity,
+            notes: 'resting order filled',
+          });
+        } catch (err) {
+          this.logger.warn(
+            `[Paper] trade-event log write failed for deferred fill ${orderId}: ${
+              err instanceof Error ? err.message : err
+            }`,
+          );
+        }
+        return updated;
       })
       .catch((err) =>
         this.logger.warn(
