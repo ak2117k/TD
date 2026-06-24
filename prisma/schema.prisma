@@ -1153,3 +1153,27 @@ model ReinvestmentPool {
 
   @@map("reinvestment_pool")
 }
+
+/// Stocks under exchange surveillance / delivery-only (cautionary listings).
+/// Populated two ways: (1) learned — when a live order is rejected by the broker
+/// for surveillance, the symbol is upserted here so the ticket warns pre-trade
+/// next time; (2) NSE lists — a daily cron upserts the official ASM/GSM/ESM sets.
+/// The /market-data/cautionary endpoint ORs this against the -BE/-BZ series check.
+model CautionarySymbol {
+  id           String   @id @default(cuid())
+  symbol       String   // base symbol, uppercase, no series suffix (e.g. "SUZLON")
+  exchange     String   @default("NSE")
+  token        String?
+  reason       String   // 'T2T' | 'ASM' | 'GSM' | 'ESM' | 'REJECTED'
+  source       String   // 'rejection' | 'nse-asm' | 'nse-gsm' | 'nse-esm'
+  deliveryOnly Boolean  @default(true)
+  notes        String?
+  firstSeenAt  DateTime @default(now())
+  lastSeenAt   DateTime @default(now())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([symbol, exchange])
+  @@index([token])
+  @@map("cautionary_symbols")
+}

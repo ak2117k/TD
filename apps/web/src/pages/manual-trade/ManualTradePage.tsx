@@ -4,6 +4,7 @@ import OrderTicket from '@/components/trading/OrderTicket';
 import {
   useTradeStore,
   tradesToPositions,
+  overlayLivePrices,
   deriveCapitalDeployed,
 } from '@/stores/trade-store';
 import { wsService } from '@/services/websocket';
@@ -775,6 +776,12 @@ export default function ManualTradePage() {
   // positions for live P&L without round-tripping through the position-manager
   // store (which is no longer this page's source of truth).
   const [ltpBySymbol, setLtpBySymbol] = useState<Record<string, number>>({});
+  // Fetched per-token quote, keyed by symbol — the fallback price source for
+  // held positions. Held symbols are NOT on the tick WS feed (the feed only
+  // carries subscribed/scanning tokens), so without this the overlay above
+  // would never fire and P&L would sit pinned at 0. Live ticks still take
+  // precedence over these when they do arrive. Mirrors the Pending tab.
+  const [quoteBySymbol, setQuoteBySymbol] = useState<Record<string, number>>({});
 
   const pollRef = useRef<ReturnType<typeof setInterval>>(undefined);
 
@@ -783,17 +790,11 @@ export default function ManualTradePage() {
   // bottom Order Book all derive from this list, so they cannot diverge.
   const positions = useMemo<Position[]>(() => {
     const base = tradesToPositions(openTrades as Trade[]);
-    // Overlay live LTP (and recompute P&L) where we have a fresh tick.
-    return base.map((p) => {
-      const ltp = ltpBySymbol[p.symbol];
-      if (typeof ltp !== 'number' || ltp === p.ltp) return p;
-      const direction = p.side === 'BUY' ? 1 : -1;
-      const pnl = (ltp - p.averagePrice) * p.quantity * direction;
-      const cost = p.averagePrice * p.quantity;
-      const pnlPercent = cost > 0 ? (pnl / cost) * 100 : 0;
-      return { ...p, ltp, pnl, pnlPercent };
-    });
-  }, [openTrades, ltpBySymbol]);
+    // Merge price sources: live WS ticks override fetched quotes (fresher),
+    // but a fetched quote still marks a position no tick has reached.
+    const priceBySymbol = { ...quoteBySymbol, ...ltpBySymbol };
+    return overlayLivePrices(base, priceBySymbol);
+  }, [openTrades, ltpBySymbol, quoteBySymbol]);
 
   const capitalDeployed = useMemo(
     () => deriveCapitalDeployed(openTrades as Trade[]),
@@ -833,6 +834,64 @@ export default function ManualTradePage() {
       unsubTick();
     };
   }, []);
+
+  // Stable key for the held (token,symbol) set — changes only when a position
+  // is opened/closed, NOT on every 5s open-trades refetch. Drives the quote
+  // poll below. Token comes from the raw `/trades/open` row's instrument.
+  const heldKey = useMemo(() => {
+    const rows = openTrades as Array<
+      Trade & { token?: string; instrument?: { token?: string } }
+    >;
+    return rows
+      .map((t) => `${t.instrument?.token ?? t.token ?? ''}:${t.symbol}`)
+      .filter((s) => !s.startsWith(':'))
+      .sort()
+      .join(',');
+  }, [openTrades]);
+
+  // Quote fallback for held positions. The tick WS only carries subscribed
+  // symbols, so held tokens are usually absent — poll the per-token quote
+  // endpoint (falls back to prevClose / level-book when the feed is quiet) so
+  // P&L marks even with no live tick. Live ticks still override this at render.
+  // Re-arms only when the held SET changes; polls every 5s while mounted.
+  useEffect(() => {
+    if (!heldKey) return;
+    let cancelled = false;
+    const pairs = heldKey.split(',').map((s) => {
+      const idx = s.indexOf(':');
+      return { token: s.slice(0, idx), symbol: s.slice(idx + 1) };
+    });
+    const fetchQuotes = async () => {
+      const results = await Promise.all(
+        pairs.map(async ({ token, symbol }) => {
+          try {
+            const { data: q } = await api.get<{ quote: { ltp?: number } | null }>(
+              `/market-data/instruments/${token}/quote`,
+            );
+            const ltp = q?.quote?.ltp;
+            return typeof ltp === 'number' && ltp > 0
+              ? ([symbol, ltp] as const)
+              : null;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      if (cancelled) return;
+      const good = results.filter(
+        (x): x is readonly [string, number] => x !== null,
+      );
+      if (good.length) {
+        setQuoteBySymbol((prev) => ({ ...prev, ...Object.fromEntries(good) }));
+      }
+    };
+    fetchQuotes();
+    const id = setInterval(fetchQuotes, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [heldKey]);
 
   const handleKillSwitch = useCallback(() => {
     if (

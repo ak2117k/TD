@@ -12,7 +12,10 @@ import {
 import { BROKER_ADAPTER_TOKEN } from '../../market-data/services/market-feed.service';
 import { TradeRepository } from '../repositories/trade.repository';
 import { TradeGateway } from '../gateways/trade.gateway';
-import { isLiveTradingEnabled, LIVE_TRADING_DISABLED_MESSAGE } from '../live-trading';
+import {
+  isSurveillanceRejection,
+  cautionaryHint,
+} from '../utils/cautionary';
 
 /** Poll interval for order status (ms). */
 const POLL_INTERVAL_MS = 2000;
@@ -260,11 +263,18 @@ export class OrderTrackerService implements OnModuleDestroy {
     order: any,
   ): Promise<void> {
     const reason = order.text ?? order.rejectionreason ?? 'Unknown reason';
-    this.logger.warn(`Order ${tracked.orderId} REJECTED: ${reason}`);
+    // Enrich a surveillance / cautionary / delivery-only (T2T) rejection
+    // with actionable guidance so the note the UI shows tells the user to
+    // switch Product to DELIVERY, matching the synchronous placeOrder path.
+    const cautionary = isSurveillanceRejection(reason);
+    const surfacedReason = cautionary ? cautionaryHint(reason) : reason;
+    this.logger.warn(
+      `Order ${tracked.orderId} REJECTED${cautionary ? ' (cautionary)' : ''}: ${surfacedReason}`,
+    );
 
     await this.tradeRepository.updateTrade(tracked.tradeId, {
       status: 'REJECTED',
-      notes: `Rejected: ${reason}`,
+      notes: `Rejected: ${surfacedReason}`,
     });
 
     const updatedTrade = await this.tradeRepository.getTradeById(
@@ -320,15 +330,6 @@ export class OrderTrackerService implements OnModuleDestroy {
 
   private async placeAutoStoploss(tracked: TrackedOrder): Promise<void> {
     if (!this.brokerAdapter || !tracked.originalRequest || !tracked.autoStoploss) {
-      return;
-    }
-    // Defense-in-depth: auto-SL is a real order. It can only be reached for a
-    // live tracked order (paper trades are never tracked), but gate it on the
-    // same flag as the entry so the live path is dormant by default.
-    if (!isLiveTradingEnabled()) {
-      this.logger.warn(
-        `[Live BLOCKED] auto-stoploss for trade ${tracked.tradeId} suppressed — ${LIVE_TRADING_DISABLED_MESSAGE}`,
-      );
       return;
     }
 

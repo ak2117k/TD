@@ -3,6 +3,7 @@ import { LevelBook, SeedSessionInput, TickInput } from '../types/level-book.type
 import { InstrumentService } from '../../market-data/services/instrument.service';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { BrokerAdapter } from '../../../common/interfaces/broker-adapter.interface';
+import { HistoricalPriority } from '../../market-data/services/angel-one-adapter.service';
 import { TIMEFRAMES } from '@td/shared/constants';
 
 // Use the literal injection token string instead of importing
@@ -314,6 +315,7 @@ export class LevelBookService {
     token: string,
     exchange: string,
     symbol: string,
+    priority: HistoricalPriority = 'background',
   ): Promise<LevelBook | null> {
     const cached = this.books.get(token);
 
@@ -393,7 +395,7 @@ export class LevelBookService {
       try {
         const dailyFrom = new Date(sessionOpen.getTime() - 30 * 24 * 60 * 60 * 1000);
         const brokerDaily = await this.brokerAdapter.getHistoricalData(
-          token, exchange, '1d', dailyFrom, sessionOpen,
+          token, exchange, '1d', dailyFrom, sessionOpen, priority,
         );
         dailyCandles = brokerDaily
           .filter((c: any) => new Date(c.timestamp).getTime() < sessionOpen.getTime())
@@ -438,7 +440,7 @@ export class LevelBookService {
     if (fiveMinBars.length === 0 && this.brokerAdapter?.getHistoricalData) {
       try {
         const broker5m = await this.brokerAdapter.getHistoricalData(
-          token, exchange, '5m', sessionOpen, now,
+          token, exchange, '5m', sessionOpen, now, priority,
         );
         fiveMinBars = broker5m.map((c: any) => ({
           timestamp: new Date(c.timestamp),
@@ -478,6 +480,7 @@ export class LevelBookService {
       exchange,
       instrument?.id,
       sessionOpen,
+      priority,
     );
     const cachedBook = this.books.get(token);
     if (cachedBook) {
@@ -503,6 +506,7 @@ export class LevelBookService {
     exchange: string,
     instrumentId: string | undefined,
     todaySessionOpen: Date,
+    priority: HistoricalPriority = 'background',
   ): Promise<{ orh: number; orl: number } | null> {
     const istOffsetMs = 5.5 * 60 * 60 * 1000;
     for (let dayOffset = 1; dayOffset <= 5; dayOffset++) {
@@ -526,7 +530,7 @@ export class LevelBookService {
       if (bars.length < 3 && this.brokerAdapter?.getHistoricalData) {
         try {
           const broker = await this.brokerAdapter.getHistoricalData(
-            token, exchange, '5m', prevSessionOROpen, prevSessionORClose,
+            token, exchange, '5m', prevSessionOROpen, prevSessionORClose, priority,
           );
           bars = broker.map((c: { high: number | string; low: number | string }) => ({
             high: Number(c.high),

@@ -14,6 +14,7 @@ import {
   deriveCapitalDeployed,
   derivePositionsCount,
   tradesToPositions,
+  overlayLivePrices,
 } from './trade-store';
 import type { Trade } from '@/types';
 
@@ -109,5 +110,53 @@ describe('tradesToPositions', () => {
     ]);
     expect(p.pnl).toBe(100); // (110-100)*10
     expect(p.pnlPercent).toBeCloseTo(10);
+  });
+});
+
+describe('overlayLivePrices', () => {
+  // Base position as the manual-trade page sees it before any live price:
+  // an open trade with no ltp prices flat at entry → P&L 0 (the reported bug).
+  const base = tradesToPositions([
+    makeTrade({
+      symbol: 'RELIANCE',
+      side: 'BUY',
+      entryPrice: 100,
+      quantity: 10,
+      ltp: undefined as unknown as number,
+      pnl: undefined as unknown as number,
+      pnlPercent: undefined as unknown as number,
+    }),
+  ]);
+
+  it('drives P&L from a fetched quote when no live tick exists (the bug fix)', () => {
+    // Open Positions previously only had live WS ticks, which never arrive for
+    // unsubscribed held symbols → P&L stuck at 0. A fetched per-token quote
+    // seeded into the same symbol→price map must now mark the position.
+    const [p] = overlayLivePrices(base, { RELIANCE: 110 });
+    expect(p.ltp).toBe(110);
+    expect(p.pnl).toBe(100); // (110-100)*10
+    expect(p.pnlPercent).toBeCloseTo(10);
+  });
+
+  it('leaves a position unchanged when its symbol has no price', () => {
+    const [p] = overlayLivePrices(base, { TCS: 4000 });
+    expect(p.ltp).toBe(100); // still entry
+    expect(p.pnl).toBe(0);
+  });
+
+  it('respects SELL direction (price up = loss)', () => {
+    const sellBase = tradesToPositions([
+      makeTrade({
+        symbol: 'INFY',
+        side: 'SELL',
+        entryPrice: 200,
+        quantity: 5,
+        ltp: undefined as unknown as number,
+        pnl: undefined as unknown as number,
+        pnlPercent: undefined as unknown as number,
+      }),
+    ]);
+    const [p] = overlayLivePrices(sellBase, { INFY: 210 });
+    expect(p.pnl).toBe(-50); // (210-200)*5*-1
   });
 });

@@ -88,19 +88,20 @@ export class AdaptiveStopTickPoller {
   }
 
   /**
-   * EOD square-off at 15:25 IST Mon–Fri.
+   * EOD square-off at 15:15 IST Mon–Fri — mirrors the broker intraday (MIS)
+   * auto-square-off, since every adaptive-stop position is INTRADAY.
    * Closes every TRADED adaptive-stop entry so stale open positions never
    * carry over to the next session and block tomorrow's re-entries
    * via the symbol-dup gate.
    */
-  @Cron('0 25 15 * * 1-5', { timeZone: 'Asia/Kolkata' })
-  async eodSquareOff(): Promise<void> {
+  @Cron('0 15 15 * * 1-5', { timeZone: 'Asia/Kolkata' })
+  async eodSquareOff(): Promise<SquareOffSummary> {
     this.logger.warn('[adaptive-stop-eod] EOD square-off starting');
     const all = await this.repo.findAllActive();
     const traded = all.filter((e) => e.status === WatchStatus.TRADED);
     if (traded.length === 0) {
       this.logger.log('[adaptive-stop-eod] no open positions to close');
-      return;
+      return { attempted: 0, closed: 0, skipped: 0, errors: 0 };
     }
 
     // Fetch live prices for a fair exit; fall back to last known price.
@@ -109,6 +110,7 @@ export class AdaptiveStopTickPoller {
 
     let closed = 0;
     let errors = 0;
+    let skipped = 0;
     for (const entry of traded) {
       try {
         const exitPrice =
@@ -118,6 +120,7 @@ export class AdaptiveStopTickPoller {
           0;
         if (exitPrice <= 0) {
           this.logger.warn(`[adaptive-stop-eod] no exit price for ${entry.symbol} — skipping`);
+          skipped++;
           continue;
         }
         if (entry.paperTradeId) {
@@ -137,6 +140,14 @@ export class AdaptiveStopTickPoller {
         errors++;
       }
     }
-    this.logger.warn(`[adaptive-stop-eod] done — closed=${closed} errors=${errors}`);
+    this.logger.warn(`[adaptive-stop-eod] done — closed=${closed} skipped=${skipped} errors=${errors}`);
+    return { attempted: traded.length, closed, skipped, errors };
   }
+}
+
+export interface SquareOffSummary {
+  attempted: number;
+  closed: number;
+  skipped: number;
+  errors: number;
 }

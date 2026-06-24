@@ -93,6 +93,20 @@ const TIMEFRAME_MAX_RANGE_DAYS: Record<string, number> = {
 const HISTORICAL_MIN_GAP_MS = 350;
 
 /**
+ * Priority lane for the historical scheduler. `interactive` (chart candles,
+ * on-demand quotes) drains ahead of `background` (level-book warming, scoring,
+ * backfill), while BOTH share the single 350ms global rate gate. Defaults to
+ * `background`, so every untouched caller is unchanged.
+ */
+export type HistoricalPriority = 'interactive' | 'background';
+
+interface HistoricalTask {
+  fn: () => Promise<unknown>;
+  resolve: (value: unknown) => void;
+  reject: (reason?: unknown) => void;
+}
+
+/**
  * Backoff schedule for retrying a throttled (`AngelThrottleError`) historical
  * chunk. The array length is the retry count; each entry is the delay BEFORE
  * that retry. `[1000, 2000]` → after a throttle, wait ~1s and retry; if that
@@ -173,7 +187,9 @@ export class AngelOneAdapterService implements BrokerAdapter {
    * only serializes WITHIN one getHistoricalData call — this one serializes
    * BETWEEN all calls.
    */
-  private historicalChain: Promise<unknown> = Promise.resolve();
+  private interactiveQ: HistoricalTask[] = [];
+  private backgroundQ: HistoricalTask[] = [];
+  private draining = false;
   private lastHistoricalCallAt = 0;
 
   /**
@@ -808,6 +824,7 @@ export class AngelOneAdapterService implements BrokerAdapter {
     timeframe: string,
     from: Date,
     to: Date,
+    priority: HistoricalPriority = 'background',
   ): Promise<any[]> {
     // ─── TTL cache (Task B) ───────────────────────────────────────────
     // Serve repeated fetches of the same (token, exchange, timeframe)
@@ -844,6 +861,7 @@ export class AngelOneAdapterService implements BrokerAdapter {
         timeframe,
         from,
         to,
+        priority,
       );
     } catch (err) {
       if (err instanceof AngelThrottleError) {
@@ -883,6 +901,7 @@ export class AngelOneAdapterService implements BrokerAdapter {
     timeframe: string,
     from: Date,
     to: Date,
+    priority: HistoricalPriority = 'background',
   ): Promise<any[]> {
     const interval = TIMEFRAME_MAP[timeframe] ?? timeframe;
     const maxDays = TIMEFRAME_MAX_RANGE_DAYS[interval] ?? 30; // conservative default if interval unknown
@@ -895,7 +914,7 @@ export class AngelOneAdapterService implements BrokerAdapter {
     // re-thrown as AngelThrottleError — getHistoricalData's outer catch turns
     // that into [] (one window, nothing partial to salvage).
     if (totalRangeMs <= maxRangeMs) {
-      return this.fetchChunkWithRetry(token, exchange, interval, from, to);
+      return this.fetchChunkWithRetry(token, exchange, interval, from, to, priority);
     }
 
     // Multi-chunk path — slice into [maxDays]-wide windows.
@@ -926,6 +945,7 @@ export class AngelOneAdapterService implements BrokerAdapter {
           interval,
           new Date(cursor),
           new Date(chunkEnd),
+          priority,
         );
       } catch (err) {
         if (err instanceof AngelThrottleError) {
@@ -987,6 +1007,7 @@ export class AngelOneAdapterService implements BrokerAdapter {
     interval: string,
     from: Date,
     to: Date,
+    priority: HistoricalPriority = 'background',
   ): Promise<any[]> {
     try {
       const smartApi = this.authService.getSmartApi();
@@ -998,14 +1019,16 @@ export class AngelOneAdapterService implements BrokerAdapter {
         `Fetching historical data: token=${token} exchange=${exchange} interval=${interval} ${fromStr} to ${toStr}`,
       );
 
-      const response: any = await this.serializeHistoricalCall<any>(() =>
-        smartApi.getCandleData({
-          exchange,
-          symboltoken: token,
-          interval,
-          fromdate: fromStr,
-          todate: toStr,
-        }),
+      const response: any = await this.serializeHistoricalCall<any>(
+        () =>
+          smartApi.getCandleData({
+            exchange,
+            symboltoken: token,
+            interval,
+            fromdate: fromStr,
+            todate: toStr,
+          }),
+        priority,
       );
 
       // Temporary diagnostic — log the raw shape so we can tell empty-array
@@ -1079,12 +1102,13 @@ export class AngelOneAdapterService implements BrokerAdapter {
     interval: string,
     from: Date,
     to: Date,
+    priority: HistoricalPriority = 'background',
   ): Promise<any[]> {
     // attempt 0 = initial call; attempts 1..N = retries (one per backoff entry).
     const maxRetries = HISTORICAL_THROTTLE_RETRY_DELAYS_MS.length;
     for (let attempt = 0; ; attempt++) {
       try {
-        return await this.fetchHistoricalChunk(token, exchange, interval, from, to);
+        return await this.fetchHistoricalChunk(token, exchange, interval, from, to, priority);
       } catch (err) {
         // Only throttles are transient — retry those. Anything else is a
         // genuine error: rethrow at once, do not retry.
@@ -1515,18 +1539,52 @@ export class AngelOneAdapterService implements BrokerAdapter {
    * all callers). Prevents Angel One's 3 req/sec hard cap from silently
    * dropping bursts (e.g. scoring's 8-10 calls in succession).
    */
-  private serializeHistoricalCall<T>(fn: () => Promise<T>): Promise<T> {
-    const next = this.historicalChain.then(async () => {
-      const elapsed = Date.now() - this.lastHistoricalCallAt;
-      const wait = Math.max(0, HISTORICAL_MIN_GAP_MS - elapsed);
-      if (wait > 0) await this.sleep(wait);
-      this.lastHistoricalCallAt = Date.now();
-      return fn();
+  private serializeHistoricalCall<T>(
+    fn: () => Promise<T>,
+    priority: HistoricalPriority = 'background',
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const task: HistoricalTask = {
+        fn: fn as () => Promise<unknown>,
+        resolve: resolve as (value: unknown) => void,
+        reject,
+      };
+      if (priority === 'interactive') this.interactiveQ.push(task);
+      else this.backgroundQ.push(task);
+      void this.drainHistoricalQueue();
     });
-    // Don't propagate errors into the chain — one failed call must not
-    // permanently block subsequent ones.
-    this.historicalChain = next.catch(() => undefined);
-    return next;
+  }
+
+  /**
+   * Single-consumer drain loop for the two historical lanes. Runs one task at a
+   * time, interactive lane first, applying the 350ms global rate gate before each
+   * run (so chart/quote requests jump ahead of background batch work without ever
+   * exceeding Angel's 3 req/sec cap). A throwing fn rejects only its own caller —
+   * the loop catches and moves on so one failure never blocks the queue.
+   */
+  private async drainHistoricalQueue(): Promise<void> {
+    if (this.draining) return;
+    this.draining = true;
+    try {
+      // Interactive ALWAYS first; only fall to background when interactive is
+      // empty. Re-checked every iteration so an interactive task arriving
+      // mid-drain still jumps ahead of queued background tasks.
+      let task: HistoricalTask | undefined;
+      while ((task = this.interactiveQ.shift() ?? this.backgroundQ.shift())) {
+        const elapsed = Date.now() - this.lastHistoricalCallAt;
+        const wait = Math.max(0, HISTORICAL_MIN_GAP_MS - elapsed);
+        if (wait > 0) await this.sleep(wait);
+        this.lastHistoricalCallAt = Date.now();
+        try {
+          const r = await task.fn();
+          task.resolve(r);
+        } catch (e) {
+          task.reject(e);
+        }
+      }
+    } finally {
+      this.draining = false;
+    }
   }
 
   /**

@@ -7,6 +7,10 @@ import { LevelBookService } from '../../signal-generator/services/level-book.ser
 import { resolvePriceFields } from '../price-fields';
 import { realizedIntradayPnlPct } from '../intraday-pnl';
 import { withBudget } from '../../../common/utils/with-budget';
+import {
+  computeLotLivePnl,
+  sumOpenLotsUnrealizedPnl,
+} from '../utils/reinvest-pnl.util';
 
 class UpdateCategoryDto {
   @IsString() @IsNotEmpty() category!: string;
@@ -96,23 +100,45 @@ export class AnandDualTrackController {
 
   @Get('reinvest/pool')
   async reinvestPool() {
-    return this.repo.getPool();
+    const pool = await this.repo.getPool();
+    // Unrealized P&L is summed over ALL open lots (not the filtered list the
+    // /lots endpoint serves), so the card stays correct regardless of which
+    // row filter the page is showing. Realized P&L (harvested + closed-lot
+    // P&L) is composed on the client from the pool fields it already has.
+    const openLots = await this.enrichLotsWithLivePnl(
+      await this.repo.listReinvestmentLots('OPEN'),
+    );
+    const unrealizedPnl = sumOpenLotsUnrealizedPnl(openLots);
+    return { ...pool, unrealizedPnl };
   }
 
   @Get('reinvest/lots')
   async reinvestLots(@Query('status') status?: string) {
     const lots = await this.repo.listReinvestmentLots(status || undefined);
-    const tokenMap = await this.repo.resolveTokens(lots.map((l) => l.symbol)).catch(() => new Map<string, string>());
+    return this.enrichLotsWithLivePnl(lots);
+  }
+
+  /**
+   * Mark a set of reinvestment lots to their live price. Token/LTP resolution
+   * is best-effort: an unresolved token falls back to the lot's exit price (for
+   * closed lots) then its entry price, so P&L is 0 rather than NaN. Shared by
+   * the /reinvest/lots (per-row) and /reinvest/pool (aggregate) endpoints.
+   */
+  private async enrichLotsWithLivePnl<
+    T extends { symbol: string; entryPrice: number; capital: number; exitPrice: number | null },
+  >(lots: T[]): Promise<Array<T & { currentPrice: number; pnlPct: number; pnlRs: number }>> {
+    const tokenMap = await this.repo
+      .resolveTokens(lots.map((l) => l.symbol))
+      .catch(() => new Map<string, string>());
     const tokens = [...new Set([...tokenMap.values()])];
     const ltpMap = tokens.length
       ? await this.adapter.getLtpsBatch('NSE', tokens).catch(() => new Map<string, number>())
       : new Map<string, number>();
     return lots.map((l) => {
       const token = tokenMap.get(l.symbol);
-      const currentPrice = (token ? ltpMap.get(token) : undefined) ?? l.exitPrice ?? l.entryPrice;
-      const pnlPct = ((currentPrice - l.entryPrice) / l.entryPrice) * 100;
-      const pnlRs = (pnlPct / 100) * l.capital;
-      return { ...l, currentPrice, pnlPct, pnlRs };
+      const currentPrice =
+        (token ? ltpMap.get(token) : undefined) ?? l.exitPrice ?? l.entryPrice;
+      return { ...l, ...computeLotLivePnl(l, currentPrice) };
     });
   }
 

@@ -36,6 +36,7 @@ import {
   MAJOR_STOCKS,
   COMMODITIES,
 } from '@td/shared/constants';
+import { seriesCautionary } from '../../trade-engine/utils/cautionary';
 
 /**
  * Look up a symbol and exchange for a token from the known constant maps.
@@ -295,12 +296,7 @@ export class MarketDataController {
     const constantEntry = resolveTokenFromConstants(token);
     const exchange =
       query.exchange ?? instrument?.exchange ?? constantEntry?.exchange ?? 'NSE';
-    // Resolve the symbol by (exchange, token) so a colliding token (509 = NSE
-    // MAZDOCK-EQ vs MCX SSUGARMKOLCOM) labels the chart with the right
-    // instrument, not whichever the token-only cache returned.
-    const exactInstrument = this.instrumentService.getByExchangeTokenSync(exchange, token);
-    const symbol =
-      exactInstrument?.symbol ?? instrument?.symbol ?? constantEntry?.symbol ?? token;
+    const symbol = instrument?.symbol ?? constantEntry?.symbol ?? token;
 
     // Coalesce concurrent identical requests onto a single broker call.
     // Cache key includes from/to so a chart panning to a different range
@@ -327,6 +323,7 @@ export class MarketDataController {
           query.timeframe,
           from,
           to,
+          'interactive', // user-facing chart fetch — jump the background queue
         );
         return {
           token,
@@ -433,15 +430,7 @@ export class MarketDataController {
     const constantEntry = resolveTokenFromConstants(token);
     const resolvedExchange =
       exchange ?? instrument?.exchange ?? constantEntry?.exchange ?? 'NSE';
-    // Prefer the exchange-aware resolution so a colliding token (509 = NSE
-    // MAZDOCK-EQ vs MCX SSUGARMKOLCOM) labels with the right instrument for the
-    // requested exchange, not whichever the token-only `getByToken` returned.
-    const exactInstrument = this.instrumentService.getByExchangeTokenSync(
-      resolvedExchange,
-      token,
-    );
-    const resolvedSymbol =
-      exactInstrument?.symbol ?? instrument?.symbol ?? constantEntry?.symbol ?? '';
+    const resolvedSymbol = instrument?.symbol ?? constantEntry?.symbol ?? '';
 
     if (this.levelBookService) {
       try {
@@ -449,6 +438,7 @@ export class MarketDataController {
           token,
           resolvedExchange,
           resolvedSymbol,
+          'interactive', // user-facing quote fetch — jump the background queue
         );
         if (book) {
           // Build a minimal Quote from what the level book has. Volume
@@ -717,6 +707,44 @@ export class MarketDataController {
   @ApiOperation({ summary: 'Debug: list all currently subscribed tokens' })
   getSubscribedTokens() {
     return { tokens: this.marketFeedService.getSubscribedTokens() };
+  }
+
+  /**
+   * GET /api/market-data/cautionary
+   *
+   * Pre-trade cautionary check for a stock. Pure & stateless: classifies
+   * the Angel One tradingsymbol by its NSE series suffix (-BE / -BZ =
+   * Trade-to-Trade, delivery-only, surveillance). Lets the order ticket
+   * warn the user BEFORE a live INTRADAY order gets rejected by the broker
+   * with "categorised under cautionary listings".
+   *
+   * Phase B: this endpoint will ALSO consult a persisted ASM/GSM/ESM list
+   * (token-keyed) and OR its result with the series heuristic below. The
+   * `token` / `exchange` params are accepted now so that lookup is a
+   * drop-in addition without a frontend change.
+   */
+  @Get('cautionary')
+  @ApiOperation({
+    summary: 'Check whether a stock is cautionary / delivery-only (T2T)',
+  })
+  @ApiQuery({ name: 'symbol', required: true })
+  @ApiQuery({ name: 'token', required: false })
+  @ApiQuery({ name: 'exchange', required: false })
+  getCautionary(
+    @Query('symbol') symbol: string,
+    // token / exchange are reserved for the Phase B persisted-list lookup.
+    @Query('token') _token?: string,
+    @Query('exchange') _exchange?: string,
+  ) {
+    const result = seriesCautionary(symbol ?? '');
+    // ── Phase B goes here: consult the persisted ASM/GSM/ESM list keyed by
+    // (token, exchange) and OR it into `result` before returning. ──
+    return {
+      symbol: symbol ?? '',
+      cautionary: result.cautionary,
+      reason: result.reason,
+      deliveryOnly: result.deliveryOnly,
+    };
   }
 
   /**

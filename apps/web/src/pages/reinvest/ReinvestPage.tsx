@@ -40,7 +40,12 @@ function PoolCards({ pool }: { pool: ReinvestPool }) {
       <PoolCard label="Harvested" value={pool.harvestedTotal} />
       <PoolCard label="Deployed (active)" value={pool.deployedActive} />
       <PoolCard label="Idle Balance" value={pool.idleBalance} />
+      {/* Realized P&L = P&L booked from CLOSED reinvestment lots only. The
+          harvested swing profit is seed capital (shown in Harvested/Deployed),
+          not the reinvestment strategy's realized gain — counting it here
+          double-counted the swing profit and overstated this tile. */}
       <PoolCard label="Realized P&L" value={pool.realizedPnl} signed />
+      <PoolCard label="Unrealized P&L" value={pool.unrealizedPnl} signed />
     </div>
   );
 }

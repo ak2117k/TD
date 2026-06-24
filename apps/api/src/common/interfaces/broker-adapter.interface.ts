@@ -33,10 +33,6 @@ export interface OrderRequest {
   price?: number;
   triggerPrice?: number;
   positionType: 'INTRADAY' | 'DELIVERY' | 'CARRYFORWARD';
-  /** Origin track of the order: MANUAL | WATCH | AUTO | SCANNER. Carried
-   *  through execution so the persisted Trade row records where it came from.
-   *  Defaults to MANUAL at the execution boundary when omitted. */
-  source?: 'MANUAL' | 'WATCH' | 'AUTO' | 'SCANNER';
 }
 
 export interface OrderResponse {
@@ -48,6 +44,14 @@ export interface OrderResponse {
    * undefined for limit-pending or live orders.
    */
   fillPrice?: number;
+  /**
+   * Set true when a REJECTED/FAILED order was blocked because the stock is
+   * under exchange surveillance / Trade-to-Trade (delivery-only). The
+   * `message` is enriched with actionable guidance when this is set so the
+   * UI can prompt the user to switch Product to DELIVERY. Optional — absent
+   * on every non-cautionary response, so existing callers are unaffected.
+   */
+  deliveryOnly?: boolean;
 }
 
 export interface PositionData {
@@ -100,13 +104,22 @@ export interface BrokerAdapter {
    */
   subscribeAdHoc?(token: string, exchange: string): Promise<void> | void;
 
-  /** Get historical candle data */
+  /**
+   * Get historical candle data.
+   *
+   * `priority` selects the rate-gated scheduler lane in the Angel One
+   * adapter: `interactive` (user-facing chart/quote fetches) jumps ahead of
+   * `background` batch work. Declared inline here (rather than imported from
+   * the adapter) to keep this interface free of an implementation import
+   * cycle; the adapter's `HistoricalPriority` type is structurally identical.
+   */
   getHistoricalData(
     symbol: string,
     exchange: string,
     timeframe: string,
     from: Date,
     to: Date,
+    priority?: 'interactive' | 'background',
   ): Promise<any[]>;
 
   /** Search instruments */

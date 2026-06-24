@@ -262,6 +262,32 @@ export function tradesToPositions(trades: Trade[]): Position[] {
   });
 }
 
+/**
+ * Overlay live prices (live WS ticks and/or fetched per-token quotes, keyed by
+ * symbol) onto base positions, recomputing unrealized P&L from the fresh price.
+ *
+ * The manual-trade page's Open Positions panel previously fed this from live
+ * ticks ALONE — but held symbols aren't subscribed to the tick feed, so no tick
+ * ever arrives and P&L stayed pinned at 0. Seeding the same symbol→price map
+ * from the per-token quote endpoint (as the Pending tab already does) lets a
+ * quote drive the mark when no tick is present. A symbol absent from the map,
+ * or priced identically to its current ltp, keeps its base values untouched.
+ */
+export function overlayLivePrices(
+  base: Position[],
+  priceBySymbol: Record<string, number>,
+): Position[] {
+  return base.map((p) => {
+    const ltp = priceBySymbol[p.symbol];
+    if (typeof ltp !== 'number' || ltp === p.ltp) return p;
+    const direction = p.side === 'BUY' ? 1 : -1;
+    const pnl = (ltp - p.averagePrice) * p.quantity * direction;
+    const cost = p.averagePrice * p.quantity;
+    const pnlPercent = cost > 0 ? (pnl / cost) * 100 : 0;
+    return { ...p, ltp, pnl, pnlPercent };
+  });
+}
+
 /** Selector: capital deployed across the store's current open trades. */
 export const selectManualCapitalDeployed = (s: TradeState): number =>
   deriveCapitalDeployed(s.openTrades as Trade[]);

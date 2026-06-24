@@ -86,6 +86,9 @@ export interface ReinvestPool {
   deployedActive: number;
   idleBalance: number;
   realizedPnl: number;
+  // Live mark-to-market across all OPEN lots, summed server-side so it stays
+  // correct regardless of the page's row filter.
+  unrealizedPnl: number;
 }
 
 export interface ReinvestLot {

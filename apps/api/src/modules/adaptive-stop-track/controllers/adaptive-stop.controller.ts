@@ -1,10 +1,11 @@
-import { Controller, Get, NotFoundException, Param, Query } from '@nestjs/common';
+import { Controller, Get, HttpCode, HttpStatus, NotFoundException, Param, Post, Query } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { WatchStatus } from '@prisma/client';
 import { AdaptiveStopWatchRepository } from '../repositories/adaptive-stop-watch.repository';
 import { AdaptiveStopTradeRepository } from '../repositories/adaptive-stop-trade.repository';
 import { AdaptiveStopAccountService } from '../services/adaptive-stop-account.service';
 import { AdaptiveStopComparisonService } from '../services/adaptive-stop-comparison.service';
+import { AdaptiveStopTickPoller } from '../services/adaptive-stop-tick-poller.service';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 
 @ApiTags('Adaptive-Stop Track (A/B experiment)')
@@ -15,8 +16,20 @@ export class AdaptiveStopController {
     private readonly tradeRepo: AdaptiveStopTradeRepository,
     private readonly _account: AdaptiveStopAccountService,
     private readonly _comparison: AdaptiveStopComparisonService,
+    private readonly poller: AdaptiveStopTickPoller,
     private readonly adapter: AngelOneAdapterService,
   ) {}
+
+  /**
+   * Manual square-off — flatten every TRADED adaptive position on demand,
+   * running the same logic as the 15:15 IST cron. Useful when the timer was
+   * missed (e.g. a mid-window restart) or the feed recovered late.
+   */
+  @Post('square-off')
+  @HttpCode(HttpStatus.OK)
+  async squareOff() {
+    return this.poller.eodSquareOff();
+  }
 
   @Get('watch/:id')
   async get(@Param('id') id: string) {
