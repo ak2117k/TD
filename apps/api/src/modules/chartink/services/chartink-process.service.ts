@@ -16,6 +16,14 @@ import {
 import { AdaptiveStopWatchService } from '../../adaptive-stop-track/services/adaptive-stop-watch.service';
 import { AnandDualTrackService } from '../../anand-dual-track/services/anand-dual-track.service';
 import { BreakoutSwingService } from '../../breakout-swing-track/services/breakout-swing.service';
+import {
+  SellFuturesService, SellFuturesNoFutureError, SellFuturesSymbolDupError,
+  SellFuturesCooldownError, SellFuturesNoQuoteError,
+} from '../../sell-futures-track/services/sell-futures.service';
+import {
+  SellFuturesPositionCapError, SellFuturesMarginExhaustedError, SellFuturesKillSwitchError,
+} from '../../sell-futures-track/services/sell-futures-paper-account.service';
+import { SellFuturesRejectionRepository, SellFuturesRejectionReason } from '../../sell-futures-track/repositories/sell-futures-rejection.repository';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
 
 interface Hit {
@@ -65,6 +73,8 @@ export class ChartinkProcessService {
     private readonly adaptiveStopWatch: AdaptiveStopWatchService,
     private readonly anandDualTrack: AnandDualTrackService,
     private readonly breakoutSwing: BreakoutSwingService,
+    private readonly sellFutures: SellFuturesService,
+    private readonly sellFuturesRejections: SellFuturesRejectionRepository,
     @Optional() private readonly levelBook?: LevelBookService,
   ) {}
 
@@ -465,6 +475,27 @@ export class ChartinkProcessService {
       scannerName: scanName ?? null,
     }, hit.hitPrice);
 
+    // === 6. SELL-FUTURES shadow track — bearish signals only. ===
+    // FIX 3 pattern: fire-and-forget. Guarded by side==='SELL' so BUY signals
+    // never touch this track. The future is resolved INSIDE the service (gate
+    // 1), so the trigger only forwards the equity symbol + side. Its full
+    // error handling (rejection-record write) lives in runSellFuturesShadow,
+    // so failures here NEVER affect the gated/ungated/adaptive/breakout paths.
+    if (side === 'SELL') {
+      void this.runSellFuturesShadow({
+        alertId,
+        setupId: null,
+        symbol: hit.symbol,
+        token: instrument.token,
+        exchange: 'NSE',
+        side,
+        initialPrice: hit.hitPrice,
+        initialScore: scoringResult.score,
+        initialBreakdown: { checks: scoringResult.checks, lotCount: scoringResult.lotCount } as any,
+        scannerName: scanName ?? null,
+      }, hit.hitPrice);
+    }
+
     // (The Anand dual-track formerly ran here, after scoring; it now runs at
     // step 1b above so it's never starved by the scoring backlog.)
   }
@@ -519,6 +550,41 @@ export class ChartinkProcessService {
     if (err instanceof UngatedLastLossError) return 'last-loss';
     if (err instanceof UngatedStaleEntryError) return 'stale-entry';
     if (err instanceof UngatedNoQuoteError) return 'no-quote';
+    return null;
+  }
+
+  /**
+   * SELL-Futures shadow track entry, run fire-and-forget. Mirrors the ungated
+   * pattern exactly: known rejection reasons are recorded to the sell-futures
+   * rejection repository, everything else is logged. Never throws.
+   */
+  private async runSellFuturesShadow(
+    input: Parameters<SellFuturesService['createFromAlert']>[0],
+    hitPrice: number,
+  ): Promise<void> {
+    try {
+      await this.sellFutures.createFromAlert(input);
+    } catch (err) {
+      const reason = this.mapSellFuturesError(err);
+      if (reason) {
+        await this.sellFuturesRejections.record({
+          alertId: input.alertId, symbol: input.symbol, reason,
+          score: input.initialScore, hitPrice,
+        });
+      } else {
+        this.logger.warn(`[sell-futures] ${input.symbol}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+  }
+
+  private mapSellFuturesError(err: unknown): SellFuturesRejectionReason | null {
+    if (err instanceof SellFuturesNoFutureError) return 'no-future';
+    if (err instanceof SellFuturesSymbolDupError) return 'symbol-dup';
+    if (err instanceof SellFuturesCooldownError) return 'cooldown';
+    if (err instanceof SellFuturesPositionCapError) return 'position-cap';
+    if (err instanceof SellFuturesMarginExhaustedError) return 'margin-exhausted';
+    if (err instanceof SellFuturesKillSwitchError) return 'kill-switch';
+    if (err instanceof SellFuturesNoQuoteError) return 'no-quote';
     return null;
   }
 

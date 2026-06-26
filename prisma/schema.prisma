@@ -843,6 +843,155 @@ model UngatedRejection {
 }
 
 // ============================================================================
+// SELL-Futures Shadow-Track
+// See docs/superpowers/specs/2026-06-27-sell-futures-track-design.md
+// Cloned from the ungated-track models; shorts the stock FUTURE (NFO) on
+// bearish (SELL) Chartink signals. The entry stores BOTH the equity symbol
+// and the resolved futures token/tradingsymbol/expiry/lotSize — quotes and
+// exits run on the futures NFO token (`token`).
+// Tables: sell_futures_watch_entries, sell_futures_watch_events,
+//         sell_futures_trades, sell_futures_paper_account, sell_futures_rejections.
+// ============================================================================
+
+model SellFuturesWatchEntry {
+  id                    String   @id @default(cuid())
+  alertId               String?
+  setupId               String?
+  // Equity symbol that triggered the signal (e.g. "RELIANCE").
+  symbol                String
+  // Resolved FUTURES NFO token — dedup, quotes and exits all key off this.
+  token                 String
+  exchange              String
+  // Equity token (NSE) the alert resolved to, kept for provenance.
+  eqToken               String?
+  // Resolved futures contract details.
+  futTradingsymbol      String?
+  futExpiry             DateTime?
+  lotSize               Int?
+  side                  String
+  initialPrice          Float
+  initialScore          Int
+  initialBreakdown      Json
+  initialAt             DateTime @default(now())
+  profitTarget          Float
+  profitTargetSource    String
+  stopLossScore         Int      @default(60)
+  status                WatchStatus @default(WATCHING)
+  currentPrice          Float?
+  currentScore          Int?
+  currentBreakdown      Json?
+  maxFavorable          Float?
+  maxAdverse            Float?
+  lastTickAt            DateTime?
+  lastRescoreAt         DateTime?
+  lastEventPrice        Float?
+  paperTradeId          String?
+  executedAt            DateTime?
+  executedPrice         Float?
+  quantity              Int?
+  closedAt              DateTime?
+  closedReason          String?
+  notes                 String?
+  dismissedAt           DateTime?
+  partialExitedAt       DateTime?
+  partialExitPrice      Float?
+  partialQty            Int?
+  remainingQty          Int?
+  trailingHighWater     Float?
+  trailingStopPrice     Float?
+  slBreachCount         Int      @default(0)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  events                SellFuturesWatchEvent[]
+
+  @@index([status])
+  @@index([token])
+  @@index([symbol])
+  @@index([createdAt])
+  @@map("sell_futures_watch_entries")
+}
+
+model SellFuturesWatchEvent {
+  id            String         @id @default(cuid())
+  watchEntryId  String
+  watchEntry    SellFuturesWatchEntry @relation(fields: [watchEntryId], references: [id], onDelete: Cascade)
+  eventType     WatchEventType
+  price         Float?
+  score         Int?
+  breakdown     Json?
+  priceDelta    Float?
+  scoreDelta    Int?
+  notes         String?
+  createdAt     DateTime       @default(now())
+
+  @@index([watchEntryId, createdAt])
+  @@index([eventType])
+  @@map("sell_futures_watch_events")
+}
+
+model SellFuturesTrade {
+  id              String   @id @default(cuid())
+  instrumentId    String
+  signalId        String?
+  orderId         String?
+  side            String
+  orderType       String
+  positionType    String
+  quantity        Int
+  closedQuantity  Int      @default(0)
+  entryPrice      Float?
+  exitPrice       Float?
+  stoploss        Float?
+  target          Float?
+  pnl             Float?
+  pnlPercent      Float?
+  fees            Float    @default(0)
+  status          String   @default("PENDING")
+  strategy        String?
+  isPaperTrade    Boolean  @default(true)
+  entryTime       DateTime?
+  exitTime        DateTime?
+  notes           String?
+  entryReason     String?
+  exitReasonTag   String?
+  exitNotes       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("sell_futures_trades")
+}
+
+model SellFuturesPaperAccount {
+  id               String   @id @default(cuid())
+  startingBalance  Float
+  cash             Float
+  realizedPnl      Float    @default(0)
+  fees             Float    @default(0)
+  deployedCapital  Float    @default(0)
+  killSwitchAt     DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@map("sell_futures_paper_account")
+}
+
+model SellFuturesRejection {
+  id          String   @id @default(cuid())
+  alertId     String?
+  symbol      String
+  reason      String
+  score       Int?
+  hitPrice    Float?
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([reason])
+  @@map("sell_futures_rejections")
+}
+
+// ============================================================================
 // Adaptive-Stop Shadow-Track
 // Cloned from the ungated-track models; adds ATR-based stop sizing fields.
 // Tables: adaptive_stop_watch_entries, adaptive_stop_trades,

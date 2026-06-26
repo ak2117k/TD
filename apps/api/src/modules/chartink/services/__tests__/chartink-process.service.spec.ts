@@ -17,6 +17,10 @@ import {
 import { AdaptiveStopWatchService } from '../../../adaptive-stop-track/services/adaptive-stop-watch.service';
 import { AnandDualTrackService } from '../../../anand-dual-track/services/anand-dual-track.service';
 import { BreakoutSwingService } from '../../../breakout-swing-track/services/breakout-swing.service';
+import {
+  SellFuturesService, SellFuturesNoFutureError, SellFuturesCooldownError,
+} from '../../../sell-futures-track/services/sell-futures.service';
+import { SellFuturesRejectionRepository } from '../../../sell-futures-track/repositories/sell-futures-rejection.repository';
 import { LevelBookService } from '../../../signal-generator/services/level-book.service';
 
 /** A 5-min-MACD score-check entry, for exercising the MACD entry gate. */
@@ -51,6 +55,8 @@ describe('ChartinkProcessService', () => {
   let ungatedRejections: { record: jest.Mock };
   let anandDualTrack: { createEntries: jest.Mock };
   let breakoutSwing: { createFromAlert: jest.Mock };
+  let sellFutures: { createFromAlert: jest.Mock };
+  let sellFuturesRejections: { record: jest.Mock };
   let levelBook: { lazyLoad: jest.Mock };
 
   // Default happy-path candles — 50 bars trending UP, enough for classifyTrend
@@ -90,6 +96,8 @@ describe('ChartinkProcessService', () => {
     ungatedRejections = { record: jest.fn().mockResolvedValue(undefined) };
     anandDualTrack = { createEntries: jest.fn().mockResolvedValue(undefined) };
     breakoutSwing = { createFromAlert: jest.fn().mockResolvedValue({ id: 'bs1' }) };
+    sellFutures = { createFromAlert: jest.fn().mockResolvedValue({ id: 'sf1' }) };
+    sellFuturesRejections = { record: jest.fn().mockResolvedValue(undefined) };
     // Default: lazyLoad returns null so setupContext stays null in tests that
     // don't care about S/R room. Individual tests can override this.
     levelBook = { lazyLoad: jest.fn().mockResolvedValue(null) };
@@ -109,6 +117,8 @@ describe('ChartinkProcessService', () => {
         { provide: UngatedRejectionRepository, useValue: ungatedRejections },
         { provide: AnandDualTrackService, useValue: anandDualTrack },
         { provide: BreakoutSwingService, useValue: breakoutSwing },
+        { provide: SellFuturesService, useValue: sellFutures },
+        { provide: SellFuturesRejectionRepository, useValue: sellFuturesRejections },
         { provide: LevelBookService, useValue: levelBook },
       ],
     }).compile();
@@ -951,6 +961,63 @@ describe('ChartinkProcessService', () => {
       expect(served.length).toBeGreaterThan(0);
       // Series the gate did NOT pre-fetch fall through to the broker in scoring.
       expect(arg.candleSource.has('2885', 'NSE', '5m')).toBe(false);
+    });
+  });
+
+  // ─── SELL-Futures shadow track fork (bearish signals → short the future) ────
+  // Guarded by side==='SELL'. A SELL signal routes to sellFutures.createFromAlert;
+  // a BUY signal does not. Errors map to a sell-futures rejection row. A throw
+  // must never affect the gated/ungated/adaptive paths.
+  describe('ChartinkProcessService — sell-futures fork', () => {
+    const DOWN_CANDLES = makeTrendingCloses('DOWN', 50).map((close) => ({
+      close, timestamp: new Date(), open: close, high: close, low: close, volume: 1000,
+    }));
+
+    beforeEach(() => {
+      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', exchange: 'NSE' });
+      mdRepo.getInstrumentByToken.mockResolvedValue({ id: 'sec-1', token: '99926019', exchange: 'NSE' });
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [] });
+    });
+
+    it('routes a SELL signal (sector DOWN) to sellFutures.createFromAlert with the equity symbol + side', async () => {
+      angelOne.getHistoricalData.mockResolvedValue(DOWN_CANDLES); // sector DOWN → side SELL
+      await service.processOne('alert-sf-1', { symbol: 'RELIANCE', hitPrice: 2885 }, 'scan');
+      expect(sellFutures.createFromAlert).toHaveBeenCalledWith(expect.objectContaining({
+        symbol: 'RELIANCE', token: '2885', exchange: 'NSE', side: 'SELL', initialPrice: 2885,
+      }));
+    });
+
+    it('does NOT route a BUY signal (sector UP) to the sell-futures track', async () => {
+      angelOne.getHistoricalData.mockResolvedValue(UP_CANDLES); // sector UP → side BUY
+      await service.processOne('alert-sf-2', { symbol: 'RELIANCE', hitPrice: 2885 }, 'scan');
+      expect(sellFutures.createFromAlert).not.toHaveBeenCalled();
+    });
+
+    it('SellFuturesNoFutureError maps to a no-future rejection row', async () => {
+      angelOne.getHistoricalData.mockResolvedValue(DOWN_CANDLES);
+      sellFutures.createFromAlert.mockRejectedValue(new SellFuturesNoFutureError('RELIANCE'));
+      await service.processOne('alert-sf-3', { symbol: 'RELIANCE', hitPrice: 2885 }, 'scan');
+      expect(sellFuturesRejections.record).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'no-future', symbol: 'RELIANCE' }),
+      );
+    });
+
+    it('SellFuturesCooldownError maps to a cooldown rejection row', async () => {
+      angelOne.getHistoricalData.mockResolvedValue(DOWN_CANDLES);
+      sellFutures.createFromAlert.mockRejectedValue(new SellFuturesCooldownError('RELIANCE'));
+      await service.processOne('alert-sf-4', { symbol: 'RELIANCE', hitPrice: 2885 }, 'scan');
+      expect(sellFuturesRejections.record).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'cooldown' }),
+      );
+    });
+
+    it('a sell-futures throw does NOT affect the gated path (setup still persisted)', async () => {
+      angelOne.getHistoricalData.mockResolvedValue(DOWN_CANDLES);
+      sellFutures.createFromAlert.mockRejectedValue(new Error('sell-futures db crash'));
+      await expect(
+        service.processOne('alert-sf-5', { symbol: 'RELIANCE', hitPrice: 2885 }, 'scan'),
+      ).resolves.toBeUndefined();
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({ kind: 'setup' }));
     });
   });
 

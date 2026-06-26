@@ -25,6 +25,7 @@ import { UngatedTrackModule } from './modules/ungated-track/ungated-track.module
 import { AdaptiveStopTrackModule } from './modules/adaptive-stop-track/adaptive-stop-track.module';
 import { AnandDualTrackModule } from './modules/anand-dual-track/anand-dual-track.module';
 import { BreakoutSwingTrackModule } from './modules/breakout-swing-track/breakout-swing-track.module';
+import { SellFuturesModule } from './modules/sell-futures-track/sell-futures.module';
 
 @Module({
   imports: [
@@ -112,6 +113,9 @@ import { BreakoutSwingTrackModule } from './modules/breakout-swing-track/breakou
 
     // Breakout-Swing Track — breakout variant of the Anand swing track
     BreakoutSwingTrackModule,
+
+    // SELL-Futures Track — shorts the stock future on bearish signals (paper)
+    SellFuturesModule,
   ],
   providers: [],
 })
