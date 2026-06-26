@@ -1,5 +1,5 @@
 import { Test } from '@nestjs/testing';
-import { UngatedWatchService, UngatedSymbolDupError } from './ungated-watch.service';
+import { UngatedWatchService, UngatedSymbolDupError, UngatedScannerNotAllowedError } from './ungated-watch.service';
 import { UngatedWatchRepository } from '../repositories/ungated-watch.repository';
 import { UngatedTradeRepository } from '../repositories/ungated-trade.repository';
 import {
@@ -18,7 +18,18 @@ describe('UngatedWatchService.createFromAlert', () => {
     alertId: 'a1', setupId: null, symbol: 'TCS', token: '11536', exchange: 'NSE',
     side: 'BUY' as const, initialPrice: 2000, initialScore: 42,
     initialBreakdown: { checks: [] },
+    // Hull scanner so the gate-0 Hull-only filter (default ON) passes for the
+    // existing gate/exec tests below; the dedicated gate-0 block overrides this.
+    scannerName: 'Anand 100Hull >200 hull',
   };
+
+  // The Hull-only gate reads process.env.UNGATED_HULL_ONLY at call time. Save /
+  // restore it around every test so a per-case override never leaks.
+  const ORIGINAL_HULL_ONLY = process.env.UNGATED_HULL_ONLY;
+  afterEach(() => {
+    if (ORIGINAL_HULL_ONLY === undefined) delete process.env.UNGATED_HULL_ONLY;
+    else process.env.UNGATED_HULL_ONLY = ORIGINAL_HULL_ONLY;
+  });
 
   beforeEach(async () => {
     repo = {
@@ -60,6 +71,44 @@ describe('UngatedWatchService.createFromAlert', () => {
     }).compile();
     svc = mod.get(UngatedWatchService);
     (svc as any).__adapter = adapter; // expose for per-test overrides
+  });
+
+  // ── Gate 0: Hull-only scanner filter ─────────────────────────────────────
+
+  it('rejects a non-Hull scanner with toggle ON (default) and creates no entry', async () => {
+    process.env.UNGATED_HULL_ONLY = 'true';
+    await expect(
+      svc.createFromAlert({ ...baseInput, scannerName: 'ANAND HIGH GAINER BULLISH MAY26' }),
+    ).rejects.toBeInstanceOf(UngatedScannerNotAllowedError);
+    expect(repo.findActiveByToken).not.toHaveBeenCalled();
+    expect(repo.createEntry).not.toHaveBeenCalled();
+    expect(exec.openTrade).not.toHaveBeenCalled();
+  });
+
+  it('rejects a null scanner name with toggle ON (fail-closed)', async () => {
+    process.env.UNGATED_HULL_ONLY = 'true';
+    await expect(
+      svc.createFromAlert({ ...baseInput, scannerName: null }),
+    ).rejects.toBeInstanceOf(UngatedScannerNotAllowedError);
+    expect(repo.createEntry).not.toHaveBeenCalled();
+  });
+
+  it('passes gate 0 for a Hull scanner with toggle ON (no scanner error)', async () => {
+    process.env.UNGATED_HULL_ONLY = 'true';
+    // Hull scanner must NOT throw the scanner-not-allowed error — it proceeds
+    // through the remaining gates and opens the trade on the happy path.
+    await expect(
+      svc.createFromAlert({ ...baseInput, scannerName: 'Anand 100Hull >200 hull' }),
+    ).resolves.toBeDefined();
+    expect(exec.openTrade).toHaveBeenCalled();
+  });
+
+  it('passes gate 0 for a non-Hull scanner when UNGATED_HULL_ONLY=false', async () => {
+    process.env.UNGATED_HULL_ONLY = 'false';
+    await expect(
+      svc.createFromAlert({ ...baseInput, scannerName: 'ANAND HIGH GAINER BULLISH MAY26' }),
+    ).resolves.toBeDefined();
+    expect(exec.openTrade).toHaveBeenCalled();
   });
 
   it('rejects when the same token already has a non-terminal entry (symbol-dup)', async () => {

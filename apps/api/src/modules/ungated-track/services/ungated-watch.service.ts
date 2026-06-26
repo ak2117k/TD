@@ -8,6 +8,7 @@ import { UngatedPaperAccountService, TRADE_CAPITAL } from './ungated-paper-accou
 import { UngatedTradeExecutionService } from './ungated-trade-execution.service';
 import { UngatedWatchGateway } from '../gateways/ungated-watch.gateway';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
+import { isHullScanner } from './ungated-scanner-filter';
 // Note: NO MarketFeedService dependency — the ungated track uses
 // `UngatedTickPoller` (REST every 30s) to sidestep the broker's
 // ~50-token WebSocket cap. See specs/2026-05-20-ungated-shadow-track-design.md.
@@ -39,6 +40,16 @@ export class UngatedSellDirectionError extends Error {
   }
 }
 
+export class UngatedScannerNotAllowedError extends Error {
+  constructor(public readonly symbol: string, public readonly scannerName: string | null) {
+    super(
+      `ungated: ${symbol} rejected — scanner "${scannerName ?? 'unknown'}" not allowed ` +
+      `(Hull-only filter active; set UNGATED_HULL_ONLY=false to admit all scanners)`,
+    );
+    this.name = 'UngatedScannerNotAllowedError';
+  }
+}
+
 export class UngatedStaleEntryError extends Error {
   constructor(public readonly symbol: string, public readonly dynamicRR: number) {
     super(`ungated: ${symbol} stale entry — dynamic R:R ${dynamicRR.toFixed(2)} below minimum; move already consumed`);
@@ -63,6 +74,7 @@ export interface UngatedCreateFromAlertInput {
   initialPrice: number;
   initialScore: number;
   initialBreakdown: Prisma.InputJsonValue;
+  scannerName: string | null;
 }
 
 const PROFIT_TARGET_PCT = 0.02; // 2% from fill price — no indicator-sr on ungated (YAGNI)
@@ -83,7 +95,15 @@ export class UngatedWatchService {
   ) {}
 
   async createFromAlert(input: UngatedCreateFromAlertInput) {
-    // 0. BUY-only gate — ungated track trades equities long only.
+    // 0a. Hull-only scanner gate — the ungated track's profit is concentrated in
+    //    the `Anand 100Hull >200 hull` scanner; admit ONLY Hull-scanner signals.
+    //    Toggle off with UNGATED_HULL_ONLY=false (read at call time so tests can
+    //    flip it per-case). Fail-closed: a null/unresolved scanner name is rejected.
+    if (process.env.UNGATED_HULL_ONLY !== 'false' && !isHullScanner(input.scannerName)) {
+      throw new UngatedScannerNotAllowedError(input.symbol, input.scannerName);
+    }
+
+    // 0b. BUY-only gate — ungated track trades equities long only.
     if (input.side !== 'BUY') throw new UngatedSellDirectionError(input.symbol);
 
     // 1. Symbol dedup — token-based, mirrors gated rule.

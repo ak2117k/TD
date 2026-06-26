@@ -10,7 +10,8 @@ export type UngatedRejectionReason =
   | 'sell-direction'
   | 'last-loss'
   | 'stale-entry'
-  | 'no-quote';
+  | 'no-quote'
+  | 'scanner-not-allowed';
 
 export interface UngatedRecordRejectionInput {
   alertId: string | null;

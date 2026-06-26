@@ -8,7 +8,7 @@ import { WatchService, WatchCapExceededError, TradeCooldownError } from '../../w
 import { formatTradeRejection } from '../../../common/utils/trade-rejection-log';
 import { isWithinEntryWindow } from '../../../common/utils/market-hours';
 import { evaluateTradePolicy } from '../../watch-monitor/services/trade-policy';
-import { UngatedWatchService, UngatedSymbolDupError, UngatedCooldownError, UngatedSellDirectionError, UngatedLastLossError, UngatedStaleEntryError, UngatedNoQuoteError } from '../../ungated-track/services/ungated-watch.service';
+import { UngatedWatchService, UngatedSymbolDupError, UngatedCooldownError, UngatedSellDirectionError, UngatedLastLossError, UngatedStaleEntryError, UngatedNoQuoteError, UngatedScannerNotAllowedError } from '../../ungated-track/services/ungated-watch.service';
 import { UngatedRejectionRepository, UngatedRejectionReason } from '../../ungated-track/repositories/ungated-rejection.repository';
 import {
   UngatedCapitalExhaustedError, UngatedPositionCapError, UngatedKillSwitchError,
@@ -462,6 +462,7 @@ export class ChartinkProcessService {
       initialPrice: hit.hitPrice,
       initialScore: scoringResult.score,
       initialBreakdown: { checks: scoringResult.checks, lotCount: scoringResult.lotCount } as any,
+      scannerName: scanName ?? null,
     }, hit.hitPrice);
 
     // (The Anand dual-track formerly ran here, after scoring; it now runs at
@@ -508,6 +509,7 @@ export class ChartinkProcessService {
   }
 
   private mapUngatedError(err: unknown): UngatedRejectionReason | null {
+    if (err instanceof UngatedScannerNotAllowedError) return 'scanner-not-allowed';
     if (err instanceof UngatedCapitalExhaustedError) return 'capital-exhausted';
     if (err instanceof UngatedPositionCapError) return 'position-cap';
     if (err instanceof UngatedSymbolDupError) return 'symbol-dup';

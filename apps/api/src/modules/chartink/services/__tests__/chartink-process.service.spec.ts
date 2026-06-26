@@ -9,7 +9,7 @@ import { AngelOneAdapterService } from '../../../market-data/services/angel-one-
 import { NseSectorIndexService } from '../../../market-data/services/nse-sector-index.service';
 import { WatchService, WatchCapExceededError } from '../../../watch-monitor/services/watch.service';
 import * as marketHours from '../../../../common/utils/market-hours';
-import { UngatedWatchService, UngatedSymbolDupError, UngatedCooldownError } from '../../../ungated-track/services/ungated-watch.service';
+import { UngatedWatchService, UngatedSymbolDupError, UngatedCooldownError, UngatedScannerNotAllowedError } from '../../../ungated-track/services/ungated-watch.service';
 import { UngatedRejectionRepository } from '../../../ungated-track/repositories/ungated-rejection.repository';
 import {
   UngatedCapitalExhaustedError, UngatedPositionCapError, UngatedKillSwitchError,
@@ -827,6 +827,29 @@ describe('ChartinkProcessService', () => {
 
       expect(ungatedRejections.record).toHaveBeenCalledWith(
         expect.objectContaining({ reason: 'capital-exhausted' }),
+      );
+    });
+
+    it('UngatedScannerNotAllowedError maps to a scanner-not-allowed rejection row', async () => {
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [] });
+      ungatedWatch.createFromAlert.mockRejectedValue(
+        new UngatedScannerNotAllowedError('RELIANCE', 'ANAND HIGH GAINER'),
+      );
+
+      await service.processOne('alert-ug-4', { symbol: 'RELIANCE', hitPrice: 2885 }, 'ANAND HIGH GAINER');
+
+      expect(ungatedRejections.record).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'scanner-not-allowed' }),
+      );
+    });
+
+    it('forwards the resolved scanName as scannerName into the ungated input', async () => {
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [] });
+
+      await service.processOne('alert-ug-5', { symbol: 'RELIANCE', hitPrice: 2885 }, 'Anand 100Hull >200 hull');
+
+      expect(ungatedWatch.createFromAlert).toHaveBeenCalledWith(
+        expect.objectContaining({ scannerName: 'Anand 100Hull >200 hull' }),
       );
     });
   });
