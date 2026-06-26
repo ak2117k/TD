@@ -33,6 +33,35 @@ const SEED_INSTRUMENTS = [
 ];
 
 async function main() {
+  // ---- TDA-001: multi-tenant foundation seed (idempotent) ----
+  console.log('Seeding multi-tenant foundation (ADMIN user + consent doc)...');
+
+  await prisma.user.upsert({
+    where: { id: 'usr_admin_seed_0001' },
+    update: {},
+    create: {
+      id: 'usr_admin_seed_0001',
+      email: 'admin@local',
+      passwordHash: '!UNSET-SET-IN-TDA-002',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+    },
+  });
+  console.log('  ✓ ADMIN user usr_admin_seed_0001');
+
+  await prisma.consentDocument.upsert({
+    where: { id: 'cdoc_seed_0001' },
+    update: {},
+    create: {
+      id: 'cdoc_seed_0001',
+      version: '2026-06-27.0-placeholder',
+      kind: 'risk-disclosure',
+      body: 'PLACEHOLDER - replaced in TDA-009',
+      contentHash: 'sha256:placeholder',
+    },
+  });
+  console.log('  ✓ Consent document cdoc_seed_0001');
+
   console.log('Seeding instruments...');
 
   for (const instrument of SEED_INSTRUMENTS) {

@@ -136,6 +136,8 @@ model Signal {
 
 model Trade {
   id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   instrumentId    String
   instrument      Instrument @relation(fields: [instrumentId], references: [id])
   signalId        String?
@@ -198,13 +200,14 @@ model Trade {
   @@index([vixRegimeAtEntry])
   @@index([exitReasonTag])
   @@index([source])
+  @@index([userId])
   // Journal/history list: WHERE status filtered, ORDER BY createdAt
   // (portfolio.repository.ts getTradeJournal/getRecentTrades + every
   // CLOSED/FILLED aggregate). Composite lets the DB satisfy filter+sort.
-  @@index([status, createdAt])
+  @@index([userId, status, createdAt])
   // Manual-trade page scoping: getOpenTrades(source) filters source + status
   // together (trade.repository.ts getOpenTrades source filter).
-  @@index([source, status])
+  @@index([userId, source, status])
   @@map("trades")
 }
 
@@ -301,6 +304,8 @@ model Zone {
 
 model DailyPerformance {
   id                  String   @id @default(cuid())
+  userId              String
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   date                DateTime @unique
   totalPnl            Float    @default(0)
   realizedPnl         Float    @default(0)
@@ -312,6 +317,7 @@ model DailyPerformance {
   capitalDeployed     Float    @default(0)
 
   @@index([date])
+  @@index([userId])
   @@map("daily_performance")
 }
 
@@ -343,6 +349,8 @@ model NewsArticle {
 
 model AITradeAnalysis {
   id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   tradeId       String
   analysis      String   // JSON: what went right/wrong
   suggestions   String   // JSON: improvement recommendations
@@ -351,11 +359,14 @@ model AITradeAnalysis {
   createdAt     DateTime @default(now())
 
   @@index([createdAt])
+  @@index([userId])
   @@map("ai_trade_analyses")
 }
 
 model AIWeeklyReport {
   id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   weekStart       DateTime
   weekEnd         DateTime
   summary         String
@@ -366,6 +377,7 @@ model AIWeeklyReport {
   createdAt       DateTime @default(now())
 
   @@index([weekStart])
+  @@index([userId])
   @@map("ai_weekly_reports")
 }
 
@@ -375,6 +387,8 @@ model AIWeeklyReport {
 
 model UserSettings {
   id                     String   @id @default(cuid())
+  userId                 String   @unique
+  user                   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   autoTradeMode          String   @default("OFF")
   paperTrading           Boolean  @default(true)
   maxDailyLoss           Float    @default(5000)
@@ -398,6 +412,8 @@ model UserSettings {
 
 model Alert {
   id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   instrumentId String?
   instrument   Instrument? @relation(fields: [instrumentId], references: [id])
   type         String   // price, oi_spike, news, pnl
@@ -408,7 +424,7 @@ model Alert {
   triggeredAt  DateTime?
   createdAt    DateTime @default(now())
 
-  @@index([isActive, type])
+  @@index([userId, isActive, type])
   @@map("alerts")
 }
 
@@ -462,13 +478,19 @@ model AIInsight {
 
 model BrokerCredential {
   id            String    @id @default(cuid())
-  broker        String    @unique @default("angel_one")
-  apiKey        String
-  clientId      String
-  password      String
-  totpSecret    String
+  userId        String    @unique
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  broker        String    @default("angel_one")
+  encApiKey     String
+  encApiSecret  String
+  encClientId   String
+  encPassword   String
+  encTotpSecret String
+  encDataKey    String
+  keyVersion    Int       @default(1)
   isActive      Boolean   @default(true)
   lastConnected DateTime?
+  lastValidated DateTime?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
@@ -1325,4 +1347,129 @@ model CautionarySymbol {
   @@unique([symbol, exchange])
   @@index([token])
   @@map("cautionary_symbols")
+}
+
+// ============================================
+// Multi-Tenant Foundation (TDA-001)
+// ============================================
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum UserStatus {
+  PENDING_VERIFICATION
+  ACTIVE
+  SUSPENDED
+  CLOSED
+}
+
+enum Segment {
+  INTRADAY
+  SWING
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  EXPIRED
+}
+
+model User {
+  id              String      @id @default(cuid())
+  email           String      @unique
+  passwordHash    String
+  role            UserRole    @default(USER)
+  status          UserStatus  @default(PENDING_VERIFICATION)
+  emailVerifiedAt DateTime?
+  displayName     String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  subscriptions     Subscription[]
+  brokerCredential  BrokerCredential?
+  autoTradeConsents AutoTradeConsent[]
+  consentRecords    ConsentRecord[]
+  trades            Trade[]
+  settings          UserSettings?
+  alerts            Alert[]
+  dailyPerformance  DailyPerformance[]
+  tradeAnalyses     AITradeAnalysis[]
+  weeklyReports     AIWeeklyReport[]
+  auditLogs         AuditLog[]
+  @@index([status])
+  @@map("users")
+}
+
+model Subscription {
+  id        String             @id @default(cuid())
+  userId    String
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  segment   Segment
+  status    SubscriptionStatus @default(ACTIVE)
+  startedAt DateTime           @default(now())
+  expiresAt DateTime?
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+  @@unique([userId, segment])
+  @@index([status, expiresAt])
+  @@map("subscriptions")
+}
+
+model AutoTradeConsent {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  segment      Segment
+  enabled      Boolean  @default(false)
+  killSwitch   Boolean  @default(false)
+  riskPerTrade Float?
+  maxCapital   Float?
+  enabledAt    DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  @@unique([userId, segment])
+  @@map("auto_trade_consents")
+}
+
+model ConsentDocument {
+  id          String   @id @default(cuid())
+  version     String   @unique
+  kind        String
+  body        String
+  contentHash String
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  records     ConsentRecord[]
+  @@map("consent_documents")
+}
+
+model ConsentRecord {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  documentId String
+  document   ConsentDocument @relation(fields: [documentId], references: [id])
+  version    String
+  acceptedAt DateTime @default(now())
+  ipAddress  String?
+  userAgent  String?
+  @@index([userId, version])
+  @@map("consent_records")
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String
+  target    String?
+  meta      Json?
+  prevHash  String?
+  hash      String
+  createdAt DateTime @default(now())
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_logs")
 }
