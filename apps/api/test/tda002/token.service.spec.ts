@@ -124,4 +124,40 @@ describe('TokenService (integration, td_saas_test)', () => {
   it('verifyAccess throws on a tampered/invalid access token', () => {
     expect(() => svc.verifyAccess('not.a.jwt')).toThrow();
   });
+
+  it('verifyAccess rejects a token signed with a different secret', () => {
+    const foreign = new JwtService({ secret: `${JWT_SECRET}-WRONG` });
+    const forged = foreign.sign(
+      { sub: user.id, role: user.role, email: user.email },
+      { algorithm: 'HS256', expiresIn: '15m' },
+    );
+    expect(() => svc.verifyAccess(forged)).toThrow();
+  });
+
+  it('concurrent double-rotate: exactly one succeeds and the family is fully revoked', async () => {
+    const { refreshToken } = await svc.issuePair(user, ctx);
+    const familyId = (await db.refreshToken.findUnique({
+      where: { tokenHash: sha256(refreshToken) },
+    }))!.familyId;
+
+    // Fire two rotations of the SAME token concurrently.
+    const results = await Promise.allSettled([
+      svc.rotate(refreshToken, ctx),
+      svc.rotate(refreshToken, ctx),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r) => r.status === 'rejected');
+    expect(fulfilled.length).toBe(1);
+    expect(rejected.length).toBe(1);
+
+    // The loser's reuse handling revokes the whole lineage; the rolled-back
+    // successor must not have leaked a live row either.
+    const familyRows = await db.refreshToken.findMany({ where: { familyId } });
+    expect(familyRows.every((r) => r.revokedAt !== null)).toBe(true);
+
+    // And the winner's freshly minted token is now revoked too -> cannot rotate.
+    const winner = fulfilled[0] as PromiseFulfilledResult<{ refreshToken: string }>;
+    await expect(svc.rotate(winner.value.refreshToken, ctx)).rejects.toThrow();
+  });
 });

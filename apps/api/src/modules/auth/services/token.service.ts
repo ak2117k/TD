@@ -1,12 +1,26 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { PrismaClient, RefreshToken } from '@prisma/client';
+import { Prisma, PrismaClient, RefreshToken } from '@prisma/client';
 import { createHash, randomBytes } from 'crypto';
 
 /** Access token TTL (short-lived, carried in memory by clients). */
 const ACCESS_TTL = '15m';
+/** Refresh token signing/verification algorithm (symmetric HMAC). */
+const JWT_ALGORITHM = 'HS256';
 /** Refresh token TTL: 30 days. */
 const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Internal sentinel: the guarded compare-and-set in `rotate` lost the race
+ * (the presented token was concurrently rotated or already revoked). Carries
+ * the familyId so the catch handler can revoke the whole lineage and roll the
+ * just-created successor back.
+ */
+class RotationConflictError extends Error {
+  constructor(readonly familyId: string) {
+    super('Refresh token rotation conflict');
+  }
+}
 
 export interface AccessTokenPayload {
   sub: string;
@@ -65,6 +79,7 @@ export class TokenService {
     return this.jwt.sign(payload, {
       secret: process.env.JWT_SECRET,
       expiresIn: ACCESS_TTL,
+      algorithm: JWT_ALGORITHM,
     });
   }
 
@@ -72,17 +87,24 @@ export class TokenService {
   verifyAccess(token: string): AccessTokenPayload {
     return this.jwt.verify<AccessTokenPayload>(token, {
       secret: process.env.JWT_SECRET,
+      algorithms: [JWT_ALGORITHM],
     });
   }
 
-  /** Create + persist a new refresh token row, returning the opaque token. */
+  /**
+   * Create + persist a new refresh token row, returning the opaque token.
+   *
+   * Accepts a Prisma client/transaction client so it can participate in the
+   * `rotate` transaction (PrismaClient is assignable to TransactionClient).
+   */
   private async createRefresh(
+    client: Prisma.TransactionClient,
     userId: string,
     familyId: string,
     ctx: TokenContext,
   ): Promise<{ opaque: string; row: RefreshToken }> {
     const opaque = randomBytes(32).toString('base64url');
-    const row = await this.prisma.refreshToken.create({
+    const row = await client.refreshToken.create({
       data: {
         userId,
         tokenHash: this.sha256(opaque),
@@ -101,7 +123,12 @@ export class TokenService {
    */
   async issuePair(user: AuthUser, ctx: TokenContext = {}): Promise<TokenPair> {
     const familyId = randomBytes(16).toString('hex');
-    const { opaque } = await this.createRefresh(user.id, familyId, ctx);
+    const { opaque } = await this.createRefresh(
+      this.prisma,
+      user.id,
+      familyId,
+      ctx,
+    );
     return { accessToken: this.signAccess(user), refreshToken: opaque };
   }
 
@@ -114,6 +141,14 @@ export class TokenService {
    * - otherwise                -> mint a successor in the SAME family, mark the
    *                               presented token revoked + replacedById, return
    *                               the new pair.
+   *
+   * The mint-successor + revoke-old pair runs inside a single `$transaction`
+   * with a guarded compare-and-set: the revoke is an `updateMany` scoped to
+   * `revokedAt: null`. If it matches 0 rows a concurrent rotation already
+   * consumed the token, so the transaction throws (rolling the just-created
+   * successor back) and the family is revoked — closing both the crash window
+   * and the concurrent double-rotate race that a bare `$transaction` (Read
+   * Committed) would leave open.
    */
   async rotate(refreshToken: string, ctx: TokenContext = {}): Promise<TokenPair> {
     const tokenHash = this.sha256(refreshToken);
@@ -142,15 +177,35 @@ export class TokenService {
       throw new UnauthorizedException('Invalid refresh token');
     }
 
-    const { opaque, row } = await this.createRefresh(
-      user.id,
-      existing.familyId,
-      ctx,
-    );
-    await this.prisma.refreshToken.update({
-      where: { id: existing.id },
-      data: { revokedAt: new Date(), replacedById: row.id },
-    });
+    let opaque: string;
+    try {
+      opaque = await this.prisma.$transaction(async (tx) => {
+        const created = await this.createRefresh(
+          tx,
+          user.id,
+          existing.familyId,
+          ctx,
+        );
+        // Guarded compare-and-set: only revoke if still live. Concurrent
+        // rotations / reuse race here; exactly one updateMany matches the row.
+        const revoked = await tx.refreshToken.updateMany({
+          where: { id: existing.id, revokedAt: null },
+          data: { revokedAt: new Date(), replacedById: created.row.id },
+        });
+        if (revoked.count !== 1) {
+          // Lost the race -> throw to roll back the successor we just created.
+          throw new RotationConflictError(existing.familyId);
+        }
+        return created.opaque;
+      });
+    } catch (err) {
+      if (err instanceof RotationConflictError) {
+        // Treat the concurrent rotation as a compromised lineage.
+        await this.revokeFamily(err.familyId);
+        throw new UnauthorizedException('Refresh token reuse detected');
+      }
+      throw err;
+    }
 
     return {
       accessToken: this.signAccess({
