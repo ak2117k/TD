@@ -1,9 +1,13 @@
 import { Module } from '@nestjs/common';
+import { APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bull';
 import { ScheduleModule } from '@nestjs/schedule';
+import { ClsModule } from 'nestjs-cls';
 import configuration from './config/configuration';
 import { PrismaModule } from './common/prisma/prisma.module';
+import { TenantModule } from './common/tenant/tenant.module';
+import { TenantContextInterceptor } from './common/tenant/tenant-context.interceptor';
 import { AuthModule } from './modules/auth/auth.module';
 import { MarketDataModule } from './modules/market-data/market-data.module';
 import { SettingsModule } from './modules/settings/settings.module';
@@ -50,6 +54,15 @@ import { SellFuturesModule } from './modules/sell-futures-track/sell-futures.mod
 
     // Cron / interval scheduling
     ScheduleModule.forRoot(),
+
+    // Request-scoped CLS store (TDA-003). Mounted as middleware so the store
+    // exists BEFORE guards run, letting the TenantContextInterceptor populate it
+    // from req.user after JwtAuthGuard authenticates the request.
+    ClsModule.forRoot({ middleware: { mount: true } }),
+
+    // Shared tenant context (TDA-003) — provides/exports TenantContextService
+    // for PrismaService and others to inject.
+    TenantModule,
 
     // Database
     PrismaModule,
@@ -121,6 +134,10 @@ import { SellFuturesModule } from './modules/sell-futures-track/sell-futures.mod
     // SELL-Futures Track — shorts the stock future on bearish signals (paper)
     SellFuturesModule,
   ],
-  providers: [],
+  providers: [
+    // Global tenant-context interceptor (TDA-003 §3). Runs after JwtAuthGuard,
+    // so req.user is available; copies { userId, role } into the CLS store.
+    { provide: APP_INTERCEPTOR, useClass: TenantContextInterceptor },
+  ],
 })
 export class AppModule {}
