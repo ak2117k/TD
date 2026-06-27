@@ -216,3 +216,13 @@ anywhere; TLS everywhere; tenant data isolation enforced structurally.
   "execution tool" positioning; the consent gate (TDA-009) is the first mitigation.
 - **Angel One ToS:** confirm third-party multi-user automation is permitted under SmartAPI terms.
 - **Liability:** disclaimer wording to be reviewed by legal before public launch (Harden phase).
+
+---
+
+## 8. Carried-forward follow-ups (from completed sprints)
+
+**From TDA-002 (auth) — final whole-branch review, non-blocking:**
+- `POST /auth/resend-verification` — specced (§5/§7) but not implemented; an unverified user who loses the email is currently stuck. Small follow-up — implement a throttled public endpoint that re-mints an EMAIL_VERIFY token for a PENDING user (generic response).
+- **Per-account rate limiting + durable throttler storage** — login/forgot are currently per-IP and in-memory only. Add a per-account limiter (keyed on normalized email) and move throttler storage to **Redis** so limits hold across API replicas. Folds into **TDA-004** (infra/secrets) since it needs Redis.
+- Minor hardening for TDA-004/005: password strength check in `PasswordService`; pin `algorithms:['HS256']` in `loginMfa`; boot-time assertion that `JWT_SECRET`/`ENCRYPTION_KEY` are set; optional `AUTH_EMAIL_VERIFIED` audit row; DRY the duplicated `sha256`/`audit` helpers.
+- TOTP replay-within-window protection (record consumed step) — TDA-005.
