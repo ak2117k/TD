@@ -6,4 +6,6 @@ export {
   MfaCodeDto,
   MfaDisableDto,
   LoginMfaDto,
+  ForgotPasswordDto,
+  ResetPasswordDto,
 } from './auth.dto';

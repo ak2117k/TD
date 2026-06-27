@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { JwtModule, JwtService } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { AuthController } from './controllers/auth.controller';
@@ -29,6 +30,12 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     PrismaModule,
     PassportModule,
     JwtModule.register({ secret: process.env.JWT_SECRET }),
+    // Brute-force defence for the sensitive auth routes (spec §7). The default
+    // (named) throttler: 10 requests / 60s window, applied per-handler via
+    // `@UseGuards(ThrottlerGuard)` + `@Throttle` on the controller — NOT as a
+    // global guard — so the global `JwtAuthGuard` keeps governing every other
+    // route untouched.
+    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 10 }]),
   ],
   controllers: [AuthController],
   providers: [

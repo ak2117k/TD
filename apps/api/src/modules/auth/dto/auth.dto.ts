@@ -52,6 +52,27 @@ export class RefreshDto {
   refreshToken!: string;
 }
 
+/** Request a password-reset link for an email address (non-enumerating). */
+export class ForgotPasswordDto {
+  @ApiProperty({ example: 'trader@example.com' })
+  @IsEmail()
+  email!: string;
+}
+
+/** Complete a password reset: the emailed token + the new password. */
+export class ResetPasswordDto {
+  @ApiProperty()
+  @IsString()
+  @IsNotEmpty()
+  token!: string;
+
+  @ApiProperty({ minLength: 8, maxLength: 128 })
+  @IsString()
+  @MinLength(8, { message: 'password must be at least 8 characters' })
+  @MaxLength(128, { message: 'password must be at most 128 characters' })
+  password!: string;
+}
+
 /** A 6-digit TOTP code (used by MFA activate). */
 export class MfaCodeDto {
   @ApiProperty({ example: '123456', description: '6-digit TOTP code' })

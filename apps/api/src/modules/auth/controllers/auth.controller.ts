@@ -6,23 +6,35 @@ import {
   HttpStatus,
   Post,
   Req,
+  UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { Request } from 'express';
 import { CurrentUser, Public } from '../../../common/decorators';
 import type { AuthenticatedUser } from '../../../common/decorators';
 import {
+  ForgotPasswordDto,
   LoginDto,
   LoginMfaDto,
   MfaCodeDto,
   MfaDisableDto,
   RefreshDto,
+  ResetPasswordDto,
   SignupDto,
   VerifyEmailDto,
 } from '../dto';
 import { AuthService } from '../services/auth.service';
 import { MfaService } from '../services/mfa.service';
 import { TokenContext } from '../services/token.service';
+
+/**
+ * Brute-force defence for the sensitive auth routes (spec §7): 10 requests per
+ * 60s window, keyed per-IP by the {@link ThrottlerGuard}. Applied per-handler
+ * (login, login/mfa, password/forgot) so the global `JwtAuthGuard` still governs
+ * the protected routes unchanged. Exceeding the window yields HTTP 429.
+ */
+const AUTH_THROTTLE = { limit: 10, ttl: 60_000 };
 
 @ApiTags('Auth')
 @Controller('auth')
@@ -55,6 +67,8 @@ export class AuthController {
   }
 
   @Public()
+  @Throttle({ default: AUTH_THROTTLE })
+  @UseGuards(ThrottlerGuard)
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Authenticate and receive an access + refresh pair' })
@@ -63,11 +77,29 @@ export class AuthController {
   }
 
   @Public()
+  @Throttle({ default: AUTH_THROTTLE })
+  @UseGuards(ThrottlerGuard)
   @Post('login/mfa')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Complete the login MFA challenge and receive tokens' })
   loginMfa(@Body() dto: LoginMfaDto, @Req() req: Request) {
     return this.auth.loginMfa(dto.mfaToken, dto.code, this.ctx(req));
+  }
+
+  @Public()
+  @Throttle({ default: AUTH_THROTTLE })
+  @UseGuards(ThrottlerGuard)
+  @Post('password/forgot')
+  @ApiOperation({ summary: 'Request a password-reset link (always 200; no enumeration)' })
+  forgotPassword(@Body() dto: ForgotPasswordDto) {
+    return this.auth.forgotPassword(dto.email);
+  }
+
+  @Public()
+  @Post('password/reset')
+  @ApiOperation({ summary: 'Reset the password and revoke all refresh tokens' })
+  resetPassword(@Body() dto: ResetPasswordDto) {
+    return this.auth.resetPassword(dto.token, dto.password);
   }
 
   @Public()

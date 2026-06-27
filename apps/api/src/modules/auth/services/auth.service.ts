@@ -21,6 +21,16 @@ import {
 /** Email-verification token lifetime: 24h. */
 const EMAIL_VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
 
+/** Password-reset token lifetime: 1h (short by design). */
+const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * Generic, non-enumerating forgot-password response. Returned with the same
+ * status + body whether or not the email belongs to a registered user.
+ */
+const FORGOT_PASSWORD_MESSAGE =
+  'If that email address is registered, a password reset link has been sent.';
+
 /** Lifetime of the short-lived JWT issued for the login MFA challenge. */
 const MFA_TOKEN_TTL = '5m';
 
@@ -79,6 +89,15 @@ interface SignupResult {
   verificationToken?: string;
 }
 
+interface ForgotPasswordResult {
+  message: string;
+  /**
+   * Test-only seam (NODE_ENV=test, real user only): the raw PASSWORD_RESET
+   * token. Production never returns it — it is delivered solely by email.
+   */
+  resetToken?: string;
+}
+
 /**
  * Orchestrates the auth core flows: signup + email verification, password login,
  * refresh-token rotation, logout, and the `/me` profile. Token mechanics live in
@@ -129,6 +148,11 @@ export class AuthService {
   private verifyUrl(rawToken: string): string {
     const base = process.env.APP_BASE_URL ?? 'http://localhost:4000';
     return `${base.replace(/\/$/, '')}/verify-email?token=${rawToken}`;
+  }
+
+  private resetUrl(rawToken: string): string {
+    const base = process.env.APP_BASE_URL ?? 'http://localhost:4000';
+    return `${base.replace(/\/$/, '')}/reset-password?token=${rawToken}`;
   }
 
   /**
@@ -204,6 +228,81 @@ export class AuthService {
     ]);
 
     return { message: 'Email verified. You can now sign in.' };
+  }
+
+  /**
+   * Begin a password reset. ALWAYS returns the same generic message regardless
+   * of whether the email is registered (no user enumeration). When the user
+   * exists, mint a PASSWORD_RESET token (only the sha256 is persisted) and email
+   * the opaque token as a link. Auditing/email happen only for a real user; the
+   * outward response is identical either way.
+   */
+  async forgotPassword(rawEmail: string): Promise<ForgotPasswordResult> {
+    const email = rawEmail.toLowerCase().trim();
+    const user = await this.prisma.user.findUnique({ where: { email } });
+    const result: ForgotPasswordResult = { message: FORGOT_PASSWORD_MESSAGE };
+    if (!user) {
+      return result;
+    }
+
+    const rawToken = randomBytes(32).toString('base64url');
+    await this.prisma.verificationToken.create({
+      data: {
+        userId: user.id,
+        type: 'PASSWORD_RESET',
+        tokenHash: this.sha256(rawToken),
+        expiresAt: new Date(Date.now() + PASSWORD_RESET_TTL_MS),
+      },
+    });
+
+    await this.email.sendPasswordReset(email, this.resetUrl(rawToken));
+    await this.audit('AUTH_PASSWORD_FORGOT', user.id, email);
+
+    if (process.env.NODE_ENV === 'test') {
+      result.resetToken = rawToken;
+    }
+    return result;
+  }
+
+  /**
+   * Complete a password reset. Validate an unexpired, unused PASSWORD_RESET
+   * token, set a fresh argon2 hash, consume the token, and **revoke every live
+   * refresh token** for the user so all existing sessions die.
+   */
+  async resetPassword(
+    token: string,
+    newPassword: string,
+  ): Promise<{ message: string }> {
+    const record = await this.prisma.verificationToken.findUnique({
+      where: { tokenHash: this.sha256(token) },
+    });
+    if (
+      !record ||
+      record.type !== 'PASSWORD_RESET' ||
+      record.usedAt ||
+      record.expiresAt.getTime() < Date.now()
+    ) {
+      throw new UnauthorizedException('Invalid or expired reset token');
+    }
+
+    const passwordHash = await this.passwords.hash(newPassword);
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: record.userId },
+        data: { passwordHash },
+      }),
+      this.prisma.verificationToken.update({
+        where: { id: record.id },
+        data: { usedAt: new Date() },
+      }),
+      this.prisma.refreshToken.updateMany({
+        where: { userId: record.userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
+
+    await this.audit('AUTH_PASSWORD_RESET', record.userId, null);
+    return { message: 'Password updated. Please sign in with your new password.' };
   }
 
   /**
