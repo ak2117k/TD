@@ -4,6 +4,7 @@ import { BullModule } from '@nestjs/bull';
 import { ScheduleModule } from '@nestjs/schedule';
 import configuration from './config/configuration';
 import { PrismaModule } from './common/prisma/prisma.module';
+import { AuthModule } from './modules/auth/auth.module';
 import { MarketDataModule } from './modules/market-data/market-data.module';
 import { SettingsModule } from './modules/settings/settings.module';
 import { AlertsModule } from './modules/alerts/alerts.module';
@@ -52,6 +53,9 @@ import { SellFuturesModule } from './modules/sell-futures-track/sell-futures.mod
 
     // Database
     PrismaModule,
+
+    // Authentication — signup/verify/login/refresh/logout + global JwtAuthGuard
+    AuthModule,
 
     // Market data — live feeds, candles, OI, instruments
     MarketDataModule,
