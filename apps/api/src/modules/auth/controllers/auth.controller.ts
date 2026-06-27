@@ -90,6 +90,7 @@ export class AuthController {
   @Throttle({ default: AUTH_THROTTLE })
   @UseGuards(ThrottlerGuard)
   @Post('password/forgot')
+  @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Request a password-reset link (always 200; no enumeration)' })
   forgotPassword(@Body() dto: ForgotPasswordDto) {
     return this.auth.forgotPassword(dto.email);
@@ -97,6 +98,7 @@ export class AuthController {
 
   @Public()
   @Post('password/reset')
+  @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Reset the password and revoke all refresh tokens' })
   resetPassword(@Body() dto: ResetPasswordDto) {
     return this.auth.resetPassword(dto.token, dto.password);

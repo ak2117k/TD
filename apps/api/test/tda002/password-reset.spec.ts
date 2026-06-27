@@ -108,7 +108,7 @@ describe('Password reset + rate limiting (integration, td_saas_test)', () => {
 
   it('forgot-password returns 200 + a generic body for a KNOWN email', async () => {
     const res = await call('POST', '/auth/password/forgot', { body: { email } });
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(200);
     expect(typeof res.body.message).toBe('string');
     // test-only seam exposes the raw token for a real user
     expect(typeof res.body.resetToken).toBe('string');
@@ -139,7 +139,7 @@ describe('Password reset + rate limiting (integration, td_saas_test)', () => {
     const res = await call('POST', '/auth/password/reset', {
       body: { token: resetToken, password: newPassword },
     });
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(200);
 
     // old refresh token is now dead (all sessions revoked)
     const reuse = await call('POST', '/auth/refresh', {
