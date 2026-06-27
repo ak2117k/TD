@@ -25,6 +25,7 @@ import { AdaptiveStopPage } from '@/pages/adaptive-stop/AdaptiveStopPage';
 import IntradayPage from '@/pages/intraday/IntradayPage';
 import SwingPage from '@/pages/swing/SwingPage';
 import BreakoutSwingPage from '@/pages/breakout-swing/BreakoutSwingPage';
+import { SellFuturesPage } from '@/pages/sell-futures/SellFuturesPage';
 import ReinvestPage from '@/pages/reinvest/ReinvestPage';
 
 export default function App() {
@@ -54,6 +55,7 @@ export default function App() {
         <Route path="intraday" element={<IntradayPage />} />
         <Route path="swing" element={<SwingPage />} />
         <Route path="breakout-swing" element={<BreakoutSwingPage />} />
+        <Route path="sell-futures" element={<SellFuturesPage />} />
         <Route path="reinvest" element={<ReinvestPage />} />
         <Route path="auto-trade" element={<AutoTradePage />} />
         <Route path="manual-trade" element={<ManualTradePage />} />
