@@ -8,6 +8,7 @@ import { AuthController } from './controllers/auth.controller';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { AuthService } from './services/auth.service';
 import { EmailService } from './services/email/email.service';
+import { MfaService } from './services/mfa.service';
 import { PasswordService } from './services/password.service';
 import { TokenService } from './services/token.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
@@ -33,6 +34,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
   providers: [
     AuthService,
     PasswordService,
+    MfaService,
     JwtStrategy,
     // EmailService's constructor takes an OPTIONAL transport (an interface with
     // no DI token), so build it via a factory to let it self-select by env.
@@ -45,6 +47,6 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
   ],
-  exports: [AuthService, TokenService, PasswordService],
+  exports: [AuthService, TokenService, PasswordService, MfaService],
 })
 export class AuthModule {}

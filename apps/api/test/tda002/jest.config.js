@@ -18,7 +18,17 @@ module.exports = {
   moduleFileExtensions: ['js', 'json', 'ts'],
   testRegex: '.*\\.spec\\.ts$',
   transform: {
-    '^.+\\.(t|j)s$': ['ts-jest', { isolatedModules: true }],
+    // allowJs lets ts-jest down-level the ESM-only deps below to CommonJS.
+    '^.+\\.(t|j)s$': [
+      'ts-jest',
+      { isolatedModules: true, tsconfig: { allowJs: true } },
+    ],
   },
+  // otplib v13 transitively loads ESM-only packages (@scure/base, @noble/hashes)
+  // even from its CJS build. Un-ignore them (and otplib/@otplib) so ts-jest
+  // transforms their ESM `export` syntax into CommonJS the way Jest expects.
+  transformIgnorePatterns: [
+    '/node_modules/\\.pnpm/(?!(@scure\\+base|@noble\\+hashes|@otplib\\+|otplib@))',
+  ],
   testEnvironment: 'node',
 };

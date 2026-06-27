@@ -3,11 +3,13 @@ import {
   Logger,
   UnauthorizedException,
 } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
 import { Prisma } from '@prisma/client';
 import { createHash, randomBytes } from 'crypto';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { LoginDto, SignupDto } from '../dto';
 import { EmailService } from './email/email.service';
+import { MfaService } from './mfa.service';
 import { PasswordService } from './password.service';
 import {
   RefreshReuseError,
@@ -18,6 +20,31 @@ import {
 
 /** Email-verification token lifetime: 24h. */
 const EMAIL_VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** Lifetime of the short-lived JWT issued for the login MFA challenge. */
+const MFA_TOKEN_TTL = '5m';
+
+/** Purpose claim that scopes the MFA-challenge JWT to `/auth/login/mfa` only. */
+const MFA_TOKEN_PURPOSE = 'mfa';
+
+/**
+ * Returned by {@link AuthService.login} when the account has MFA enabled: the
+ * caller must complete the challenge at `/auth/login/mfa` with `mfaToken` plus a
+ * current TOTP code. No session tokens are issued until the code is verified.
+ */
+export interface MfaChallenge {
+  mfaRequired: true;
+  mfaToken: string;
+}
+
+/** Either a full session (password OK, no MFA) or an MFA challenge. */
+export type LoginResult = TokenPair | MfaChallenge;
+
+/** Claims carried by the short-lived MFA-challenge token. */
+interface MfaTokenClaims {
+  sub: string;
+  purpose: string;
+}
 
 /**
  * A real argon2id PHC hash (of a throw-away string) used to equalise login
@@ -60,6 +87,8 @@ export class AuthService {
     private readonly passwords: PasswordService,
     private readonly tokens: TokenService,
     private readonly email: EmailService,
+    private readonly mfa: MfaService,
+    private readonly jwt: JwtService,
   ) {}
 
   private sha256(value: string): string {
@@ -171,10 +200,12 @@ export class AuthService {
 
   /**
    * Password login. Generic failure (no "wrong password" vs "no user"
-   * distinction). Requires an ACTIVE, email-verified account. MFA is wired in
-   * Task 5; for now an MFA-enabled user still receives tokens.
+   * distinction). Requires an ACTIVE, email-verified account. When the account
+   * has MFA enabled, a correct password yields an {@link MfaChallenge} (a
+   * short-lived `mfaToken`) instead of session tokens — the caller must finish
+   * at `/auth/login/mfa`.
    */
-  async login(dto: LoginDto, ctx: TokenContext): Promise<TokenPair> {
+  async login(dto: LoginDto, ctx: TokenContext): Promise<LoginResult> {
     const email = dto.email.toLowerCase().trim();
     const user = await this.prisma.user.findUnique({ where: { email } });
 
@@ -196,9 +227,67 @@ export class AuthService {
       throw new UnauthorizedException('Account is not active or not verified');
     }
 
-    // TODO(TDA-002 Task 5): when user.mfaEnabled, return { mfaRequired, mfaToken }
-    // instead of a token pair and complete the challenge in /auth/login/mfa.
+    // MFA gate: a correct password is necessary but not sufficient. Issue a
+    // short-lived, purpose-scoped JWT and defer session tokens until the TOTP
+    // code is verified at /auth/login/mfa.
+    if (user.mfaEnabled) {
+      const claims: MfaTokenClaims = {
+        sub: user.id,
+        purpose: MFA_TOKEN_PURPOSE,
+      };
+      const mfaToken = this.jwt.sign(claims, {
+        secret: process.env.JWT_SECRET,
+        expiresIn: MFA_TOKEN_TTL,
+      });
+      await this.audit('AUTH_MFA_CHALLENGE', user.id, email);
+      return { mfaRequired: true, mfaToken };
+    }
 
+    return this.issueSession(user, email, ctx);
+  }
+
+  /**
+   * Complete the login MFA challenge: validate the short-lived `mfaToken`
+   * (purpose-scoped), verify the TOTP `code`, then issue the real session pair.
+   */
+  async loginMfa(
+    mfaToken: string,
+    code: string,
+    ctx: TokenContext,
+  ): Promise<TokenPair> {
+    let claims: MfaTokenClaims;
+    try {
+      claims = this.jwt.verify<MfaTokenClaims>(mfaToken, {
+        secret: process.env.JWT_SECRET,
+      });
+    } catch {
+      throw new UnauthorizedException('Invalid or expired MFA token');
+    }
+    if (claims.purpose !== MFA_TOKEN_PURPOSE || !claims.sub) {
+      throw new UnauthorizedException('Invalid MFA token');
+    }
+
+    const codeOk = await this.mfa.verify(claims.sub, code);
+    if (!codeOk) {
+      await this.audit('AUTH_MFA_FAILED', claims.sub, null, { stage: 'login' });
+      throw new UnauthorizedException('Invalid MFA code');
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: claims.sub },
+    });
+    if (!user || user.status !== 'ACTIVE') {
+      throw new UnauthorizedException('Account is not active');
+    }
+    return this.issueSession(user, user.email, ctx);
+  }
+
+  /** Mint the access+refresh pair, stamp `lastLoginAt`, and audit AUTH_LOGIN. */
+  private async issueSession(
+    user: { id: string; role: string; email: string },
+    email: string,
+    ctx: TokenContext,
+  ): Promise<TokenPair> {
     const pair = await this.tokens.issuePair(
       { id: user.id, role: user.role, email: user.email },
       ctx,

@@ -1,1 +1,8 @@
-export { SignupDto, VerifyEmailDto, LoginDto, RefreshDto } from './auth.dto';
+export {
+  SignupDto,
+  VerifyEmailDto,
+  LoginDto,
+  RefreshDto,
+  MfaCodeDto,
+  LoginMfaDto,
+} from './auth.dto';

@@ -11,14 +11,25 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Request } from 'express';
 import { CurrentUser, Public } from '../../../common/decorators';
 import type { AuthenticatedUser } from '../../../common/decorators';
-import { LoginDto, RefreshDto, SignupDto, VerifyEmailDto } from '../dto';
+import {
+  LoginDto,
+  LoginMfaDto,
+  MfaCodeDto,
+  RefreshDto,
+  SignupDto,
+  VerifyEmailDto,
+} from '../dto';
 import { AuthService } from '../services/auth.service';
+import { MfaService } from '../services/mfa.service';
 import { TokenContext } from '../services/token.service';
 
 @ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly auth: AuthService) {}
+  constructor(
+    private readonly auth: AuthService,
+    private readonly mfa: MfaService,
+  ) {}
 
   private ctx(req: Request): TokenContext {
     return {
@@ -51,11 +62,51 @@ export class AuthController {
   }
 
   @Public()
+  @Post('login/mfa')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Complete the login MFA challenge and receive tokens' })
+  loginMfa(@Body() dto: LoginMfaDto, @Req() req: Request) {
+    return this.auth.loginMfa(dto.mfaToken, dto.code, this.ctx(req));
+  }
+
+  @Public()
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Rotate a refresh token for a new pair' })
   refresh(@Body() dto: RefreshDto, @Req() req: Request) {
     return this.auth.refresh(dto.refreshToken, this.ctx(req));
+  }
+
+  @ApiBearerAuth()
+  @Post('mfa/enroll')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Start TOTP enrolment (returns otpauth URI + secret)' })
+  mfaEnroll(@CurrentUser() user: AuthenticatedUser) {
+    return this.mfa.enroll(user.userId);
+  }
+
+  @ApiBearerAuth()
+  @Post('mfa/activate')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Verify a code to activate MFA' })
+  async mfaActivate(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: MfaCodeDto,
+  ) {
+    await this.mfa.activate(user.userId, dto.code);
+    return { message: 'MFA enabled.' };
+  }
+
+  @ApiBearerAuth()
+  @Post('mfa/disable')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Verify a code to disable MFA' })
+  async mfaDisable(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: MfaCodeDto,
+  ) {
+    await this.mfa.disable(user.userId, dto.code);
+    return { message: 'MFA disabled.' };
   }
 
   @ApiBearerAuth()
