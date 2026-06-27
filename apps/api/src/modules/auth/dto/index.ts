@@ -4,5 +4,6 @@ export {
   LoginDto,
   RefreshDto,
   MfaCodeDto,
+  MfaDisableDto,
   LoginMfaDto,
 } from './auth.dto';

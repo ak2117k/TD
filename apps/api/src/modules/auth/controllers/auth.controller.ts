@@ -15,6 +15,7 @@ import {
   LoginDto,
   LoginMfaDto,
   MfaCodeDto,
+  MfaDisableDto,
   RefreshDto,
   SignupDto,
   VerifyEmailDto,
@@ -103,9 +104,9 @@ export class AuthController {
   @ApiOperation({ summary: 'Verify a code to disable MFA' })
   async mfaDisable(
     @CurrentUser() user: AuthenticatedUser,
-    @Body() dto: MfaCodeDto,
+    @Body() dto: MfaDisableDto,
   ) {
-    await this.mfa.disable(user.userId, dto.code);
+    await this.mfa.disable(user.userId, dto.password, dto.code);
     return { message: 'MFA disabled.' };
   }
 

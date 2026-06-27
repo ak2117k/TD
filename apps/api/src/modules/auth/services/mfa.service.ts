@@ -1,16 +1,18 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { generate, generateSecret, generateURI, verify } from 'otplib';
+import { generateSecret, generateURI, verify } from 'otplib';
 import {
   decryptField,
   encryptField,
 } from '../../../common/crypto/field-crypto';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { PasswordService } from './password.service';
 
 /** Issuer label shown in authenticator apps (otpauth URI). */
 const TOTP_ISSUER = 'TD Automation';
@@ -50,7 +52,10 @@ export interface MfaEnrollment {
 export class MfaService {
   private readonly logger = new Logger(MfaService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly passwords: PasswordService,
+  ) {}
 
   private async audit(
     action: string,
@@ -85,13 +90,20 @@ export class MfaService {
   /**
    * Begin TOTP enrolment: generate a fresh base32 secret, persist it ENCRYPTED
    * as a pending value (leaving `mfaEnabled=false`), and return the raw secret +
-   * otpauth URI for the client to scan ONCE. Re-enrolling overwrites any pending
-   * secret and forces re-activation.
+   * otpauth URI for the client to scan ONCE.
+   *
+   * If MFA is ALREADY enabled, enrolment is REFUSED (409): otherwise a
+   * password-only attacker (or a stray re-enroll) could overwrite the active
+   * secret and reset `mfaEnabled=false`, silently disabling the victim's second
+   * factor. The user must `disable` (password + code) before re-enrolling.
    */
   async enroll(userId: string): Promise<MfaEnrollment> {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) {
       throw new UnauthorizedException('User no longer exists');
+    }
+    if (user.mfaEnabled) {
+      throw new ConflictException('MFA already enabled; disable it first');
     }
 
     const secret = generateSecret();
@@ -147,19 +159,21 @@ export class MfaService {
   }
 
   /**
-   * Disable MFA: require a CURRENT valid code, then clear `mfaEnabled` and wipe
-   * the stored secret. Throws on a missing enrolment or bad code.
+   * Disable MFA: require BOTH the account password AND a current valid TOTP code
+   * (spec §5) before clearing `mfaEnabled` and wiping the stored secret. Throws
+   * on a missing enrolment, wrong password, or bad code.
    */
-  async disable(userId: string, code: string): Promise<void> {
+  async disable(userId: string, password: string, code: string): Promise<void> {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user?.mfaSecretEnc) {
       throw new BadRequestException('MFA is not enabled');
     }
 
-    const ok = await this.checkCode(decryptField(user.mfaSecretEnc), code);
-    if (!ok) {
+    const passwordOk = await this.passwords.verify(user.passwordHash, password);
+    const codeOk = await this.checkCode(decryptField(user.mfaSecretEnc), code);
+    if (!passwordOk || !codeOk) {
       await this.audit('AUTH_MFA_FAILED', userId, { stage: 'disable' });
-      throw new UnauthorizedException('Invalid MFA code');
+      throw new UnauthorizedException('Invalid password or MFA code');
     }
 
     await this.prisma.user.update({

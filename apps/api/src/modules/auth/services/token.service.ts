@@ -7,6 +7,14 @@ import { createHash, randomBytes } from 'crypto';
 const ACCESS_TTL = '15m';
 /** Refresh token signing/verification algorithm (symmetric HMAC). */
 const JWT_ALGORITHM = 'HS256';
+/**
+ * Audience claim scoping a token to the session/access path. Because access
+ * tokens and the short-lived MFA-challenge token are both HS256-signed with the
+ * same `JWT_SECRET`, they MUST be distinguished by audience: the global guard's
+ * passport-jwt strategy requires `td-access`, so an `td-mfa` challenge token can
+ * never be replayed as a Bearer access token (and vice-versa).
+ */
+export const ACCESS_TOKEN_AUDIENCE = 'td-access';
 /** Refresh token TTL: 30 days. */
 const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -93,14 +101,16 @@ export class TokenService {
       secret: process.env.JWT_SECRET,
       expiresIn: ACCESS_TTL,
       algorithm: JWT_ALGORITHM,
+      audience: ACCESS_TOKEN_AUDIENCE,
     });
   }
 
-  /** Verify and decode an access token. Throws if invalid/expired. */
+  /** Verify and decode an access token. Throws if invalid/expired/wrong aud. */
   verifyAccess(token: string): AccessTokenPayload {
     return this.jwt.verify<AccessTokenPayload>(token, {
       secret: process.env.JWT_SECRET,
       algorithms: [JWT_ALGORITHM],
+      audience: ACCESS_TOKEN_AUDIENCE,
     });
   }
 

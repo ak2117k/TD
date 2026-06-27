@@ -52,8 +52,21 @@ export class RefreshDto {
   refreshToken!: string;
 }
 
-/** A 6-digit TOTP code (used by MFA activate/disable). */
+/** A 6-digit TOTP code (used by MFA activate). */
 export class MfaCodeDto {
+  @ApiProperty({ example: '123456', description: '6-digit TOTP code' })
+  @IsString()
+  @Matches(/^\d{6}$/, { message: 'code must be a 6-digit string' })
+  code!: string;
+}
+
+/** Disable MFA: requires BOTH the account password and a current TOTP code. */
+export class MfaDisableDto {
+  @ApiProperty()
+  @IsString()
+  @IsNotEmpty()
+  password!: string;
+
   @ApiProperty({ example: '123456', description: '6-digit TOTP code' })
   @IsString()
   @Matches(/^\d{6}$/, { message: 'code must be a 6-digit string' })

@@ -136,6 +136,16 @@ describe('MFA (integration, td_saas_test)', () => {
     expect(res.status).toBe(401);
   });
 
+  it('enroll on an already-MFA-enabled account is rejected and changes nothing', async () => {
+    const before = await db.user.findUnique({ where: { email } });
+    const res = await call('POST', '/auth/mfa/enroll', { token: accessToken });
+    expect(res.status).toBe(409);
+    const after = await db.user.findUnique({ where: { email } });
+    // The active second factor must be untouched (no silent disable).
+    expect(after!.mfaEnabled).toBe(true);
+    expect(after!.mfaSecretEnc).toBe(before!.mfaSecretEnc);
+  });
+
   it('login for an MFA user returns { mfaRequired, mfaToken } — NOT session tokens', async () => {
     const res = await call('POST', '/auth/login', { body: { email, password } });
     expect(res.status).toBe(200);
@@ -149,6 +159,19 @@ describe('MFA (integration, td_saas_test)', () => {
       where: { userId: user!.id, action: 'AUTH_MFA_CHALLENGE' },
     });
     expect(audit).not.toBeNull();
+  });
+
+  it('the mfaToken is REJECTED as a Bearer access token on protected routes', async () => {
+    // Second-factor bypass guard: the mfaToken is HS256-signed with the same
+    // JWT_SECRET as access tokens, so without an audience/role check it would
+    // sail through the global guard. It must be rejected (different audience,
+    // and it carries no role/email).
+    const login = await call('POST', '/auth/login', { body: { email, password } });
+    const mfaToken = login.body.mfaToken as string;
+    expect(typeof mfaToken).toBe('string');
+
+    const res = await call('GET', '/auth/me', { token: mfaToken });
+    expect(res.status).toBe(401);
   });
 
   it('/auth/login/mfa with an invalid code is rejected', async () => {
@@ -170,11 +193,30 @@ describe('MFA (integration, td_saas_test)', () => {
     expect(typeof res.body.refreshToken).toBe('string');
   });
 
-  it('disable with a valid code turns MFA off; login then returns tokens directly', async () => {
+  it('disable with a valid code but wrong/missing password is rejected', async () => {
+    const code = await generate({ secret });
+    // Wrong password (valid code) -> rejected.
+    const wrong = await call('POST', '/auth/mfa/disable', {
+      token: accessToken,
+      body: { password: 'not-the-password', code },
+    });
+    expect(wrong.status).toBe(401);
+    // Missing password fails DTO validation -> 400.
+    const missing = await call('POST', '/auth/mfa/disable', {
+      token: accessToken,
+      body: { code },
+    });
+    expect(missing.status).toBe(400);
+    // MFA must still be on.
+    const user = await db.user.findUnique({ where: { email } });
+    expect(user!.mfaEnabled).toBe(true);
+  });
+
+  it('disable with password + valid code turns MFA off; login then returns tokens directly', async () => {
     const code = await generate({ secret });
     const res = await call('POST', '/auth/mfa/disable', {
       token: accessToken,
-      body: { code },
+      body: { password, code },
     });
     expect(res.status).toBe(200);
 

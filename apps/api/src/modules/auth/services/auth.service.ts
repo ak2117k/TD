@@ -28,6 +28,14 @@ const MFA_TOKEN_TTL = '5m';
 const MFA_TOKEN_PURPOSE = 'mfa';
 
 /**
+ * Audience claim isolating the MFA-challenge token from session access tokens
+ * (which use `td-access`). The global guard's JWT strategy requires `td-access`,
+ * so this token can never be replayed as a Bearer access token — and `loginMfa`
+ * only accepts a token bearing THIS audience.
+ */
+const MFA_TOKEN_AUDIENCE = 'td-mfa';
+
+/**
  * Returned by {@link AuthService.login} when the account has MFA enabled: the
  * caller must complete the challenge at `/auth/login/mfa` with `mfaToken` plus a
  * current TOTP code. No session tokens are issued until the code is verified.
@@ -238,6 +246,7 @@ export class AuthService {
       const mfaToken = this.jwt.sign(claims, {
         secret: process.env.JWT_SECRET,
         expiresIn: MFA_TOKEN_TTL,
+        audience: MFA_TOKEN_AUDIENCE,
       });
       await this.audit('AUTH_MFA_CHALLENGE', user.id, email);
       return { mfaRequired: true, mfaToken };
@@ -259,6 +268,7 @@ export class AuthService {
     try {
       claims = this.jwt.verify<MfaTokenClaims>(mfaToken, {
         secret: process.env.JWT_SECRET,
+        audience: MFA_TOKEN_AUDIENCE,
       });
     } catch {
       throw new UnauthorizedException('Invalid or expired MFA token');
