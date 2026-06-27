@@ -22,6 +22,19 @@ class RotationConflictError extends Error {
   }
 }
 
+/**
+ * Thrown when a presented refresh token was already rotated/revoked — i.e. token
+ * reuse, treated as theft (the whole family is revoked before this throws).
+ * Extends `UnauthorizedException` so it still maps to HTTP 401, while letting
+ * callers (e.g. `AuthService.refresh`) detect reuse by type rather than by
+ * matching the error message.
+ */
+export class RefreshReuseError extends UnauthorizedException {
+  constructor() {
+    super('Refresh token reuse detected');
+  }
+}
+
 export interface AccessTokenPayload {
   sub: string;
   role: string;
@@ -163,7 +176,7 @@ export class TokenService {
     if (existing.revokedAt) {
       // Reuse of a rotated token => assume the lineage is compromised.
       await this.revokeFamily(existing.familyId);
-      throw new UnauthorizedException('Refresh token reuse detected');
+      throw new RefreshReuseError();
     }
 
     if (existing.expiresAt.getTime() < Date.now()) {
@@ -202,7 +215,7 @@ export class TokenService {
       if (err instanceof RotationConflictError) {
         // Treat the concurrent rotation as a compromised lineage.
         await this.revokeFamily(err.familyId);
-        throw new UnauthorizedException('Refresh token reuse detected');
+        throw new RefreshReuseError();
       }
       throw err;
     }

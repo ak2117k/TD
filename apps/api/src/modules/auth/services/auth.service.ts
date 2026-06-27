@@ -9,10 +9,27 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { LoginDto, SignupDto } from '../dto';
 import { EmailService } from './email/email.service';
 import { PasswordService } from './password.service';
-import { TokenContext, TokenPair, TokenService } from './token.service';
+import {
+  RefreshReuseError,
+  TokenContext,
+  TokenPair,
+  TokenService,
+} from './token.service';
 
 /** Email-verification token lifetime: 24h. */
 const EMAIL_VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * A real argon2id PHC hash (of a throw-away string) used to equalise login
+ * timing when the email is unknown: we still run a full argon2 verify against
+ * this dummy so an absent user costs the same ~argon2 time as a wrong password
+ * on a real user — closing the timing side-channel that would otherwise enable
+ * email enumeration (spec §6, timing-safe login). It must stay a VALID PHC
+ * string (matching the PasswordService params) so verify actually does the work
+ * rather than throwing fast on a malformed hash.
+ */
+const DUMMY_PASSWORD_HASH =
+  '$argon2id$v=19$m=19456,t=2,p=1$rwpHfefAFUyWtitQq3/WEw$Dxq0dTpzMvMGkdx1SGadAIj43x8/JFdEx02Diz2PIqE';
 
 /**
  * Generic, non-enumerating signup response. The same message is returned whether
@@ -161,8 +178,12 @@ export class AuthService {
     const email = dto.email.toLowerCase().trim();
     const user = await this.prisma.user.findUnique({ where: { email } });
 
-    const passwordOk =
-      user && (await this.passwords.verify(user.passwordHash, dto.password));
+    // Always run a full argon2 verify — against the real hash, or a dummy when
+    // the user is absent — so both branches cost the same time (no enumeration).
+    const passwordOk = await this.passwords.verify(
+      user?.passwordHash ?? DUMMY_PASSWORD_HASH,
+      dto.password,
+    );
     if (!user || !passwordOk) {
       await this.audit('AUTH_LOGIN_FAILED', user?.id ?? null, email);
       throw new UnauthorizedException('Invalid credentials');
@@ -202,10 +223,7 @@ export class AuthService {
       await this.audit('AUTH_REFRESH', userId, null);
       return pair;
     } catch (err) {
-      if (
-        err instanceof UnauthorizedException &&
-        /reuse/i.test(err.message)
-      ) {
+      if (err instanceof RefreshReuseError) {
         // The presented (now-revoked) token row still exists; recover its owner
         // so the theft event is attributable.
         const row = await this.prisma.refreshToken.findUnique({

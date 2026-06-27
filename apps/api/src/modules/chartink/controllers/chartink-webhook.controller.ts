@@ -4,9 +4,14 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { timingSafeEqual } from 'crypto';
+import { Public } from '../../../common/decorators';
 import { ChartinkIngestService } from '../services/chartink-ingest.service';
 import { ChartinkWebhookDto } from '../dto/chartink-webhook.dto';
 
+// External machine-to-machine endpoint: Chartink cannot present a Bearer JWT.
+// It authenticates via a constant-time path-secret check below, so opt this
+// controller out of the global JwtAuthGuard.
+@Public()
 @Controller('webhooks/chartink')
 export class ChartinkWebhookController {
   private readonly logger = new Logger(ChartinkWebhookController.name);

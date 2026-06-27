@@ -22,6 +22,7 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { AddressInfo } from 'net';
 import { AuthModule } from '../../src/modules/auth/auth.module';
+import { PasswordService } from '../../src/modules/auth/services/password.service';
 import { db } from './test-prisma';
 
 interface HttpResult {
@@ -32,6 +33,7 @@ interface HttpResult {
 describe('Auth core (integration, td_saas_test)', () => {
   let app: INestApplication;
   let baseUrl: string;
+  let passwords: PasswordService;
   const email = `tda002-auth-${Date.now()}@example.com`;
   const password = 'Sup3r-Str0ng-Pass!';
 
@@ -63,6 +65,7 @@ describe('Auth core (integration, td_saas_test)', () => {
       imports: [AuthModule],
     }).compile();
     app = moduleRef.createNestApplication();
+    passwords = moduleRef.get(PasswordService);
     app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true }));
     await app.init();
     await app.listen(0);
@@ -148,6 +151,19 @@ describe('Auth core (integration, td_saas_test)', () => {
       body: { email, password: 'wrong-password-123' },
     });
     expect(res.status).toBe(401);
+  });
+
+  it('login with an UNKNOWN email still runs argon2 (timing-safe, no enumeration)', async () => {
+    // Proves the absent-user branch spends the same argon2 cost as a real
+    // wrong-password attempt: PasswordService.verify must be invoked (against
+    // the dummy hash) rather than short-circuited.
+    const spy = jest.spyOn(passwords, 'verify');
+    const res = await call('POST', '/auth/login', {
+      body: { email: `nobody-${Date.now()}@example.com`, password: 'whatever1' },
+    });
+    expect(res.status).toBe(401);
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
   });
 
   it('GET /auth/me is 401 without a token (global guard active)', async () => {
