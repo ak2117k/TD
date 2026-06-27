@@ -141,11 +141,11 @@ describe('UngatedWatchService.createFromAlert', () => {
 
   it('anchors profitTarget to live fill price (not stale Chartink price)', async () => {
     // ltp = 1990 (stock dipped below alert price) → passes gate
-    // profitTarget must be 1990 * 1.02 = 2029.8, not initialPrice * 1.02 = 2040
+    // profitTarget must be 1990 * 1.03 = 2049.7, not initialPrice * 1.03 = 2060
     (svc as any).__adapter.getLiveQuote.mockResolvedValue({ ltp: 1990 });
     await svc.createFromAlert(baseInput);
     const createCall = repo.createEntry.mock.calls[0][0];
-    expect(createCall.profitTarget).toBeCloseTo(1990 * 1.02, 2);
+    expect(createCall.profitTarget).toBeCloseTo(1990 * 1.03, 2);
   });
 
   it('rejects with UngatedCooldownError when the token was executed within the last 45 min', async () => {
@@ -287,11 +287,12 @@ describe('UngatedWatchService.onTick — transitions', () => {
     }));
   });
 
-  it('hard loss-cut at -0.4% of deployed → forwards exitPrice', async () => {
+  it('hard loss-cut at -1.5% of deployed → forwards exitPrice', async () => {
     repo.findActiveByToken.mockResolvedValue([tradedEntry()]);
-    await svc.onTick('11536', 1992, new Date());
+    // SL threshold price = 2000 * (1 - 0.015) = 1970; ltp at 1970 breaches -1.5%.
+    await svc.onTick('11536', 1970, new Date());
     expect(exec.closeTrade).toHaveBeenCalledWith('ut1', expect.objectContaining({
-      reason: 'sl-loss-cut', exitPrice: 1992,
+      reason: 'sl-loss-cut', exitPrice: 1970,
     }));
     expect(repo.update).toHaveBeenCalledWith('uw1', expect.objectContaining({
       status: 'STOPPED', closedReason: 'loss-cut',
@@ -299,57 +300,27 @@ describe('UngatedWatchService.onTick — transitions', () => {
   });
 
   it('caps exit price at SL threshold when 30s poll already overshot below SL (BUY)', async () => {
-    // Regression: 30s REST polling gap — stock fell from 2000 to 1975 within one window.
-    // SL threshold is 2000 * 0.996 = 1992. Without the cap, exitPrice = 1975 → loss > 0.4%.
-    // With the cap, exitPrice is pinned at 1992 regardless of how far ltp fell.
+    // Regression: 30s REST polling gap — stock fell from 2000 to 1950 within one window.
+    // SL threshold is 2000 * 0.985 = 1970. Without the cap, exitPrice = 1950 → loss > 1.5%.
+    // With the cap, exitPrice is pinned at 1970 regardless of how far ltp fell.
     repo.findActiveByToken.mockResolvedValue([tradedEntry()]);
-    await svc.onTick('11536', 1975, new Date());
+    await svc.onTick('11536', 1950, new Date());
     expect(exec.closeTrade).toHaveBeenCalledWith('ut1', expect.objectContaining({
-      reason: 'sl-loss-cut', exitPrice: 1992,
+      reason: 'sl-loss-cut', exitPrice: 1970,
     }));
   });
 
-  it('+1% favorable triggers partial exit, forwards exitPrice + sets trailing fields', async () => {
-    repo.findActiveByToken.mockResolvedValue([tradedEntry({ profitTarget: 9999 })]);
-    await svc.onTick('11536', 2020, new Date());
-    expect(exec.closeTrade).toHaveBeenCalledWith('ut1', expect.objectContaining({
-      reason: 'partial-exit', quantity: 50, exitPrice: 2020,
-    }));
-    expect(repo.update).toHaveBeenCalledWith('uw1', expect.objectContaining({
-      partialExitedAt: expect.any(Date),
-      partialExitPrice: 2020,
-      partialQty: 50,
-      remainingQty: 50,
-      trailingHighWater: 2020,
-      trailingStopPrice: 2020 * 0.995,
-    }));
-  });
-
-  it('post-partial: price drops below trail → trailing-stop fires, exitPrice forwarded', async () => {
-    repo.findActiveByToken.mockResolvedValue([
-      tradedEntry({
-        profitTarget: 9999, partialExitedAt: new Date(),
-        partialExitPrice: 2020, partialQty: 50, remainingQty: 50,
-        trailingHighWater: 2025, trailingStopPrice: 2025 * 0.995,
-      }),
-    ]);
-    const trailStop = 2025 * 0.995;
-    await svc.onTick('11536', trailStop - 1, new Date());
-    expect(exec.closeTrade).toHaveBeenCalledWith('ut1', expect.objectContaining({
-      reason: 'trailing-stop', exitPrice: trailStop - 1,
-    }));
-    expect(repo.update).toHaveBeenCalledWith('uw1', expect.objectContaining({
-      status: 'EXITED', closedReason: 'trailing-stop',
-    }));
-  });
+  // Partial-exit + trailing-stop tests removed 2026-06-27: those exit paths
+  // were deleted so the ungated track holds full size to the +3% target or the
+  // -1.5% two-strike hard stop (pure-hold, matching the candle-replay backtest).
 
   // ── Two-strike stop-hunt guard ───────────────────────────────────────────
 
   it('two-strike: does NOT exit on first SL breach — increments slBreachCount to 1', async () => {
     // slBreachCount starts at 0 → first breach must not exit, only increment.
     repo.findActiveByToken.mockResolvedValue([tradedEntry({ slBreachCount: 0 })]);
-    // ltp=1992 is exactly at the SL threshold (2000*0.996=1992), loss = -800
-    await svc.onTick('11536', 1992, new Date());
+    // ltp=1970 is exactly at the SL threshold (2000*0.985=1970), loss = -3000
+    await svc.onTick('11536', 1970, new Date());
     // No exit should have been triggered
     expect(exec.closeTrade).not.toHaveBeenCalled();
     // slBreachCount must be incremented to 1
@@ -365,7 +336,7 @@ describe('UngatedWatchService.onTick — transitions', () => {
   it('two-strike: exits on second consecutive SL breach (slBreachCount=1 → exit)', async () => {
     // slBreachCount=1 means we already saw one breach; this tick is the second.
     repo.findActiveByToken.mockResolvedValue([tradedEntry({ slBreachCount: 1 })]);
-    await svc.onTick('11536', 1992, new Date());
+    await svc.onTick('11536', 1970, new Date());
     // Should have exited on this tick
     expect(exec.closeTrade).toHaveBeenCalledWith('ut1', expect.objectContaining({
       reason: 'sl-loss-cut',
@@ -376,7 +347,7 @@ describe('UngatedWatchService.onTick — transitions', () => {
   });
 
   it('two-strike: resets slBreachCount to 0 when price recovers above SL between breaches', async () => {
-    // slBreachCount=1 (had one breach), but now ltp=2000 (above SL threshold 1992)
+    // slBreachCount=1 (had one breach), but now ltp=2000 (above SL threshold 1970)
     // → price recovered, counter must be reset to 0, no exit.
     repo.findActiveByToken.mockResolvedValue([tradedEntry({ slBreachCount: 1 })]);
     // ltp=2000 is above the SL threshold so no breach this tick

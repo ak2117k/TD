@@ -13,7 +13,9 @@ export interface UngatedCreateEntryInput {
   initialScore: number;
   initialBreakdown: Prisma.InputJsonValue;
   profitTarget: number;
-  profitTargetSource: 'indicator-sr' | 'fallback-2pct';
+  // 'fallback-2pct' retained for historical rows; new entries use 'fallback-3pct'
+  // since the 2026-06-27 pure 3%/-1.5% threshold change.
+  profitTargetSource: 'indicator-sr' | 'fallback-2pct' | 'fallback-3pct';
   stopLossScore: number;
 }
 

@@ -77,9 +77,12 @@ export interface UngatedCreateFromAlertInput {
   scannerName: string | null;
 }
 
-const PROFIT_TARGET_PCT = 0.02; // 2% from fill price — no indicator-sr on ungated (YAGNI)
+// Updated 2026-06-27: pure 3% target / 1.5% stop hold (candle-replay optimum
+// on the Hull-only ungated set). Partial-exit + trailing removed below so the
+// live track actually realises the right-tail the backtest modelled.
+const PROFIT_TARGET_PCT = 0.03; // 3% from fill price — no indicator-sr on ungated (YAGNI)
 export const TRADE_COOLDOWN_MS = 45 * 60_000;
-const HARD_STOP_PCT = 0.004;
+const HARD_STOP_PCT = 0.015;
 
 @Injectable()
 export class UngatedWatchService {
@@ -169,7 +172,7 @@ export class UngatedWatchService {
       throw new UngatedStaleEntryError(input.symbol, moveFromAlert / HARD_STOP_PCT);
     }
     const executedPrice = liveQuote;
-    const profitTarget = executedPrice * (1 + PROFIT_TARGET_PCT); // 2% from fill
+    const profitTarget = executedPrice * (1 + PROFIT_TARGET_PCT); // 3% from fill
 
     // 6. Admission (capital + position cap + kill switch).
     const openTrades = await this.repo.countOpenTrades();
@@ -190,7 +193,7 @@ export class UngatedWatchService {
       initialScore: input.initialScore,
       initialBreakdown: input.initialBreakdown,
       profitTarget,
-      profitTargetSource: 'fallback-2pct',
+      profitTargetSource: 'fallback-3pct',
       stopLossScore: 45,
     };
     const entry = await this.repo.createEntry(createInput);
@@ -230,10 +233,12 @@ export class UngatedWatchService {
   }
 
   // --- Constants ---
-  private readonly HARD_STOP_PCT = 0.004;
-  private readonly PARTIAL_EXIT_THRESHOLD_PCT = 0.01;
-  private readonly PARTIAL_EXIT_FRACTION = 0.5;
-  private readonly TRAILING_STOP_PCT = 0.005;
+  // Pure 3% target / 1.5% stop hold (2026-06-27). Partial-exit + trailing were
+  // removed so the position holds full size to target or stop — matching the
+  // candle-replay backtest that produced the +3%/-1.5% edge (the old +1% partial
+  // and 0.5% trail capped the right tail the edge depends on). The two-strike
+  // stop-hunt guard is retained (orthogonal to the threshold).
+  private readonly HARD_STOP_PCT = 0.015;
 
   // --- Public tick entrypoint ---
   async onTick(token: string, ltp: number, ts: Date): Promise<void> {
@@ -295,7 +300,7 @@ export class UngatedWatchService {
       // REST polling fires every 30s — by the time the poller observes the
       // trigger, ltp may already be well below (BUY) or above (SELL) the
       // theoretical SL price. Cap the exit at the threshold price so the
-      // recorded loss never exceeds the intended -0.4%, matching how a
+      // recorded loss never exceeds the intended -1.5%, matching how a
       // real stop-limit order would behave.
       const ref = entry.executedPrice ?? entry.initialPrice;
       const slPrice = sideMul === 1
@@ -316,12 +321,8 @@ export class UngatedWatchService {
       await this.repo.update(entry.id, { slBreachCount: 0 });
     }
 
-    // 3. Partial-exit / trailing-stop.
-    if (!entry.partialExitedAt) {
-      await this.checkPartialExitTrigger(entry, ltp);
-    } else {
-      await this.updateTrailingStop(entry, ltp);
-    }
+    // 3. (Pure-hold: partial-exit + trailing removed 2026-06-27.) The only exits
+    //    are target-hit (+3%, step 1) and the two-strike hard stop (-1.5%, step 2).
   }
 
   private computeOpenPnl(entry: any, ltp: number): number {
@@ -357,63 +358,4 @@ export class UngatedWatchService {
     });
   }
 
-  private async checkPartialExitTrigger(entry: any, ltp: number): Promise<void> {
-    const ref = entry.executedPrice ?? entry.initialPrice;
-    if (ref <= 0) return;
-    const sideMul: 1 | -1 = entry.side === 'BUY' ? 1 : -1;
-    const moveFavor = ((ltp - ref) / ref) * sideMul;
-    if (moveFavor < this.PARTIAL_EXIT_THRESHOLD_PCT) return;
-
-    const initialQty = entry.quantity ??
-      Math.max(1, Math.floor(2_00_000 / Math.max(ref, 1)));
-    const partialQty = Math.floor(initialQty * this.PARTIAL_EXIT_FRACTION);
-    const remainingQty = initialQty - partialQty;
-    const trailingStopPrice = sideMul === 1
-      ? ltp * (1 - this.TRAILING_STOP_PCT)
-      : ltp * (1 + this.TRAILING_STOP_PCT);
-
-    await this.exec.closeTrade(entry.paperTradeId, {
-      reason: 'partial-exit', quantity: partialQty, exitPrice: ltp,
-    });
-    await this.repo.createEvent({
-      watchEntryId: entry.id, eventType: WatchEventType.PARTIAL_EXIT, price: ltp,
-      notes: `partial 50% sold at +${(moveFavor * 100).toFixed(2)}%, trail @ ${trailingStopPrice.toFixed(2)}`,
-    });
-    await this.repo.update(entry.id, {
-      partialExitedAt: new Date(),
-      partialExitPrice: ltp,
-      partialQty,
-      remainingQty,
-      trailingHighWater: ltp,
-      trailingStopPrice,
-    });
-  }
-
-  private async updateTrailingStop(entry: any, ltp: number): Promise<void> {
-    const sideMul: 1 | -1 = entry.side === 'BUY' ? 1 : -1;
-    let highWater = entry.trailingHighWater;
-    let newStop = entry.trailingStopPrice;
-    const moves = sideMul === 1 ? ltp > highWater : ltp < highWater;
-    if (moves) {
-      highWater = ltp;
-      newStop = sideMul === 1 ? ltp * (1 - this.TRAILING_STOP_PCT) : ltp * (1 + this.TRAILING_STOP_PCT);
-      await this.repo.update(entry.id, {
-        trailingHighWater: highWater,
-        trailingStopPrice: newStop,
-      });
-    }
-    const hit = sideMul === 1 ? ltp <= newStop : ltp >= newStop;
-    if (hit) {
-      await this.exec.closeTrade(entry.paperTradeId, {
-        reason: 'trailing-stop', exitPrice: ltp,
-      });
-      await this.repo.createEvent({
-        watchEntryId: entry.id, eventType: WatchEventType.TRAILING_STOP_HIT, price: ltp,
-        notes: `trail stop fired (high-water ${highWater}, stop ${newStop.toFixed(2)})`,
-      });
-      await this.repo.update(entry.id, {
-        status: WatchStatus.EXITED, closedAt: new Date(), closedReason: 'trailing-stop',
-      });
-    }
-  }
 }
