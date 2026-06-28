@@ -23,3 +23,16 @@ export const TENANT_MODELS: ReadonlySet<string> = new Set([
   'RefreshToken',
   'VerificationToken',
 ]);
+
+/**
+ * The seeded ADMIN user (`prisma/seed.ts` / TDA-001 migration) that owns all
+ * engine- and system-generated tenant rows.
+ *
+ * Background/engine code runs with NO tenant context, and the Prisma
+ * tenant-scoping interceptor only stamps `userId` when a context is active — so
+ * engine `create`/`upsert` on tenant-owned models must stamp this id explicitly
+ * to satisfy the NOT NULL `userId` column added in TDA-001. Real user-owned rows
+ * are stamped by the interceptor during authenticated requests; the centralized
+ * fan-out (TDA-010/011) will reassign real owners later.
+ */
+export const SYSTEM_USER_ID = 'usr_admin_seed_0001';
