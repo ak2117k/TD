@@ -4,12 +4,16 @@ import { AngelOneAdapterService } from '../../market-data/services/angel-one-ada
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { ZoneRepository } from '../repositories/zone.repository';
 import { OiWallService } from './oi-wall.service';
-import { computeVolumeNodes, type ProfileCandle } from './volume-profile';
+import { computeVolumeNodes, computeProfileLevels, type ProfileCandle } from './volume-profile';
 import { adaptiveRoundNumbers, adaptiveRoundStep, roundScore } from './adaptive-round-numbers';
 import { scoreAndCluster, capLevelsPerSide } from './sr-evidence-scoring';
 import { lookbackDaysFor } from './timeframe-lookback';
 import { computeAtrFromCandles } from './per-tf-atr';
-import { detectSwingPivots } from './swing-pivots';
+import { detectWeightedPivots } from './swing-pivots';
+import { maLevels, anchoredVwap } from './dynamic-sr';
+import { gapLevels } from './gaps';
+import { fibLevels } from './fibonacci';
+import { SrLevelTrackingService } from './sr-level-tracking.service';
 import type { EvidenceLevel, LevelCandidate } from '../types/evidence-level.types';
 
 interface CacheEntry { at: number; levels: EvidenceLevel[]; }
@@ -40,6 +44,7 @@ export class SrEvidenceService {
     @Optional() private readonly marketDataRepository?: MarketDataRepository,
     @Optional() private readonly zoneRepository?: ZoneRepository,
     @Optional() private readonly oiWallService?: OiWallService,
+    @Optional() private readonly tracking?: SrLevelTrackingService,
   ) {}
 
   /**
@@ -86,7 +91,8 @@ export class SrEvidenceService {
       const volNodes = computeVolumeNodes(candles, atr14, ltp);
       const step = adaptiveRoundStep(ltp);
       const roundGrid = adaptiveRoundNumbers(ltp);
-      const oiWalls = this.oiWallService ? await this.oiWallService.walls(symbol, ltp) : [];
+      // OI walls + max-pain + OI-change build-up (wallsExtended adds the latter two).
+      const oiWalls = this.oiWallService ? await this.oiWallService.wallsExtended(symbol, ltp) : [];
 
       const candidates: LevelCandidate[] = [];
       for (const n of volNodes) candidates.push({ price: n.price, kind: 'VOLUME', score: n.score });
@@ -95,6 +101,19 @@ export class SrEvidenceService {
         if (rs > 0) candidates.push({ price: r, kind: 'ROUND', score: rs });
       }
       for (const w of oiWalls) candidates.push(w);
+
+      // Volume Point-of-Control + Value-Area (intraday profile) and anchored VWAP.
+      for (const p of computeProfileLevels(candles, atr14, ltp)) candidates.push(p);
+      for (const p of anchoredVwap(candles, ltp)) candidates.push(p);
+
+      // Daily-structure levels: moving averages (20/50/200), unfilled gaps,
+      // and fib retracements of the dominant swing — computed off DAILY candles.
+      const dailyCandles = await this.fetchCandles(token, exchange, '1d', 365);
+      if (dailyCandles.length >= 20) {
+        for (const p of maLevels(dailyCandles, ltp)) candidates.push(p);
+        for (const p of gapLevels(dailyCandles, ltp)) candidates.push(p);
+        for (const p of fibLevels(dailyCandles, ltp)) candidates.push(p);
+      }
 
       if (isFifteen) {
         // FROZEN 15m path — HISTORY from the DB-stored 15m zones.
@@ -107,8 +126,8 @@ export class SrEvidenceService {
         // NATIVE non-15m path — HISTORY from swing pivots in the per-TF
         // candles. Fixed score 25 (no DB strength available); never reads
         // the shared zone DB.
-        for (const piv of detectSwingPivots(candles)) {
-          candidates.push({ price: piv.price, kind: 'HISTORY', score: 25 });
+        for (const piv of detectWeightedPivots(candles)) {
+          candidates.push({ price: piv.price, kind: piv.kind, score: piv.score });
         }
       }
 
@@ -119,6 +138,9 @@ export class SrEvidenceService {
         ? levels
         : capLevelsPerSide(levels, EVIDENCE_MAX_PER_SIDE_INTRADAY);
       this.cache.set(cacheKey, { at: Date.now(), levels: finalLevels });
+      // Fire-and-forget: persist this snapshot so reactions can later be
+      // classified and per-kind hold-rates calibrated (sr-hold-rate script).
+      void this.tracking?.snapshot(token, exchange, interval, finalLevels, ltp, atr14).catch(() => {});
       return finalLevels;
     } catch (err) {
       this.logger.warn(`SrEvidence levelsFor failed for ${token}: ${err instanceof Error ? err.message : err}`);

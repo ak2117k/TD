@@ -1,4 +1,8 @@
-import { computeVolumeNodes, type ProfileCandle } from './volume-profile';
+import {
+  computeVolumeNodes,
+  computeProfileLevels,
+  type ProfileCandle,
+} from './volume-profile';
 
 function c(close: number, volume: number): ProfileCandle {
   return { high: close, low: close, close, volume };
@@ -71,5 +75,80 @@ describe('computeVolumeNodes', () => {
     // Global top-5 would be all-above; per-side selection must keep the 180 shelf.
     expect(nodes.some((n) => n.price < 200)).toBe(true);
     expect(nodes.some((n) => Math.round(n.price) === 180)).toBe(true);
+  });
+
+  it('distributes a wide bar volume across its high→low range, not just at the typical price', () => {
+    // 12 identical wide bars: high 140, low 100, close 120 (typical = 120).
+    // Old code dumped the whole bar at 120 (one bucket → both sides empty);
+    // range-distribution spreads volume from 100 to 140, so support-side nodes
+    // appear all the way down at the bar's low (~100), far below the typical
+    // price, and the node price span is wide.
+    const candles: ProfileCandle[] = [];
+    for (let i = 0; i < 12; i++) candles.push({ high: 140, low: 100, close: 120, volume: 120 });
+    const nodes = computeVolumeNodes(candles, 2, 120);
+    expect(nodes.length).toBeGreaterThan(0);
+    expect(nodes.some((n) => n.price < 105)).toBe(true); // volume reached the low
+    const prices = nodes.map((n) => n.price);
+    expect(Math.max(...prices) - Math.min(...prices)).toBeGreaterThan(15);
+  });
+});
+
+describe('computeProfileLevels', () => {
+  it('returns [] for fewer than 10 candles', () => {
+    expect(computeProfileLevels([c(100, 5)], 2, 100)).toEqual([]);
+  });
+
+  it('reports the highest-volume bucket as the POC (score ~40)', () => {
+    const candles: ProfileCandle[] = [];
+    for (let i = 0; i < 16; i++) candles.push(c(120 + (i % 3), 10));
+    for (let i = 0; i < 8; i++) candles.push(c(150, 300));
+    const levels = computeProfileLevels(candles, 2, 145);
+    const poc = levels.find((l) => l.kind === 'POC');
+    expect(poc).toBeDefined();
+    expect(Math.round(poc!.price)).toBe(150);
+    expect(poc!.score).toBe(40);
+  });
+
+  it('value area (VAH/VAL) spans ~70% of total volume around the POC', () => {
+    const prices = [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110];
+    const vols = [50, 60, 80, 120, 180, 300, 180, 120, 80, 60, 50];
+    const candles = prices.map((p, i) => c(p, vols[i]));
+    // ltp far from the data so no level is suppressed for sitting on the LTP
+    // bucket; bucket size stays small (0.1) → each integer price is distinct.
+    const ltp = 10;
+    const levels = computeProfileLevels(candles, 1, ltp);
+
+    const poc = levels.find((l) => l.kind === 'POC')!;
+    expect(Math.round(poc.price)).toBe(105);
+
+    const va = levels
+      .filter((l) => l.kind === 'VALUE_AREA')
+      .map((l) => l.price)
+      .sort((a, b) => a - b);
+    expect(va.length).toBe(2);
+    const [val, vah] = va;
+    va.forEach((_, i) => expect(levels.filter((l) => l.kind === 'VALUE_AREA')[i].score).toBe(20));
+
+    // POC sits inside the value area, and the band is tighter than the full range.
+    expect(val).toBeLessThanOrEqual(poc.price);
+    expect(vah).toBeGreaterThanOrEqual(poc.price);
+    expect(val).toBeGreaterThan(100);
+    expect(vah).toBeLessThan(110);
+
+    // Candles whose price falls inside [VAL, VAH] carry >= 70% of total volume.
+    const total = vols.reduce((a, b) => a + b, 0);
+    const inBand = prices.reduce(
+      (s, p, i) => (p >= Math.round(val) && p <= Math.round(vah) ? s + vols[i] : s),
+      0,
+    );
+    expect(inBand / total).toBeGreaterThanOrEqual(0.7);
+  });
+
+  it('skips a level that sits on the LTP bucket (POC == LTP → suppressed)', () => {
+    const candles: ProfileCandle[] = [];
+    for (let i = 0; i < 16; i++) candles.push(c(120 + (i % 3), 10));
+    for (let i = 0; i < 8; i++) candles.push(c(150, 300));
+    const levels = computeProfileLevels(candles, 2, 150);
+    expect(levels.some((l) => l.kind === 'POC')).toBe(false);
   });
 });

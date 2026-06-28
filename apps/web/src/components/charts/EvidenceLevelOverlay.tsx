@@ -11,8 +11,19 @@ interface Props {
 function styleFor(e: EvidenceLevel): { color: string; lineWidth: 1 | 2; lineStyle: 0 | 1 | 2 } {
   if (e.soft) return { color: '#94a3b8', lineWidth: 1, lineStyle: 1 }; // gray dotted (projected)
   const k = e.kinds[0];
-  if (k === 'OI_CALL' || k === 'OI_PUT') return { color: '#d946ef', lineWidth: 2, lineStyle: 0 }; // magenta OI wall
-  if (k === 'VOLUME') return { color: '#14b8a6', lineWidth: e.score >= 60 ? 2 : 1, lineStyle: 0 }; // teal volume shelf
+  // Options-flow walls — magenta, solid, prominent
+  if (k === 'OI_CALL' || k === 'OI_PUT' || k === 'OI_CHANGE' || k === 'MAX_PAIN')
+    return { color: '#d946ef', lineWidth: 2, lineStyle: 0 };
+  // Volume: POC strongest (orange), shelves teal, value-area faint teal
+  if (k === 'POC') return { color: '#f59e0b', lineWidth: 2, lineStyle: 0 }; // amber POC
+  if (k === 'VOLUME') return { color: '#14b8a6', lineWidth: e.score >= 60 ? 2 : 1, lineStyle: 0 };
+  if (k === 'VALUE_AREA') return { color: '#2dd4bf', lineWidth: 1, lineStyle: 2 }; // faint teal VA edge
+  // Dynamic S/R
+  if (k === 'MA') return { color: '#3b82f6', lineWidth: e.score >= 16 ? 2 : 1, lineStyle: 0 }; // blue MA (200 thicker)
+  if (k === 'AVWAP') return { color: '#8b5cf6', lineWidth: 1, lineStyle: 0 }; // violet anchored VWAP
+  // Structure
+  if (k === 'GAP') return { color: '#ef4444', lineWidth: 1, lineStyle: 2 }; // red gap edge
+  if (k === 'FIB') return { color: '#eab308', lineWidth: 1, lineStyle: 2 }; // gold fib
   return { color: '#a3a3a3', lineWidth: 1, lineStyle: 2 }; // round/other dashed
 }
 

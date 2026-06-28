@@ -311,7 +311,9 @@ export interface ChartinkSourceRef {
 }
 
 // Evidence-weighted S/R (mirrors apps/api .../types/evidence-level.types.ts).
-export type EvidenceKind = 'VOLUME' | 'HISTORY' | 'OI_CALL' | 'OI_PUT' | 'ROUND';
+export type EvidenceKind =
+  | 'VOLUME' | 'HISTORY' | 'OI_CALL' | 'OI_PUT' | 'ROUND'
+  | 'POC' | 'VALUE_AREA' | 'MA' | 'AVWAP' | 'GAP' | 'FIB' | 'MAX_PAIN' | 'OI_CHANGE';
 export interface EvidenceLevel {
   price: number;
   side: 'resistance' | 'support';

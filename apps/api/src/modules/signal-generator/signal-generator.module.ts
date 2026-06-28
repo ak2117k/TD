@@ -32,6 +32,8 @@ import { ZoneRepository } from './repositories/zone.repository';
 import { StrongZoneDetectorService } from './services/strong-zone-detector.service';
 import { SrEvidenceService } from './services/sr-evidence.service';
 import { OiWallService } from './services/oi-wall.service';
+import { SrLevelTrackingService } from './services/sr-level-tracking.service';
+import { SrLevelObservationRepository } from './repositories/sr-level-observation.repository';
 import { ContextScoringService } from './services/context-scoring/context-scoring.service';
 import { MtfTrendFactor } from './services/context-scoring/factors/mtf-trend.factor';
 import { GreeksFactor } from './services/context-scoring/factors/greeks.factor';
@@ -121,6 +123,8 @@ import type { ContextFactor } from './services/context-scoring/types';
 
     // OI walls + evidence-weighted S/R orchestrator
     OiWallService,
+    SrLevelObservationRepository,
+    SrLevelTrackingService,
     SrEvidenceService,
 
     // Context scoring engine — Mama's 10-factor framework v1.

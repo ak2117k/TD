@@ -24,7 +24,7 @@ describe('SrEvidenceService', () => {
         getCandles: jest.fn().mockResolvedValue([]),
       },
       zoneRepository: { findActiveByToken: jest.fn().mockResolvedValue([]) },
-      oiWallService: { walls: jest.fn().mockResolvedValue([]) },
+      oiWallService: { wallsExtended: jest.fn().mockResolvedValue([]) },
       ...overrides,
     };
     return new SrEvidenceService(
@@ -51,7 +51,7 @@ describe('SrEvidenceService', () => {
 
   it('includes OI walls when the symbol is F&O', async () => {
     const s = build({
-      oiWallService: { walls: jest.fn().mockResolvedValue([{ price: 145, kind: 'OI_CALL', score: 30 }]) },
+      oiWallService: { wallsExtended: jest.fn().mockResolvedValue([{ price: 145, kind: 'OI_CALL', score: 30 }]) },
     });
     const levels = await s.levelsFor('99926000', 'NSE', 'NIFTY');
     expect(levels.some((l) => l.kinds.includes('OI_CALL'))).toBe(true);

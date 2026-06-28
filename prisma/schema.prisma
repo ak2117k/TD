@@ -1513,3 +1513,36 @@ model AuditLog {
   @@index([action, createdAt])
   @@map("audit_logs")
 }
+
+// ============================================
+// S/R Level Reaction Tracking (calibration)
+// ============================================
+// Persisted snapshots of evidence-weighted S/R levels (SrEvidenceService
+// output) so we can later classify whether price actually respected each
+// level. Snapshots are recorded at poll time; the reaction fields are
+// filled in by a deferred evaluation pass that replays subsequent candles.
+// Feeds scripts/sr-hold-rate.mjs which calibrates evidence weights against
+// observed hold rates per evidence kind.
+model SrLevelObservation {
+  id             String    @id @default(cuid())
+  token          String
+  exchange       String
+  interval       String
+  price          Float
+  side           String // 'resistance' | 'support'
+  kinds          String[] // EvidenceKind[] that produced this level
+  score          Int // 0-100 evidence score at snapshot
+  ltpAtSnapshot  Float
+  atr14          Float?
+  snapshotAt     DateTime  @default(now())
+  // ─── reaction (filled in by the deferred evaluation pass) ───
+  evaluatedAt    DateTime?
+  touched        Boolean?
+  reaction       String? // 'REJECTED' | 'BROKE' | 'UNTOUCHED'
+  reactionDetail Json?
+
+  @@index([token, snapshotAt])
+  @@index([reaction])
+  @@index([reaction, snapshotAt])
+  @@map("sr_level_observations")
+}
