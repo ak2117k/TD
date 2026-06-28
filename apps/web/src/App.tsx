@@ -1,7 +1,9 @@
-import { useEffect } from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { useEffect, type ReactNode } from 'react';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AppLayout } from '@/components/layout';
 import { wsService } from '@/services/websocket';
+import { useAuthStore } from '@/stores/auth-store';
+import LoginPage from '@/pages/login/LoginPage';
 import DashboardPage from '@/pages/dashboard/DashboardPage';
 import ChartsPage from '@/pages/charts/ChartsPage';
 import MarketPage from '@/pages/market/MarketPage';
@@ -28,7 +30,45 @@ import BreakoutSwingPage from '@/pages/breakout-swing/BreakoutSwingPage';
 import { SellFuturesPage } from '@/pages/sell-futures/SellFuturesPage';
 import ReinvestPage from '@/pages/reinvest/ReinvestPage';
 
+// Gate the authenticated app. While the stored session is being verified we
+// show a minimal loader; once resolved we either render children or bounce to
+// /login (remembering where the user was headed via location state).
+function RequireAuth({ children }: { children: ReactNode }) {
+  const status = useAuthStore((s) => s.status);
+  const location = useLocation();
+
+  if (status === 'loading') {
+    return (
+      <div className="flex h-screen items-center justify-center bg-[var(--color-bg-primary)] text-sm text-[var(--color-text-muted)]">
+        Loading…
+      </div>
+    );
+  }
+
+  if (status === 'anon') {
+    return <Navigate to="/login" replace state={{ from: location }} />;
+  }
+
+  return <>{children}</>;
+}
+
+// Authenticated users hitting /login get sent home. While loading, render
+// nothing decisive (the login form is harmless to show briefly).
+function LoginRoute() {
+  const status = useAuthStore((s) => s.status);
+  if (status === 'authed') return <Navigate to="/" replace />;
+  return <LoginPage />;
+}
+
 export default function App() {
+  const hydrate = useAuthStore((s) => s.hydrate);
+
+  // Verify any stored session once on boot (loads tokens from localStorage,
+  // calls /auth/me to populate the user, marks authed/anon accordingly).
+  useEffect(() => {
+    void hydrate();
+  }, [hydrate]);
+
   // Open the live-data WebSocket once at app boot. wsService.connect() is
   // idempotent — repeat calls are no-ops once sockets are open. Without
   // this, only the AutoTrade page (which calls connect itself) would
@@ -41,7 +81,14 @@ export default function App() {
 
   return (
     <Routes>
-      <Route element={<AppLayout />}>
+      <Route path="/login" element={<LoginRoute />} />
+      <Route
+        element={
+          <RequireAuth>
+            <AppLayout />
+          </RequireAuth>
+        }
+      >
         <Route index element={<DashboardPage />} />
         <Route path="charts" element={<ChartsPage />} />
         <Route path="market" element={<MarketPage />} />

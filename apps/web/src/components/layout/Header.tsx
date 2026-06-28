@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { OctagonX, Wifi, WifiOff } from 'lucide-react';
+import { OctagonX, Wifi, WifiOff, LogOut } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useMarketStore } from '@/stores/market-store';
+import { useAuthStore } from '@/stores/auth-store';
 
 function useIST() {
   const [time, setTime] = useState('');
@@ -31,6 +32,14 @@ export default function Header() {
   const time = useIST();
   const isConnected = useMarketStore((s) => s.isConnected);
   const marketStatus = useMarketStore((s) => s.marketStatus);
+  const user = useAuthStore((s) => s.user);
+  const logout = useAuthStore((s) => s.logout);
+
+  const handleLogout = async () => {
+    await logout();
+    // Full-nav so all in-memory stores/sockets reset cleanly on sign-out.
+    window.location.assign('/login');
+  };
 
   const statusColor =
     marketStatus === 'open'
@@ -90,6 +99,22 @@ export default function Header() {
           <OctagonX size={14} />
           Kill Switch
         </button>
+
+        <div className="flex items-center gap-2 border-l border-[var(--color-border-subtle)] pl-4">
+          {user?.email && (
+            <span className="hidden text-xs text-[var(--color-text-muted)] sm:inline">
+              {user.email}
+            </span>
+          )}
+          <button
+            onClick={handleLogout}
+            title="Sign out"
+            className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border-subtle)] px-3 py-2 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-white/5 hover:text-[var(--color-text-primary)]"
+          >
+            <LogOut size={14} />
+            Logout
+          </button>
+        </div>
       </div>
     </header>
   );
