@@ -8,7 +8,6 @@ import configuration from './config/configuration';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { TenantModule } from './common/tenant/tenant.module';
 import { TenantContextInterceptor } from './common/tenant/tenant-context.interceptor';
-import { RolesGuard } from './modules/auth/guards/roles.guard';
 import { AuthModule } from './modules/auth/auth.module';
 import { MarketDataModule } from './modules/market-data/market-data.module';
 import { SettingsModule } from './modules/settings/settings.module';
@@ -140,11 +139,14 @@ import { SellFuturesModule } from './modules/sell-futures-track/sell-futures.mod
     // so req.user is available; copies { userId, role } into the CLS store.
     { provide: APP_INTERCEPTOR, useClass: TenantContextInterceptor },
 
-    // Global RBAC guard (TDA-003 §6). Registered AFTER the JwtAuthGuard APP_GUARD
-    // (provided by the imported AuthModule) so it executes SECOND: JwtAuthGuard
-    // authenticates (→ req.user / 401), then RolesGuard authorises by role
-    // (@Roles/@AdminOnly → 403). @Public() routes bypass both.
-    { provide: APP_GUARD, useClass: RolesGuard },
+    // NOTE: the global RBAC guard (RolesGuard) is intentionally NOT registered
+    // here. NestJS executes global enhancers in MODULE-SCAN order, and the root
+    // AppModule is scanned BEFORE its imported AuthModule — so a RolesGuard
+    // APP_GUARD declared here would run BEFORE JwtAuthGuard (declared in
+    // AuthModule) and read req.user before authentication populates it,
+    // 403-ing every @Roles/@AdminOnly route (including valid ADMINs). RolesGuard
+    // is therefore co-located with JwtAuthGuard in AuthModule, immediately after
+    // it, so array order guarantees Jwt-then-Roles. See auth.module.ts.
   ],
 })
 export class AppModule {}
