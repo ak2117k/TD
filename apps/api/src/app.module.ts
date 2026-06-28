@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bull';
 import { ScheduleModule } from '@nestjs/schedule';
@@ -8,6 +8,7 @@ import configuration from './config/configuration';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { TenantModule } from './common/tenant/tenant.module';
 import { TenantContextInterceptor } from './common/tenant/tenant-context.interceptor';
+import { RolesGuard } from './modules/auth/guards/roles.guard';
 import { AuthModule } from './modules/auth/auth.module';
 import { MarketDataModule } from './modules/market-data/market-data.module';
 import { SettingsModule } from './modules/settings/settings.module';
@@ -138,6 +139,12 @@ import { SellFuturesModule } from './modules/sell-futures-track/sell-futures.mod
     // Global tenant-context interceptor (TDA-003 §3). Runs after JwtAuthGuard,
     // so req.user is available; copies { userId, role } into the CLS store.
     { provide: APP_INTERCEPTOR, useClass: TenantContextInterceptor },
+
+    // Global RBAC guard (TDA-003 §6). Registered AFTER the JwtAuthGuard APP_GUARD
+    // (provided by the imported AuthModule) so it executes SECOND: JwtAuthGuard
+    // authenticates (→ req.user / 401), then RolesGuard authorises by role
+    // (@Roles/@AdminOnly → 403). @Public() routes bypass both.
+    { provide: APP_GUARD, useClass: RolesGuard },
   ],
 })
 export class AppModule {}
