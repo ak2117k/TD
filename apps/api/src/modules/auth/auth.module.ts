@@ -7,6 +7,7 @@ import { PrismaModule } from '../../common/prisma/prisma.module';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { AuthController } from './controllers/auth.controller';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { RolesGuard } from './guards/roles.guard';
 import { AuthService } from './services/auth.service';
 import { EmailService } from './services/email/email.service';
 import { MfaService } from './services/mfa.service';
@@ -17,9 +18,11 @@ import { JwtStrategy } from './strategies/jwt.strategy';
 /**
  * Authentication module (TDA-002).
  *
- * Wires the auth core endpoints, the Passport JWT strategy, and registers
- * {@link JwtAuthGuard} as a GLOBAL `APP_GUARD` — every route in the app is
- * protected by default and opts out via `@Public()`.
+ * Wires the auth core endpoints, the Passport JWT strategy, and registers the
+ * GLOBAL `APP_GUARD`s — {@link JwtAuthGuard} then {@link RolesGuard}, in that
+ * order — so every route is authenticated (opt out via `@Public()`) and then
+ * role-authorised (`@Roles`/`@AdminOnly`). Both guards live HERE (not split
+ * across modules) so APP_GUARD array order, not module-scan order, governs.
  *
  * `TokenService` is built via a factory because its constructor takes a raw
  * `PrismaClient` + `JwtService` (so it stays directly instantiable in tests);
@@ -52,7 +55,14 @@ import { JwtStrategy } from './strategies/jwt.strategy';
         new TokenService(prisma, jwt),
       inject: [PrismaService, JwtService],
     },
+    // Global guards, co-located here so APP_GUARD array order is authoritative:
+    // JwtAuthGuard authenticates FIRST (→ req.user / 401), then RolesGuard
+    // authorises by role (@Roles/@AdminOnly → 403). They MUST live in the same
+    // module — NestJS runs global enhancers in module-scan order, and the root
+    // AppModule is scanned before this imported module, so splitting them across
+    // modules inverts the order and breaks RBAC (see app.module.ts note).
     { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: RolesGuard },
   ],
   exports: [AuthService, TokenService, PasswordService, MfaService],
 })

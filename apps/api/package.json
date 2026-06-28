@@ -38,6 +38,7 @@
     "class-validator": "^0.14.0",
     "helmet": "^8.0.0",
     "ioredis": "^5.4.0",
+    "nestjs-cls": "^6.2.1",
     "otplib": "^13.4.0",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
