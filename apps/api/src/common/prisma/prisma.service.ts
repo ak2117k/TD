@@ -55,6 +55,16 @@ const FILTER_WHERE_OPS = new Set([
 export class PrismaService extends PrismaClient implements OnModuleInit {
   private readonly logger = new Logger(PrismaService.name);
 
+  /**
+   * Lifecycle hook Nest invokes on boot. The constructor returns the **extended**
+   * client (a different object with its own prototype that does NOT inherit this
+   * class), so this is declared (not defined as a prototype method) and the real
+   * implementation is re-attached as an own property of `extended` in the
+   * constructor below. A prototype method here would be dead code — unreachable
+   * on the returned instance — so it is intentionally absent (TDA-003 M-2).
+   */
+  declare onModuleInit: () => Promise<void>;
+
   constructor(private readonly tenantContext: TenantContextService) {
     super();
 
@@ -73,14 +83,33 @@ export class PrismaService extends PrismaClient implements OnModuleInit {
     return extended;
   }
 
-  async onModuleInit(): Promise<void> {
-    await this.$connect();
-  }
-
   /**
    * Build the `$extends` `query` component that scopes tenant-owned models. The
    * tenant context is read at query time via the captured service (the
    * extension callback's `this` is not the PrismaService instance).
+   *
+   * ============================ SCOPING LIMITATIONS ========================
+   * This interceptor scopes ONLY **top-level** operations on tenant models
+   * (the `model` + `operation` pair Prisma reports to `$allOperations`). Two
+   * classes of access are therefore NOT auto-scoped and MUST be scoped by hand
+   * wherever they touch tenant tables (TDA-003 I-3):
+   *
+   *   1. **Nested writes** — relation writes embedded in another model's
+   *      payload, e.g. `prisma.user.create({ data: { trades: { create: … } } })`
+   *      or `{ trades: { connect: { id } } }`. Prisma runs these as part of the
+   *      PARENT operation, so the extension never sees a `Trade` op and cannot
+   *      stamp/scope `userId`. Always write tenant rows via their own top-level
+   *      delegate (`prisma.trade.create(…)`) so this interceptor applies.
+   *
+   *   2. **Raw queries** — `$queryRaw` / `$executeRaw` / `$queryRawUnsafe` /
+   *      `$executeRawUnsafe`. These bypass the model layer entirely; any raw SQL
+   *      against a tenant table must include its own `WHERE "userId" = …` guard.
+   *
+   * No such usage exists today (grep-verified across the API), but new code must
+   * honour these limits or it reopens the cross-tenant hole this interceptor
+   * closes. The extension still **fails safe** for the operations it does see: a
+   * tenant-model op it cannot confidently scope throws rather than run unscoped.
+   * =========================================================================
    */
   private buildTenantScopingExtension() {
     const tenantContext = this.tenantContext;

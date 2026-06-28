@@ -37,14 +37,47 @@ export class TenantContextService {
    * Run `fn` with the tenant context cleared (§5 explicit bypass), then restore
    * the previous value. Lets an authenticated admin action deliberately touch
    * data unscoped without leaking that bypass to the rest of the request.
+   *
+   * The bypass works in the **same CLS store** (it mutates the shared value, not
+   * a nested `cls.run` scope), so restoration must wait for `fn` to actually
+   * finish. When `fn` returns a promise — the common case, since the bypassed
+   * work is an async Prisma query whose tenant context is read only once the
+   * query runs — restoring synchronously would re-arm scoping before the query
+   * executes, silently defeating the bypass. So for thenables we restore after
+   * the promise settles; for synchronous `fn` we restore immediately.
    */
   runWithoutTenant<T>(fn: () => T): T {
     const previous = this.cls.get<TenantContext | undefined>(TENANT_KEY);
     this.cls.set(TENANT_KEY, undefined);
-    try {
-      return fn();
-    } finally {
+    const restore = (): void => {
       this.cls.set(TENANT_KEY, previous);
+    };
+
+    let result: T;
+    try {
+      result = fn();
+    } catch (err) {
+      restore();
+      throw err;
     }
+
+    if (
+      result != null &&
+      typeof (result as { then?: unknown }).then === 'function'
+    ) {
+      return (result as unknown as Promise<unknown>).then(
+        (value) => {
+          restore();
+          return value;
+        },
+        (err) => {
+          restore();
+          throw err;
+        },
+      ) as unknown as T;
+    }
+
+    restore();
+    return result;
   }
 }
