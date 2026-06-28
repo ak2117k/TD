@@ -5,6 +5,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { SYSTEM_USER_ID } from '../../../common/tenant/tenant.constants';
 import { UpdateSettingsDto } from '../dto/settings.dto';
 import { UserSettings } from '@prisma/client';
 import {
@@ -39,8 +40,11 @@ export class SettingsService {
 
     if (!settings) {
       this.logger.log('No settings found, creating defaults');
+      // Default ("global") settings row — UserSettings.userId is `@unique`, and
+      // ADMIN's row is the de-facto global one until per-user settings land.
+      // Stamp the ADMIN owner so the NOT NULL userId column (TDA-001) is met.
       settings = await this.prisma.userSettings.create({
-        data: DEFAULT_SETTINGS,
+        data: { ...DEFAULT_SETTINGS, userId: SYSTEM_USER_ID },
       });
     }
 
@@ -106,7 +110,7 @@ export class SettingsService {
     this.logger.log('Settings reset to defaults');
 
     return this.prisma.userSettings.create({
-      data: DEFAULT_SETTINGS,
+      data: { ...DEFAULT_SETTINGS, userId: SYSTEM_USER_ID },
     });
   }
 

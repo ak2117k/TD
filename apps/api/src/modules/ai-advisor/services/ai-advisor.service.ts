@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { SYSTEM_USER_ID } from '../../../common/tenant/tenant.constants';
 import { firstValueFrom } from 'rxjs';
 
 export interface AIResponse {
@@ -780,6 +781,9 @@ export class AIAdvisorService {
       // Store analysis in DB
       await this.prisma.aITradeAnalysis.create({
         data: {
+          // Engine-generated analysis runs with no tenant context → stamp the
+          // ADMIN owner so the NOT NULL userId column (TDA-001) is satisfied.
+          userId: SYSTEM_USER_ID,
           tradeId,
           analysis: JSON.stringify(response.data.analysis),
           suggestions: JSON.stringify(

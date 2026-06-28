@@ -3,6 +3,7 @@ import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { SYSTEM_USER_ID } from '../../../common/tenant/tenant.constants';
 import { firstValueFrom } from 'rxjs';
 
 export interface WeeklyReport {
@@ -179,6 +180,9 @@ export class WeeklyReportService {
     // Store in database
     const report = await this.prisma.aIWeeklyReport.create({
       data: {
+        // Engine-generated report runs with no tenant context → stamp the ADMIN
+        // owner so the NOT NULL userId column (TDA-001) is satisfied.
+        userId: SYSTEM_USER_ID,
         weekStart,
         weekEnd,
         summary: summaryParts.join(' '),

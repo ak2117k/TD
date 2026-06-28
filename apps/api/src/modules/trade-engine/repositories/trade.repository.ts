@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma, TradeEventType } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { SYSTEM_USER_ID } from '../../../common/tenant/tenant.constants';
 import { Trade, TradeEvent, DailyPerformance } from '@prisma/client';
 import { TradeFilterDto, DailyPerformanceData } from '../dto/trade.dto';
 
@@ -68,6 +69,10 @@ export class TradeRepository {
     const { contextSnapshot, ...rest } = data;
     return this.prisma.trade.create({
       data: {
+        // No tenant context on the engine path → stamp the ADMIN owner so the
+        // NOT NULL userId column (TDA-001) is satisfied (the interceptor only
+        // stamps when a request context is active).
+        userId: SYSTEM_USER_ID,
         ...rest,
         // Prisma Json columns require explicit handling: undefined/null
         // both leave the column empty, but `null` passes through cleanly
@@ -252,6 +257,10 @@ export class TradeRepository {
         capitalDeployed: data.capitalDeployed,
       },
       create: {
+        // DailyPerformance.date is `@unique` (not `@@unique([userId, date])`),
+        // so the `where` needs no userId; only the engine (ADMIN) writes this
+        // row. Stamp the owner so the NOT NULL userId column is satisfied.
+        userId: SYSTEM_USER_ID,
         date: data.date,
         totalPnl: data.totalPnl,
         realizedPnl: data.realizedPnl,

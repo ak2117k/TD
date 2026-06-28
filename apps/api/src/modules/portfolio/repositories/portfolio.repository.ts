@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { SYSTEM_USER_ID } from '../../../common/tenant/tenant.constants';
 
 @Injectable()
 export class PortfolioRepository {
@@ -240,7 +241,10 @@ export class PortfolioRepository {
     return this.prisma.dailyPerformance.upsert({
       where: { date },
       update: data,
-      create: { date, ...data },
+      // DailyPerformance.date is `@unique`, so the `where` needs no userId; only
+      // the engine (ADMIN) writes this row. Stamp the owner so the NOT NULL
+      // userId column (TDA-001) is satisfied on the no-context engine path.
+      create: { userId: SYSTEM_USER_ID, date, ...data },
     });
   }
 

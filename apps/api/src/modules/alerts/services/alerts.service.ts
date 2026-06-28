@@ -6,6 +6,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { SYSTEM_USER_ID } from '../../../common/tenant/tenant.constants';
 import {
   CreateAlertDto,
   UpdateAlertDto,
@@ -55,6 +56,9 @@ export class AlertsService {
 
     return this.prisma.alert.create({
       data: {
+        // Created outside an authenticated tenant context → stamp the ADMIN
+        // owner so the NOT NULL userId column (TDA-001) is satisfied.
+        userId: SYSTEM_USER_ID,
         type: dto.type,
         condition: dto.condition,
         value: dto.value,

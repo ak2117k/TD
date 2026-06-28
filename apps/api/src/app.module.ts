@@ -58,6 +58,9 @@ import { SellFuturesModule } from './modules/sell-futures-track/sell-futures.mod
     // Request-scoped CLS store (TDA-003). Mounted as middleware so the store
     // exists BEFORE guards run, letting the TenantContextInterceptor populate it
     // from req.user after JwtAuthGuard authenticates the request.
+    // `global: true` so ClsService is injectable outside AppModule — notably in
+    // the @Global TenantModule's TenantContextService (without it the app fails to
+    // boot with "ClsService not available in TenantModule").
     ClsModule.forRoot({ global: true, middleware: { mount: true } }),
 
     // Shared tenant context (TDA-003) — provides/exports TenantContextService
