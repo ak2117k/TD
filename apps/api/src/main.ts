@@ -1,3 +1,6 @@
+// MUST be the first import: loads the repo-root .env (JWT_SECRET, DATABASE_URL)
+// into process.env before any other module is evaluated. See load-env.ts.
+import './load-env';
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { IoAdapter } from '@nestjs/platform-socket.io';
