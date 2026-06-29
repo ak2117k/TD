@@ -1,44 +1,33 @@
+import api from './api';
 import type { WatchEntry, WatchEntryWithEvents, WatchStatus } from '../types/watch.types';
 
-const API_BASE = (import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:4001');
-
-async function asJson<T>(res: Response): Promise<T> {
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`${res.status} ${res.statusText}${text ? ' — ' + text : ''}`);
-  }
-  return res.json() as Promise<T>;
-}
-
+// Uses the shared authenticated axios client (`api`): attaches the Bearer
+// token, refreshes on 401, and routes through the Vite /api proxy. Previously
+// these were raw fetch() calls to API_BASE, which carried no auth token and so
+// 401'd under the global JwtAuthGuard.
 export const watchApi = {
   async list(status?: WatchStatus, date?: string): Promise<WatchEntry[]> {
-    const params = new URLSearchParams();
-    if (status) params.set('status', status);
-    if (date) params.set('date', date);
-    return asJson(await fetch(`${API_BASE}/api/watch?${params.toString()}`));
+    const res = await api.get<WatchEntry[]>('/watch', { params: { status, date } });
+    return res.data;
   },
 
   async get(id: string): Promise<WatchEntryWithEvents> {
-    return asJson(await fetch(`${API_BASE}/api/watch/${id}`));
+    const res = await api.get<WatchEntryWithEvents>(`/watch/${id}`);
+    return res.data;
   },
 
   async execute(id: string, mode: 'paper' | 'live', quantity?: number) {
-    return asJson(await fetch(`${API_BASE}/api/watch/${id}/execute`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode, quantity }),
-    }));
+    const res = await api.post(`/watch/${id}/execute`, { mode, quantity });
+    return res.data;
   },
 
   async dismiss(id: string) {
-    return asJson(await fetch(`${API_BASE}/api/watch/${id}/dismiss`, { method: 'POST' }));
+    const res = await api.post(`/watch/${id}/dismiss`);
+    return res.data;
   },
 
   async close(id: string, reason: string) {
-    return asJson(await fetch(`${API_BASE}/api/watch/${id}/close`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reason }),
-    }));
+    const res = await api.post(`/watch/${id}/close`, { reason });
+    return res.data;
   },
 };

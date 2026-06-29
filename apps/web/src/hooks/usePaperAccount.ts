@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
-
-const API_BASE = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:4001';
+import api from '../services/api';
 
 export interface PaperAccount {
   startingCapital: number;
@@ -23,11 +22,9 @@ export function usePaperAccount(pollMs = 5000) {
     let alive = true;
     const fetchOnce = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/trades/paper-account`);
-        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-        const data = (await res.json()) as PaperAccount;
+        const res = await api.get<PaperAccount>('/trades/paper-account');
         if (alive) {
-          setAccount(data);
+          setAccount(res.data);
           setError(null);
         }
       } catch (e) {
