@@ -40,29 +40,40 @@ describe('ChartinkIngestService', () => {
     };
   }
 
-  it('parses stocks + trigger_prices into parallel pairs and enqueues', async () => {
+  it('parses stocks + trigger_prices and fans out ONE process-hit job per hit', async () => {
     await service.ingest(dto());
     expect(repo.upsertScanner).toHaveBeenCalledTimes(1);
     expect(repo.createAlert).toHaveBeenCalledTimes(1);
-    expect(queue.add).toHaveBeenCalledTimes(1);
-    const job = queue.add.mock.calls[0][1];
-    expect(job).toMatchObject({
-      alertId: 'alert-1',
-      hits: [
-        { symbol: 'RELIANCE', hitPrice: 1467.4 },
-        { symbol: 'INFY', hitPrice: 1612.0 },
-        { symbol: 'TCS', hitPrice: 3890.5 },
-      ],
-    });
+    // One 'process-hit' job per stock (fan-out), not a single 'process' job.
+    expect(queue.add).toHaveBeenCalledTimes(3);
+    const names = queue.add.mock.calls.map((c) => c[0]);
+    expect(names).toEqual(['process-hit', 'process-hit', 'process-hit']);
+    const jobs = queue.add.mock.calls.map((c) => c[1]);
+    expect(jobs).toEqual([
+      { alertId: 'alert-1', hit: { symbol: 'RELIANCE', hitPrice: 1467.4 }, scanName: 'Short term breakouts', scannerCategory: undefined },
+      { alertId: 'alert-1', hit: { symbol: 'INFY', hitPrice: 1612.0 }, scanName: 'Short term breakouts', scannerCategory: undefined },
+      { alertId: 'alert-1', hit: { symbol: 'TCS', hitPrice: 3890.5 }, scanName: 'Short term breakouts', scannerCategory: undefined },
+    ]);
   });
 
   it('trims whitespace around CSV entries', async () => {
     await service.ingest(dto({ stocks: ' RELIANCE , INFY ', trigger_prices: ' 1.0 , 2.0 ' }));
-    const hits = queue.add.mock.calls[0][1].hits;
+    const hits = queue.add.mock.calls.map((c) => c[1].hit);
     expect(hits).toEqual([
       { symbol: 'RELIANCE', hitPrice: 1.0 },
       { symbol: 'INFY', hitPrice: 2.0 },
     ]);
+  });
+
+  it('enqueues every per-hit job with priority 1 for an ANAND_SWING scanner', async () => {
+    repo.upsertScanner.mockResolvedValue({ id: 'scanner-1', category: 'ANAND_SWING' });
+    await service.ingest(dto({ stocks: 'RELIANCE,INFY', trigger_prices: '1.0,2.0' }));
+    expect(queue.add).toHaveBeenCalledTimes(2);
+    for (const call of queue.add.mock.calls) {
+      expect(call[0]).toBe('process-hit');
+      expect(call[1].scannerCategory).toBe('ANAND_SWING');
+      expect(call[2]).toEqual({ priority: 1 });
+    }
   });
 
   it('throws when stocks and trigger_prices have different lengths', async () => {
@@ -93,7 +104,9 @@ describe('ChartinkIngestService', () => {
 
     expect(repo.createAlert).toHaveBeenCalledTimes(1);
     expect(repo.upsertScanner).toHaveBeenCalledTimes(1);
-    expect(queue.add).toHaveBeenCalledTimes(1);
+    // 3 stocks in the default dto → 3 per-hit jobs on the first ingest, none
+    // on the deduped second.
+    expect(queue.add).toHaveBeenCalledTimes(3);
   });
 
   it('creates new alert when payload differs in any tracked field', async () => {

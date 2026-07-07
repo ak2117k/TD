@@ -25,6 +25,7 @@ import {
 } from '../../sell-futures-track/services/sell-futures-paper-account.service';
 import { SellFuturesRejectionRepository, SellFuturesRejectionReason } from '../../sell-futures-track/repositories/sell-futures-rejection.repository';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
+import { isHullScanner } from '../../ungated-track/services/ungated-scanner-filter';
 
 interface Hit {
   symbol: string;
@@ -226,6 +227,37 @@ export class ChartinkProcessService {
           `[breakout-swing] createFromAlert skipped for ${hit.symbol}: ${err instanceof Error ? err.message : err}`,
         );
       }
+    }
+
+    // === 1d. HULL FAST-PATH (ungated-only) ===
+    // The Hull scanner ("Anand 100Hull >200 hull") fires ~180 stocks. Running
+    // each through the rate-limited direction gate + full scoring makes a single
+    // alert take ~75 min and STALL the Bull job (job never completes → 0 setups →
+    // no Hull signal anywhere). The ungated track is the ONLY consumer of Hull
+    // signals (Hull-only filter) and is score-free + BUY-only, and the Hull
+    // 100>200 condition is bullish by construction — so admit Hull hits to ungated
+    // here with side=BUY, then RETURN. This lands the entry in ~1s and deliberately
+    // skips the direction gate, scoring, and the gated/adaptive/sell-futures tracks,
+    // which do not consume Hull signals. Placed AFTER the Anand/breakout block (1b)
+    // so that if a "hull"-named scanner is ever tagged ANAND_SWING it still feeds
+    // those tracks first (today the Hull scanner is category=OTHER, so 1b is a
+    // no-op for it and this ordering is behaviour-neutral). AWAITED (not fire-and-
+    // forget) so the short job stays alive until the entry is persisted —
+    // restart-safe. The 15:00 IST entry-window gate (step 0) already ran above.
+    if (isHullScanner(scanName ?? null)) {
+      await this.runUngatedShadow({
+        alertId,
+        setupId: null,
+        symbol: hit.symbol,
+        token: instrument.token,
+        exchange: 'NSE',
+        side: 'BUY',
+        initialPrice: hit.hitPrice,
+        initialScore: 0,
+        initialBreakdown: {} as import('@prisma/client').Prisma.InputJsonValue,
+        scannerName: scanName ?? null,
+      }, hit.hitPrice);
+      return;
     }
 
     // === 2. DIRECTION GATE (sector trend, with stock-trend fallback) ===
@@ -516,9 +548,15 @@ export class ChartinkProcessService {
   }
 
   /**
-   * Ungated shadow track entry, run fire-and-forget (FIX 3). Preserves the
-   * original error handling: known rejection reasons are recorded to the
-   * ungated-rejection repository, everything else is logged.
+   * Ungated shadow track entry. Preserves the original error handling: known
+   * rejection reasons are recorded to the ungated-rejection repository,
+   * everything else is logged.
+   *
+   * Guaranteed never to throw — the rejection-record DB write is itself wrapped
+   * so a repository failure can't escape. Callers rely on this both ways: the
+   * scored path (step 5) runs it fire-and-forget (an unhandled rejection would
+   * otherwise surface as a process warning), and the Hull fast-path (step 1d)
+   * AWAITs it as the job's only work (a throw would fail an otherwise-good job).
    */
   private async runUngatedShadow(
     input: Parameters<UngatedWatchService['createFromAlert']>[0],
@@ -529,10 +567,16 @@ export class ChartinkProcessService {
     } catch (err) {
       const reason = this.mapUngatedError(err);
       if (reason) {
-        await this.ungatedRejections.record({
-          alertId: input.alertId, symbol: input.symbol, reason,
-          score: input.initialScore, hitPrice,
-        });
+        try {
+          await this.ungatedRejections.record({
+            alertId: input.alertId, symbol: input.symbol, reason,
+            score: input.initialScore, hitPrice,
+          });
+        } catch (recErr) {
+          this.logger.warn(
+            `[ungated] failed to record rejection for ${input.symbol}: ${recErr instanceof Error ? recErr.message : recErr}`,
+          );
+        }
       } else {
         this.logger.warn(`[ungated] ${input.symbol}: ${err instanceof Error ? err.message : err}`);
       }

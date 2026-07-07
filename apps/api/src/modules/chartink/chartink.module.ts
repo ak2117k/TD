@@ -35,7 +35,16 @@ import { SellFuturesModule } from '../sell-futures-track/sell-futures.module';
     AnandDualTrackModule,
     BreakoutSwingTrackModule,
     SellFuturesModule,
-    BullModule.registerQueue({ name: 'chartink-process' }),
+    // Long-running, rate-limited per-stock jobs need a lock LONGER than Bull's
+    // 30s default (a job that out-runs the lock is spuriously flagged
+    // "stalled" and re-run/failed). Bounded retention (removeOnComplete/Fail)
+    // caps the completed+failed sets so the failed-job pileup we just
+    // diagnosed (81 stalled jobs) can never grow unbounded again.
+    BullModule.registerQueue({
+      name: 'chartink-process',
+      settings: { lockDuration: 120_000, stalledInterval: 30_000, maxStalledCount: 2 },
+      defaultJobOptions: { removeOnComplete: 500, removeOnFail: 500 },
+    }),
   ],
   controllers: [ChartinkWebhookController, ChartinkController],
   providers: [

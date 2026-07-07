@@ -864,6 +864,69 @@ describe('ChartinkProcessService', () => {
     });
   });
 
+  // ─── Hull fast-path (ungated-only, skips gate + scoring) ───────────────────
+  // A "hull" scanner name admits the hit to the ungated track IMMEDIATELY with
+  // side=BUY and RETURNS — the direction gate (nseSector) and scoring never run.
+  // This keeps a ~180-stock Hull alert's per-hit job to ~1s so it can't stall.
+  describe('ChartinkProcessService — Hull fast-path', () => {
+    beforeEach(() => {
+      mdRepo.getInstrumentBySymbol.mockResolvedValue({ id: 'inst-1', token: '2885', exchange: 'NSE' });
+      mdRepo.getInstrumentByToken.mockResolvedValue({ id: 'sec-1', token: '99926019', exchange: 'NSE' });
+      angelOne.getHistoricalData.mockResolvedValue(UP_CANDLES);
+    });
+
+    it('admits a hull-scanner hit to ungated with side=BUY and returns before the gate/scoring', async () => {
+      await service.processOne('alert-hull-1', { symbol: 'RELIANCE', hitPrice: 2885 }, 'Anand 100Hull >200 hull');
+
+      expect(ungatedWatch.createFromAlert).toHaveBeenCalledWith(expect.objectContaining({
+        symbol: 'RELIANCE',
+        token: '2885',
+        exchange: 'NSE',
+        side: 'BUY',
+        initialPrice: 2885,
+        scannerName: 'Anand 100Hull >200 hull',
+      }));
+      // Returned early: the direction gate and scoring were never touched.
+      expect(nseSector.getSectorIndexForSymbol).not.toHaveBeenCalled();
+      expect(scoring.score).not.toHaveBeenCalled();
+      // And the gated/adaptive tracks did not run either.
+      expect(repo.createAlertSetup).not.toHaveBeenCalled();
+      expect(adaptiveStopWatch.createFromAlert).not.toHaveBeenCalled();
+    });
+
+    it('does NOT trigger the fast-path for a non-Hull scanner (scoring path proceeds)', async () => {
+      scoring.score.mockResolvedValue({ score: 70, lotCount: 2, checks: [macd5mCheck(true), supertrendCheck(true)] });
+
+      await service.processOne('alert-nohull-1', { symbol: 'RELIANCE', hitPrice: 2885 }, 'Short term breakouts');
+
+      // The direction gate + scoring ran (no early return).
+      expect(nseSector.getSectorIndexForSymbol).toHaveBeenCalled();
+      expect(scoring.score).toHaveBeenCalled();
+      expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({ kind: 'setup' }));
+    });
+
+    // Ordering guard: the fast-path is placed AFTER the Anand/breakout block (1b)
+    // so a "hull"-named scanner that is ALSO tagged ANAND_SWING still feeds the
+    // dual-track + breakout-swing before the ungated return. (Today the live Hull
+    // scanner is category=OTHER, so 1b is a no-op for it — but this locks the
+    // ordering against a future re-tag that would otherwise be a silent regression.)
+    it('hull + ANAND_SWING: still fires dual-track + breakout BEFORE the ungated return', async () => {
+      await service.processOne(
+        'alert-hull-anand', { symbol: 'RELIANCE', hitPrice: 2885 },
+        'Anand 100Hull >200 hull', 'ANAND_SWING',
+      );
+
+      // 1b ran (dual-track + breakout) even though the hit is Hull.
+      expect(anandDualTrack.createEntries).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'RELIANCE' }));
+      expect(breakoutSwing.createFromAlert).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'RELIANCE' }));
+      // 1d ran (ungated admission, side=BUY).
+      expect(ungatedWatch.createFromAlert).toHaveBeenCalledWith(expect.objectContaining({ side: 'BUY' }));
+      // Still returned before the gate + scoring.
+      expect(nseSector.getSectorIndexForSymbol).not.toHaveBeenCalled();
+      expect(scoring.score).not.toHaveBeenCalled();
+    });
+  });
+
   // ─── Adaptive-Stop shadow track fork (Stage-4 hook on admitted entries) ─────
   // The adaptive-stop track mirrors the ungated fork but fires ONLY on the
   // policy.admitted (kind=setup) path, after the watch wiring. Its createFromAlert

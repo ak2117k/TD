@@ -18,6 +18,13 @@ export interface ChartinkProcessJobData {
   hits: ParsedHit[];
 }
 
+export interface ChartinkProcessHitJobData {
+  alertId: string;
+  hit: ParsedHit;
+  scanName?: string;
+  scannerCategory?: string;
+}
+
 @Injectable()
 export class ChartinkIngestService {
   private readonly logger = new Logger(ChartinkIngestService.name);
@@ -35,7 +42,7 @@ export class ChartinkIngestService {
 
   constructor(
     private readonly repo: ChartinkRepository,
-    @InjectQueue('chartink-process') private readonly queue: Queue<ChartinkProcessJobData>,
+    @InjectQueue('chartink-process') private readonly queue: Queue<ChartinkProcessJobData | ChartinkProcessHitJobData>,
   ) {}
 
   async ingest(payload: ChartinkWebhookDto): Promise<{ alertId: string; hitCount: number }> {
@@ -76,10 +83,26 @@ export class ChartinkIngestService {
     // filter and creates entries at the very top of processOne — jumps ahead of
     // the high-volume OTHER-scanner backlog instead of waiting behind it.
     const isAnandSwing = scanner.category === 'ANAND_SWING';
-    await this.queue.add(
-      'process',
-      { alertId: alert.id, hits },
-      isAnandSwing ? { priority: 1 } : {},
+    // Fan out ONE Bull job per hit (not one job for the whole alert). A
+    // high-volume scanner (~180 stocks) run as a single serial job with
+    // rate-paced Angel fetches took ~75 min → Bull marked it "stalled" →
+    // moved to failed → ZERO setups created. Per-hit jobs each finish in
+    // seconds so nothing stalls, and the ANAND_SWING priority is preserved on
+    // every job so its dual-track still jumps the OTHER-scanner backlog.
+    const opts = isAnandSwing ? { priority: 1 } : {};
+    await Promise.all(
+      hits.map((hit) =>
+        this.queue.add(
+          'process-hit',
+          {
+            alertId: alert.id,
+            hit,
+            scanName: payload.scan_name,
+            scannerCategory: scanner.category,
+          },
+          opts,
+        ),
+      ),
     );
 
     this.logger.log(
